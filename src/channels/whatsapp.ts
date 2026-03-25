@@ -183,8 +183,17 @@ export class WhatsAppChannel implements Channel {
           const rawJid = msg.key.remoteJid;
           if (!rawJid || rawJid === 'status@broadcast') continue;
 
-          // Translate LID JID to phone JID if applicable
-          const chatJid = await this.translateJid(rawJid);
+          // Translate LID JID to phone JID if applicable.
+          // Prefer senderPn from the message key (available in newer WA protocol)
+          // since translateJid may fail to resolve LID→phone via signalRepository.
+          let chatJid = await this.translateJid(rawJid);
+          if (chatJid.endsWith('@lid') && (msg.key as any).senderPn) {
+            const pn = (msg.key as any).senderPn as string;
+            const phoneJid = pn.includes('@') ? pn : `${pn}@s.whatsapp.net`;
+            this.lidToPhoneMap[rawJid.split('@')[0].split(':')[0]] = phoneJid;
+            chatJid = phoneJid;
+            logger.info({ lidJid: rawJid, phoneJid }, 'Translated LID via senderPn');
+          }
 
           const timestamp = new Date(
             Number(msg.messageTimestamp) * 1000,
@@ -235,6 +244,12 @@ export class WhatsAppChannel implements Channel {
               is_from_me: fromMe,
               is_bot_message: isBotMessage,
             });
+          } else if (chatJid !== rawJid) {
+            // LID translation produced a JID that doesn't match any registered group
+            logger.warn(
+              { rawJid, translatedJid: chatJid, registeredJids: Object.keys(groups) },
+              'Message JID not found in registered groups after translation',
+            );
           }
         } catch (err) {
           logger.error(
