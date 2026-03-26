@@ -48,6 +48,8 @@ export class WhatsAppChannel implements Channel {
   private groupSyncTimerStarted = false;
   /** Cache of recently sent messages for retry requests (max 256 entries). */
   private sentMessageCache = new Map<string, proto.IMessage>();
+  /** Bot's LID user ID (e.g. "80355281346633") for normalizing group mentions. */
+  private botLidUser?: string;
 
   private opts: WhatsAppChannelOpts;
 
@@ -151,6 +153,7 @@ export class WhatsAppChannel implements Channel {
           const lidUser = this.sock.user.lid?.split(':')[0];
           if (lidUser && phoneUser) {
             this.lidToPhoneMap[lidUser] = `${phoneUser}@s.whatsapp.net`;
+            this.botLidUser = lidUser;
             logger.debug({ lidUser, phoneUser }, 'LID to phone mapping set');
           }
         }
@@ -225,12 +228,18 @@ export class WhatsAppChannel implements Channel {
           // Only deliver full message for registered groups
           const groups = this.opts.registeredGroups();
           if (groups[chatJid]) {
-            const content =
+            let content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
               normalized.imageMessage?.caption ||
               normalized.videoMessage?.caption ||
               '';
+
+            // WhatsApp group mentions use the LID in raw text (e.g. "@80355281346633")
+            // instead of the display name. Normalize to @AssistantName for trigger matching.
+            if (this.botLidUser && content.includes(`@${this.botLidUser}`)) {
+              content = content.replace(`@${this.botLidUser}`, `@${ASSISTANT_NAME}`);
+            }
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
             if (!content) continue;
