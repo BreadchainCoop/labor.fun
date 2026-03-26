@@ -5,10 +5,12 @@ import path from 'path';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  WAMessageKey,
   WASocket,
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   normalizeMessageContent,
+  proto,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 
@@ -44,6 +46,8 @@ export class WhatsAppChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private groupSyncTimerStarted = false;
+  /** Cache of recently sent messages for retry requests (max 256 entries). */
+  private sentMessageCache = new Map<string, proto.IMessage>();
 
   private opts: WhatsAppChannelOpts;
 
@@ -79,6 +83,15 @@ export class WhatsAppChannel implements Channel {
       printQRInTerminal: false,
       logger,
       browser: Browsers.macOS('Chrome'),
+      getMessage: async (key: WAMessageKey) => {
+        const cached = this.sentMessageCache.get(key.id || '');
+        if (cached) {
+          logger.debug({ id: key.id }, 'getMessage: returning cached message for retry');
+          return cached;
+        }
+        logger.debug({ id: key.id }, 'getMessage: no cached message found');
+        return undefined;
+      },
     });
 
     this.sock.ev.on('connection.update', (update) => {
@@ -279,7 +292,15 @@ export class WhatsAppChannel implements Channel {
       return;
     }
     try {
-      await this.sock.sendMessage(jid, { text: prefixed });
+      const sent = await this.sock.sendMessage(jid, { text: prefixed });
+      // Cache for retry requests (recipient may ask us to re-encrypt)
+      if (sent?.key?.id && sent.message) {
+        this.sentMessageCache.set(sent.key.id, sent.message);
+        if (this.sentMessageCache.size > 256) {
+          const oldest = this.sentMessageCache.keys().next().value!;
+          this.sentMessageCache.delete(oldest);
+        }
+      }
       logger.info({ jid, length: prefixed.length }, 'Message sent');
     } catch (err) {
       // If send fails, queue it for retry on reconnect
@@ -398,7 +419,10 @@ export class WhatsAppChannel implements Channel {
       while (this.outgoingQueue.length > 0) {
         const item = this.outgoingQueue.shift()!;
         // Send directly — queued items are already prefixed by sendMessage
-        await this.sock.sendMessage(item.jid, { text: item.text });
+        const sent = await this.sock.sendMessage(item.jid, { text: item.text });
+        if (sent?.key?.id && sent.message) {
+          this.sentMessageCache.set(sent.key.id, sent.message);
+        }
         logger.info(
           { jid: item.jid, length: item.text.length },
           'Queued message sent',
