@@ -218,76 +218,19 @@ export class WhatsAppChannel implements Channel {
       if (lidUser && jid) {
         this.setLidPhoneMapping(lidUser, jid);
       }
-      logger.info({ lid, jid }, 'WA chats.phoneNumberShare');
     });
 
-    this.sock.ev.on('messages.update', (updates) => {
-      for (const update of updates) {
-        if (!this.shouldLogMessageDebug(update.key)) continue;
-        logger.info(
-          {
-            event: 'messages.update',
-            remoteJid: update.key?.remoteJid,
-            participant: update.key?.participant,
-            fromMe: update.key?.fromMe || false,
-            id: update.key?.id,
-            updateKeys: Object.keys(update.update || {}),
-            status: update.update?.status,
-          },
-          'WA message event',
-        );
-      }
-    });
-
-    this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      logger.info({ type, count: messages.length }, 'WA messages.upsert');
+    this.sock.ev.on('messages.upsert', async ({ messages }) => {
       for (const msg of messages) {
         try {
-          const normalized = msg.message ? normalizeMessageContent(msg.message) : undefined;
-          const logCandidate = this.shouldLogMessageDebug(msg.key);
-
-          if (logCandidate) {
-            logger.info(
-              {
-                event: 'messages.upsert',
-                type,
-                ...this.describeMessage(msg, normalized),
-              },
-              'WA message candidate',
-            );
-          }
-
-          if (!msg.message) {
-            if (logCandidate) {
-              logger.info(
-                { id: msg.key?.id, remoteJid: msg.key?.remoteJid },
-                'WA message skipped: no message payload',
-              );
-            }
-            continue;
-          }
+          if (!msg.message) continue;
           // Unwrap container types (viewOnceMessageV2, ephemeralMessage,
           // editedMessage, etc.) so that conversation, extendedTextMessage,
           // imageMessage, etc. are accessible at the top level.
-          if (!normalized) {
-            if (logCandidate) {
-              logger.info(
-                { id: msg.key?.id, remoteJid: msg.key?.remoteJid },
-                'WA message skipped: normalizeMessageContent returned empty',
-              );
-            }
-            continue;
-          }
+          const normalized = normalizeMessageContent(msg.message);
+          if (!normalized) continue;
           const rawJid = msg.key.remoteJid;
-          if (!rawJid || rawJid === 'status@broadcast') {
-            if (logCandidate) {
-              logger.info(
-                { id: msg.key?.id, remoteJid: rawJid },
-                'WA message skipped: invalid remote JID',
-              );
-            }
-            continue;
-          }
+          if (!rawJid || rawJid === 'status@broadcast') continue;
 
           // Translate LID JID to phone JID if applicable.
           // Prefer senderPn from the message key (available in newer WA protocol)
@@ -335,20 +278,7 @@ export class WhatsAppChannel implements Channel {
             }
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
-            if (!content) {
-              if (logCandidate) {
-                logger.info(
-                  {
-                    id: msg.key?.id,
-                    remoteJid: rawJid,
-                    translatedJid: chatJid,
-                    normalizedTypes: Object.keys(normalized),
-                  },
-                  'WA message skipped: no text content',
-                );
-              }
-              continue;
-            }
+            if (!content) continue;
 
             const sender = msg.key.participant || msg.key.remoteJid || '';
             const senderName = msg.pushName || sender.split('@')[0];
@@ -372,37 +302,11 @@ export class WhatsAppChannel implements Channel {
               is_from_me: fromMe,
               is_bot_message: isBotMessage,
             });
-
-            if (logCandidate) {
-              logger.info(
-                {
-                  id: msg.key?.id,
-                  rawJid,
-                  translatedJid: chatJid,
-                  sender,
-                  senderName,
-                  fromMe,
-                  isBotMessage,
-                  content,
-                },
-                'WA message delivered to NanoClaw',
-              );
-            }
           } else if (chatJid !== rawJid) {
             // LID translation produced a JID that doesn't match any registered group
             logger.warn(
               { rawJid, translatedJid: chatJid, registeredJids: Object.keys(groups) },
               'Message JID not found in registered groups after translation',
-            );
-          } else if (logCandidate) {
-            logger.info(
-              {
-                id: msg.key?.id,
-                rawJid,
-                translatedJid: chatJid,
-                registeredJids: Object.keys(groups),
-              },
-              'WA message skipped: chat not registered',
             );
           }
         } catch (err) {
@@ -444,20 +348,6 @@ export class WhatsAppChannel implements Channel {
       }
       logger.info({ jid, length: prefixed.length }, 'Message sent');
     } catch (err) {
-      if (jid.endsWith('@g.us')) {
-        const metadata = await this.getNormalizedGroupMetadata(jid, true).catch(
-          () => undefined,
-        );
-        logger.warn(
-          {
-            jid,
-            participantCount: metadata?.participants.length,
-            participants:
-              metadata?.participants.map((participant) => participant.id) || [],
-          },
-          'WA group send context',
-        );
-      }
       // If send fails, queue it for retry on reconnect
       this.outgoingQueue.push({ jid, text: prefixed });
       logger.warn(
@@ -603,37 +493,6 @@ export class WhatsAppChannel implements Channel {
       expiresAt: Date.now() + 60_000,
     });
     return normalized;
-  }
-
-  private shouldLogMessageDebug(
-    key?: Partial<WAMessageKey> & { remoteJid?: string | null; participant?: string | null },
-  ): boolean {
-    return Boolean(
-      key?.fromMe ||
-      key?.remoteJid?.endsWith('@s.whatsapp.net') ||
-      key?.remoteJid?.endsWith('@lid') ||
-      key?.participant?.endsWith('@s.whatsapp.net') ||
-      key?.participant?.endsWith('@lid'),
-    );
-  }
-
-  private describeMessage(
-    msg: ProtoTypes.IWebMessageInfo,
-    normalized?: ProtoTypes.IMessage,
-  ): Record<string, unknown> {
-    return {
-      id: msg.key?.id,
-      remoteJid: msg.key?.remoteJid,
-      participant: msg.key?.participant,
-      fromMe: msg.key?.fromMe || false,
-      senderPn: (msg.key as { senderPn?: string })?.senderPn,
-      pushName: msg.pushName,
-      stubType: msg.messageStubType,
-      status: msg.status,
-      hasMessage: Boolean(msg.message),
-      messageTypes: msg.message ? Object.keys(msg.message) : [],
-      normalizedTypes: normalized ? Object.keys(normalized) : [],
-    };
   }
 
   private async flushOutgoingQueue(): Promise<void> {
