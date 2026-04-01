@@ -16,6 +16,19 @@ import type { GroupMetadata, WAMessageKey, WASocket, proto as ProtoTypes } from 
 import { createRequire } from 'module';
 const { proto } = createRequire(import.meta.url)('@whiskeysockets/baileys') as { proto: typeof ProtoTypes };
 
+// TODO: Migrate to Baileys 7.x and remove this monkey-patch.
+// Fix Baileys 6.x bug: getPlatformId sends charCode (49) instead of enum value (1).
+// Fixed in Baileys 7.x but not backported. Without this, pairing codes fail with
+// "couldn't link device" because WhatsApp receives an invalid platform ID.
+import * as generics from '@whiskeysockets/baileys/lib/Utils/generics.js';
+(generics as any).getPlatformId = (browser: string): string => {
+  const platformType =
+    proto.DeviceProps.PlatformType[
+      browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType
+    ];
+  return platformType ? platformType.toString() : '1';
+};
+
 import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
