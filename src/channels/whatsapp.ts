@@ -11,17 +11,27 @@ import {
   normalizeMessageContent,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
-import type { GroupMetadata, WAMessageKey, WASocket, proto as ProtoTypes } from '@whiskeysockets/baileys';
+import type {
+  GroupMetadata,
+  WAMessageKey,
+  WASocket,
+  proto as ProtoTypes,
+} from '@whiskeysockets/baileys';
 // proto is not statically analyzable as a named ESM export from this CJS module
 import { createRequire } from 'module';
-const { proto } = createRequire(import.meta.url)('@whiskeysockets/baileys') as { proto: typeof ProtoTypes };
+const { proto } = createRequire(import.meta.url)('@whiskeysockets/baileys') as {
+  proto: typeof ProtoTypes;
+};
 
 // TODO: Migrate to Baileys 7.x and remove this monkey-patch.
 // Fix Baileys 6.x bug: getPlatformId sends charCode (49) instead of enum value (1).
 // Fixed in Baileys 7.x but not backported. Without this, pairing codes fail with
 // "couldn't link device" because WhatsApp receives an invalid platform ID.
-import * as generics from '@whiskeysockets/baileys/lib/Utils/generics.js';
-(generics as any).getPlatformId = (browser: string): string => {
+// NOTE: Must use createRequire — ESM `import *` creates a read-only namespace.
+const _generics = createRequire(import.meta.url)(
+  '@whiskeysockets/baileys/lib/Utils/generics',
+) as Record<string, unknown>;
+_generics.getPlatformId = (browser: string): string => {
   const platformType =
     proto.DeviceProps.PlatformType[
       browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType
@@ -34,7 +44,12 @@ import {
   ASSISTANT_NAME,
   STORE_DIR,
 } from '../config.js';
-import { getLastGroupSync, getMessageContentById, setLastGroupSync, updateChatName } from '../db.js';
+import {
+  getLastGroupSync,
+  getMessageContentById,
+  setLastGroupSync,
+  updateChatName,
+} from '../db.js';
 import { logger } from '../logger.js';
 import pino from 'pino';
 
@@ -117,16 +132,23 @@ export class WhatsAppChannel implements Channel {
       getMessage: async (key: WAMessageKey) => {
         const cached = this.sentMessageCache.get(key.id || '');
         if (cached) {
-          logger.debug({ id: key.id }, 'getMessage: returning cached message for retry');
+          logger.debug(
+            { id: key.id },
+            'getMessage: returning cached message for retry',
+          );
           return cached;
         }
         // Fall back to DB lookup so WhatsApp can re-encrypt on retry.
         // Without this, self-chat messages show "waiting for this message".
-        const content = key.id && key.remoteJid
-          ? getMessageContentById(key.id, key.remoteJid)
-          : undefined;
+        const content =
+          key.id && key.remoteJid
+            ? getMessageContentById(key.id, key.remoteJid)
+            : undefined;
         if (content) {
-          logger.debug({ id: key.id }, 'getMessage: returning DB message for retry');
+          logger.debug(
+            { id: key.id },
+            'getMessage: returning DB message for retry',
+          );
           return proto.Message.fromObject({ conversation: content });
         }
         // Return empty message rather than undefined — prevents indefinite
@@ -257,7 +279,10 @@ export class WhatsAppChannel implements Channel {
               phoneJid,
             );
             chatJid = phoneJid;
-            logger.info({ lidJid: rawJid, phoneJid }, 'Translated LID via senderPn');
+            logger.info(
+              { lidJid: rawJid, phoneJid },
+              'Translated LID via senderPn',
+            );
           }
 
           const timestamp = new Date(
@@ -287,7 +312,10 @@ export class WhatsAppChannel implements Channel {
             // WhatsApp group mentions use the LID in raw text (e.g. "@80355281346633")
             // instead of the display name. Normalize to @AssistantName for trigger matching.
             if (this.botLidUser && content.includes(`@${this.botLidUser}`)) {
-              content = content.replace(`@${this.botLidUser}`, `@${ASSISTANT_NAME}`);
+              content = content.replace(
+                `@${this.botLidUser}`,
+                `@${ASSISTANT_NAME}`,
+              );
             }
 
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
@@ -318,7 +346,11 @@ export class WhatsAppChannel implements Channel {
           } else if (chatJid !== rawJid) {
             // LID translation produced a JID that doesn't match any registered group
             logger.warn(
-              { rawJid, translatedJid: chatJid, registeredJids: Object.keys(groups) },
+              {
+                rawJid,
+                translatedJid: chatJid,
+                registeredJids: Object.keys(groups),
+              },
               'Message JID not found in registered groups after translation',
             );
           }
@@ -449,7 +481,9 @@ export class WhatsAppChannel implements Channel {
 
     // Query Baileys' signal repository for the mapping
     try {
-      const pn = await (this.sock.signalRepository as any)?.lidMapping?.getPNForLID(jid);
+      const pn = await (
+        this.sock.signalRepository as any
+      )?.lidMapping?.getPNForLID(jid);
       if (pn) {
         const phoneJid = `${pn.split('@')[0].split(':')[0]}@s.whatsapp.net`;
         this.setLidPhoneMapping(lidUser, phoneJid);
@@ -493,7 +527,8 @@ export class WhatsAppChannel implements Channel {
     );
     const normalized = { ...metadata, participants };
     const mappedCount = participants.filter(
-      (participant, index) => participant.id !== metadata.participants[index]?.id,
+      (participant, index) =>
+        participant.id !== metadata.participants[index]?.id,
     ).length;
 
     logger.info(
