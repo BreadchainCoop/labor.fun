@@ -20,7 +20,25 @@ import {
   fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
+  proto,
 } from '@whiskeysockets/baileys';
+
+// Fix Baileys 6.x bug: getPlatformId sends charCode (49) instead of enum value (1).
+// Fixed in Baileys 7.x but not backported. Without this, pairing codes fail with
+// "couldn't link device" because WhatsApp receives an invalid platform ID.
+// NOTE: Must use createRequire — ESM `import *` creates a read-only namespace.
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+const _generics = _require(
+  '@whiskeysockets/baileys/lib/Utils/generics',
+) as Record<string, unknown>;
+_generics.getPlatformId = (browser: string): string => {
+  const platformType =
+    proto.DeviceProps.PlatformType[
+      browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType
+    ];
+  return platformType ? platformType.toString() : '1';
+};
 
 const AUTH_DIR = './store/auth';
 const QR_FILE = './store/qr-data.txt';

@@ -23,22 +23,6 @@ const { proto } = createRequire(import.meta.url)('@whiskeysockets/baileys') as {
   proto: typeof ProtoTypes;
 };
 
-// TODO: Migrate to Baileys 7.x and remove this monkey-patch.
-// Fix Baileys 6.x bug: getPlatformId sends charCode (49) instead of enum value (1).
-// Fixed in Baileys 7.x but not backported. Without this, pairing codes fail with
-// "couldn't link device" because WhatsApp receives an invalid platform ID.
-// NOTE: Must use createRequire — ESM `import *` creates a read-only namespace.
-const _generics = createRequire(import.meta.url)(
-  '@whiskeysockets/baileys/lib/Utils/generics',
-) as Record<string, unknown>;
-_generics.getPlatformId = (browser: string): string => {
-  const platformType =
-    proto.DeviceProps.PlatformType[
-      browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType
-    ];
-  return platformType ? platformType.toString() : '1';
-};
-
 import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
