@@ -62,8 +62,26 @@ tags: [tag1, tag2]
 | System | Used For | Access |
 |--------|----------|--------|
 | Markdown KB | People, tasks, calendar, artifacts, spaces | File read/write |
-| SQLite DB | Messages, chats, users, expenses | MCP tools + SQL |
+| SQLite DB | Messages, chats, users, expenses | Direct `sqlite3` + MCP tools |
 | Attachments | Photos, business cards, uploads | File read |
+
+### Reading message history (cooperative mode)
+
+You have read-write access to the SQLite DB at
+`/workspace/project/store/messages.db` (cooperative mode / `FLAT_ACCESS`,
+the default — every group, not just main). When someone asks about past
+messages, "what did X say", or to pull action items from a conversation,
+**query it directly — do not claim you lack message-history access.**
+`messages.timestamp` is a TEXT ISO-8601 string that sorts chronologically:
+
+```bash
+sqlite3 -readonly /workspace/project/store/messages.db \
+  "SELECT timestamp, sender_name, content FROM messages
+   WHERE chat_jid='<JID>' ORDER BY timestamp ASC LIMIT 2000;"
+```
+
+Full recipes (date ranges, keyword search): see
+`/workspace/project/rules/knowledge-base/storage.md`.
 
 ## Request Logging
 
