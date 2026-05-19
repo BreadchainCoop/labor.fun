@@ -69,6 +69,32 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
 );
 
+// Cooperative mode (flat access). When enabled, EVERY registered group is
+// treated as a privileged "main" group: read-write KB + SQLite store mounts
+// and full IPC authorization in every container, with no main/non-main
+// distinction. This intentionally removes the prompt-injection trust
+// boundary — every channel can read and mutate org-wide data and the RBAC
+// tables — so it is only safe when every channel is trusted-internal.
+//
+// Default ON (this install is a cooperative with equal access for all
+// members). Set FLAT_ACCESS=false to restore the sandboxed main/non-main
+// model. See docs/COOPERATIVE-MODE.md.
+export const FLAT_ACCESS = process.env.FLAT_ACCESS !== 'false';
+
+/**
+ * Whether a group runs with elevated (main-equivalent) privileges for the
+ * data-access plane: container mounts, IPC authorization, and snapshots.
+ * True for the designated main group always, and for every group when
+ * FLAT_ACCESS (cooperative mode) is enabled.
+ *
+ * NOTE: This governs data access only. Message-trigger behaviour (when the
+ * agent wakes up) and the host remote-control plane are deliberately NOT
+ * keyed off this — see docs/COOPERATIVE-MODE.md.
+ */
+export function isPrivilegedGroup(group: { isMain?: boolean }): boolean {
+  return group.isMain === true || FLAT_ACCESS;
+}
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

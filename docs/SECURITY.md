@@ -9,6 +9,14 @@
 | Container agents | Sandboxed | Isolated execution environment |
 | Incoming messages | User input | Potential prompt injection |
 
+> **Cooperative mode override.** When `FLAT_ACCESS=true` (the default for this
+> install), the Main/Non-main split above does **not** apply: every group is
+> treated as trusted and main-equivalent for data access (read-write SQLite +
+> KB writes in every container). This removes the prompt-injection containment
+> boundary and is only safe when every channel is trusted-internal. See
+> [COOPERATIVE-MODE.md](COOPERATIVE-MODE.md). Set `FLAT_ACCESS=false` to
+> restore the trust model described in this document.
+
 ## Security Boundaries
 
 ### 1. Container Isolation (Primary Boundary)
