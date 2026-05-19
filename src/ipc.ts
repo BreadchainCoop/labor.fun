@@ -96,7 +96,9 @@ function getEmailTransporter(): nodemailer.Transporter | null {
   const pass =
     process.env.BREADBRICH_EMAIL_PASSWORD || emailEnv.BREADBRICH_EMAIL_PASSWORD;
   if (!user || !pass) {
-    logger.warn('BREADBRICH_EMAIL or BREADBRICH_EMAIL_PASSWORD not set — email disabled');
+    logger.warn(
+      'BREADBRICH_EMAIL or BREADBRICH_EMAIL_PASSWORD not set — email disabled',
+    );
     return null;
   }
   emailTransporter = nodemailer.createTransport({
@@ -483,7 +485,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   );
                 } else {
                   const usersFile =
-                    process.env.USERS_FILE || '/opt/breadbrich/kb-ui/users.json';
+                    process.env.USERS_FILE ||
+                    '/opt/breadbrich/kb-ui/users.json';
                   let users: Record<string, string> = {};
                   try {
                     if (fs.existsSync(usersFile)) {
