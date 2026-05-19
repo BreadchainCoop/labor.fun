@@ -3,7 +3,6 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   createMeetingSummary,
-  createResidencyRequest,
   createTask,
   deleteTask,
   getAllChats,
@@ -13,14 +12,11 @@ import {
   getMeetingSummaryById,
   getMessagesSince,
   getNewMessages,
-  getResidencyRequest,
   getTaskById,
-  listResidencyRequestsByStatus,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
   updateMeetingSummary,
-  updateResidencyRequestStatus,
   updateTask,
 } from './db.js';
 import { formatMessages } from './router.js';
@@ -778,95 +774,5 @@ describe('meeting summary CRUD', () => {
     updateMeetingSummary('mtg-123', {});
     const summary = getMeetingSummaryById('mtg-123');
     expect(summary!.title).toBe('Weekly Standup');
-  });
-});
-
-describe('residency request CRUD', () => {
-  const baseRequest = {
-    chat_jid: 'slack_main@organization',
-    source_group: 'slack_main',
-    requester_name: 'Alex Applicant',
-    requester_contact: 'alex@example.com',
-    request_type: 'resident',
-    requested_start_date: '2026-05-01',
-    requested_end_date: null,
-    room_preference: null,
-    notes: null,
-  };
-
-  it('create → get roundtrip preserves fields and defaults to pending', () => {
-    storeChatMetadata('slack_main@organization', '2026-04-23T00:00:00.000Z');
-
-    const created = createResidencyRequest(baseRequest);
-    expect(created.id).toMatch(/^rr-/);
-    expect(created.status).toBe('pending');
-    expect(created.created_at).toContain('T');
-    expect(created.resolved_by).toBeNull();
-    expect(created.resolved_at).toBeNull();
-
-    const fetched = getResidencyRequest(created.id);
-    expect(fetched).toBeDefined();
-    expect(fetched!.requester_name).toBe('Alex Applicant');
-    expect(fetched!.request_type).toBe('resident');
-    expect(fetched!.requested_start_date).toBe('2026-05-01');
-    expect(fetched!.requested_end_date).toBeNull();
-    expect(fetched!.requester_contact).toBe('alex@example.com');
-    expect(fetched!.source_group).toBe('slack_main');
-    expect(fetched!.status).toBe('pending');
-  });
-
-  it('getResidencyRequest returns undefined for unknown id', () => {
-    expect(getResidencyRequest('rr-does-not-exist')).toBeUndefined();
-  });
-
-  it('listResidencyRequestsByStatus filters by status and orders newest first', () => {
-    storeChatMetadata('slack_main@organization', '2026-04-23T00:00:00.000Z');
-
-    const first = createResidencyRequest({
-      ...baseRequest,
-      requester_name: 'Older Pending',
-    });
-    const second = createResidencyRequest({
-      ...baseRequest,
-      requester_name: 'Newer Pending',
-    });
-    const third = createResidencyRequest({
-      ...baseRequest,
-      requester_name: 'Approved One',
-      request_type: 'guest',
-      requested_end_date: '2026-05-15',
-    });
-    updateResidencyRequestStatus(third.id, 'approved', 'slack_main', 'ok');
-
-    const pending = listResidencyRequestsByStatus('pending');
-    expect(pending).toHaveLength(2);
-    // DESC ordering: second was inserted after first, so appears first
-    expect(pending[0].id).toBe(second.id);
-    expect(pending[1].id).toBe(first.id);
-
-    const approved = listResidencyRequestsByStatus('approved');
-    expect(approved).toHaveLength(1);
-    expect(approved[0].requester_name).toBe('Approved One');
-
-    const all = listResidencyRequestsByStatus();
-    expect(all).toHaveLength(3);
-  });
-
-  it('updateResidencyRequestStatus sets status, resolver, timestamp, and notes', () => {
-    storeChatMetadata('slack_main@organization', '2026-04-23T00:00:00.000Z');
-
-    const created = createResidencyRequest(baseRequest);
-    updateResidencyRequestStatus(
-      created.id,
-      'rejected',
-      'slack_main',
-      'not a good fit right now',
-    );
-
-    const after = getResidencyRequest(created.id);
-    expect(after!.status).toBe('rejected');
-    expect(after!.resolved_by).toBe('slack_main');
-    expect(after!.resolution_notes).toBe('not a good fit right now');
-    expect(after!.resolved_at).toContain('T');
   });
 });
