@@ -8,6 +8,7 @@ import {
   getTriggerPattern,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  isPrivilegedGroup,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -406,7 +407,10 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.isMain === true;
+  // Flat-access (cooperative) mode elevates every group to main-equivalent
+  // mounts/IPC auth. isMain here drives container mounts, the NANOCLAW_IS_MAIN
+  // env, and the tasks/groups snapshots.
+  const isMain = isPrivilegedGroup(group);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -868,7 +872,7 @@ async function main(): Promise<void> {
         next_run: t.next_run,
       }));
       for (const group of Object.values(registeredGroups)) {
-        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
+        writeTasksSnapshot(group.folder, isPrivilegedGroup(group), taskRows);
       }
     },
   });
