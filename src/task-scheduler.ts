@@ -2,7 +2,12 @@ import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  isPrivilegedGroup,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -129,8 +134,9 @@ async function runTask(
     return;
   }
 
-  // Update tasks snapshot for container to read (filtered by group)
-  const isMain = group.isMain === true;
+  // Update tasks snapshot for container to read (filtered by group).
+  // Flat-access (cooperative) mode elevates every group to main-equivalent.
+  const isMain = isPrivilegedGroup(group);
   const tasks = getAllTasks();
   writeTasksSnapshot(
     task.group_folder,
