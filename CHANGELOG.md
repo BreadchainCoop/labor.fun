@@ -4,6 +4,10 @@ All notable changes to Breadbrich Engels will be documented in this file.
 
 For detailed release notes, see the [full changelog on the documentation site](https://docs.salem.dev/changelog).
 
+## [Unreleased]
+
+- Added **cooperative mode** (`FLAT_ACCESS`, default on): every registered group is treated as main-equivalent for data access — read-write SQLite store mount, KB writes, and full IPC authorization in every container, with no main/non-main split. Intentionally removes the prompt-injection trust boundary; only safe when every channel is trusted-internal. Set `FLAT_ACCESS=false` to restore the sandboxed model. See `docs/COOPERATIVE-MODE.md`.
+
 ## [1.2.36] - 2026-03-26
 
 - [BREAKING] Replaced pino logger with built-in logger. WhatsApp users must re-merge the WhatsApp fork to pick up the Baileys logger compatibility fix: `git fetch whatsapp main && git merge whatsapp/main`. If the `whatsapp` remote is not configured: `git remote add whatsapp https://github.com/qwibitai/salem-whatsapp.git`.
