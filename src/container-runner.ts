@@ -289,6 +289,16 @@ function buildContainerArgs(
     args.push('-e', `NANOCLAW_SUBAGENT_MODEL=${NANOCLAW_SUBAGENT_MODEL}`);
   }
 
+  // GitHub MCP server: pass Breadbrich's PAT through so the bundled
+  // github-mcp-server can authenticate. Repo scope is enforced by the
+  // PAT itself (fine-grained, all BreadchainCoop repos, read+write).
+  const githubToken =
+    readEnvFile(['GITHUB_PERSONAL_ACCESS_TOKEN'])
+      .GITHUB_PERSONAL_ACCESS_TOKEN || process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+  if (githubToken) {
+    args.push('-e', `GITHUB_PERSONAL_ACCESS_TOKEN=${githubToken}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 

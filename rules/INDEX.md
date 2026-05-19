@@ -12,6 +12,7 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 - **Tour operations**: [Tour Management](tours/tours.md)
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
+- **GitHub operations**: [GitHub Integration](integrations/github.md)
 
 ## Directory
 
@@ -41,3 +42,4 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Coordinator approval gate for tasks proposed from meeting transcripts |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
+| [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on BreadchainCoop repos |

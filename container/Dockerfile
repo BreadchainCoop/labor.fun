@@ -33,6 +33,24 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Install agent-browser, claude-code, and Google Calendar MCP globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code @cocal/google-calendar-mcp
 
+# Install the official GitHub MCP server (pinned). Arch-matched to the
+# container so it works whether built on amd64 or arm64 hosts.
+ARG GITHUB_MCP_SERVER_VERSION=1.0.5
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) gmcp_arch="x86_64" ;; \
+      arm64) gmcp_arch="arm64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_Linux_${gmcp_arch}.tar.gz"; \
+    mkdir -p /tmp/gmcp; \
+    curl -fsSL "$url" -o /tmp/gmcp.tar.gz; \
+    tar -xzf /tmp/gmcp.tar.gz -C /tmp/gmcp; \
+    install -m 0755 /tmp/gmcp/github-mcp-server /usr/local/bin/github-mcp-server; \
+    rm -rf /tmp/gmcp /tmp/gmcp.tar.gz; \
+    github-mcp-server --help > /dev/null
+
 # Create app directory
 WORKDIR /app
 
