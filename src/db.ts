@@ -124,8 +124,7 @@ function createSchema(database: Database.Database): void {
       created_at TEXT NOT NULL,
       resolved_by TEXT,
       resolved_at TEXT,
-      FOREIGN KEY (chat_jid) REFERENCES chats(jid),
-      FOREIGN KEY (event_id) REFERENCES events(id)
+      FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
     CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status);
     CREATE INDEX IF NOT EXISTS idx_expenses_requester ON expenses(requester_user_id);
