@@ -28,7 +28,7 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 **What**: Message history, group registrations, scheduled tasks, identity mappings, RBAC tags.
 **Where**: `store/messages.db` (better-sqlite3).
 **Format**: Relational tables. Full schema in [../../schema/tables.md](../../schema/tables.md).
-**Managed by**: The NanoClaw orchestrator (Node.js process) reads/writes via `src/db.ts`. Breadbrich Engels's main group can query it directly via `sqlite3` CLI.
+**Managed by**: The NanoClaw orchestrator (Node.js process) reads/writes via `src/db.ts`. In **cooperative mode** (`FLAT_ACCESS`, the default — see [COOPERATIVE-MODE.md](../../docs/COOPERATIVE-MODE.md)) **every group** can query it directly via the `sqlite3` CLI at `/workspace/project/store/messages.db`. This includes reading the **full message history** of any chat — you are not limited to the handful of messages piped into the prompt.
 
 | Table | What It Stores | Who Writes |
 |-------|---------------|------------|
@@ -43,7 +43,7 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 | `tag_hierarchy` | RBAC tag inheritance tree | Manual seeding |
 
 **Versioning**: Not git-tracked (in `.gitignore`). DB lives on the droplet.
-**Access control**: Main group has read-write mount to `store/`. Other groups have no DB access.
+**Access control**: In cooperative mode (default) **every** group container has a read-write mount of `store/` at `/workspace/project/store/`. (When `FLAT_ACCESS=false`, only the main group does — the legacy sandboxed model.)
 
 ## Key Distinction
 
@@ -52,19 +52,53 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 | **Content type** | Organizational knowledge | Operational state |
 | **Who manages** | Breadbrich Engels (file read/write) | Orchestrator process |
 | **Versioned in git** | Yes | No |
-| **Access from containers** | All groups (own context, read-only global) | Main group only |
+| **Access from containers** | All groups (own context, read-only global) | All groups (cooperative mode); main only if `FLAT_ACCESS=false` |
 | **Schema** | YAML frontmatter + markdown body | Relational tables |
 | **Example** | "Person X is an admin with engineering tag" | "Message ID abc123 from <slack-user-id> at timestamp 1712764800" |
 
 ## When Breadbrich Engels Queries SQLite
 
-Only from the **main group** (which has `store/` mounted read-write):
+From **any group** in cooperative mode (the DB is mounted read-write at
+`/workspace/project/store/messages.db`). **You can and should query this
+directly whenever someone asks about past messages, "what did X say",
+action items from a conversation, or anything beyond the few messages in
+your current prompt.** Do not tell the user you have no access to message
+history — you do; read it here.
+
+Find the current chat's JID from the conversation context, then:
+
+`messages.timestamp` is a **TEXT ISO-8601 string** (e.g.
+`2026-05-19T18:17:36.528Z`) — already human-readable, and it sorts
+chronologically as a plain string. No epoch conversion needed.
 
 ```bash
-sqlite3 /workspace/project/store/messages.db "SELECT jid, name FROM chats ORDER BY last_message_time DESC LIMIT 10;"
+DB=/workspace/project/store/messages.db
+
+# Full history for one chat, oldest→newest (raise/remove LIMIT for everything)
+sqlite3 -readonly "$DB" \
+  "SELECT timestamp, sender_name, content
+   FROM messages WHERE chat_jid='<JID>'
+   ORDER BY timestamp ASC LIMIT 2000;"
+
+# Last 30 days
+sqlite3 -readonly "$DB" \
+  "SELECT timestamp, sender_name, content FROM messages
+   WHERE chat_jid='<JID>'
+     AND timestamp >= strftime('%Y-%m-%dT%H:%M:%SZ','now','-30 days')
+   ORDER BY timestamp ASC;"
+
+# Keyword search across a chat
+sqlite3 -readonly "$DB" \
+  "SELECT timestamp, sender_name, content FROM messages
+   WHERE chat_jid='<JID>' AND content LIKE '%deadline%'
+   ORDER BY timestamp ASC;"
+
+# List chats / verify registered groups
+sqlite3 -readonly "$DB" "SELECT jid, name FROM chats ORDER BY last_message_time DESC LIMIT 10;"
 ```
 
-For finding groups, checking message history, or verifying registered groups. Never modify the DB schema — that's managed by `src/db.ts` migrations.
+Use `-readonly` for lookups. Never modify the DB schema — migrations are
+managed by `src/db.ts`.
 
 ## When Breadbrich Engels Edits Markdown
 
