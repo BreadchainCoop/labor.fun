@@ -17,7 +17,6 @@ Breadbrich Engels's behavior is defined by structured rule files in [`rules/`](r
 | [Messaging](rules/messaging/README.md) | `rules/messaging/` | Channel formatting, cross-platform send |
 | [Scheduling](rules/scheduling/README.md) | `rules/scheduling/` | Cron tasks, scripts, API credit conservation |
 | [Identity & RBAC](rules/identity/README.md) | `rules/identity/` | User resolution, tag hierarchy, platform mapping |
-| [Tour Management](rules/tours/tours.md) | `rules/tours/` | Tour scheduling, guide shifts, visitor requests |
 | [Transcripts](rules/transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction |
 
 Read `rules/INDEX.md` for the full cross-linked index. When modifying Breadbrich Engels's behavior — update the relevant rule file, not ad-hoc code.

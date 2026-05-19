@@ -9,7 +9,6 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 - **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
 - **Cross-channel requests**: [Messaging](messaging/README.md)
 - **Task scheduling**: [Scheduling](scheduling/README.md)
-- **Tour operations**: [Tour Management](tours/tours.md)
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
 
@@ -33,11 +32,6 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 | [Identity & RBAC](identity/README.md) | `rules/identity/` | Resolving who is asking, what tags they have |
 | [Tag Hierarchy](identity/tag-hierarchy.md) | `rules/identity/tag-hierarchy.md` | When assigning or checking tags |
 | [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
-| [Tour Management](tours/tours.md) | `rules/tours/` | Tour scheduling, guide shifts, visitor requests |
-| [Residency](residency/residency.md) | `rules/residency/` | Room management, occupancy tracking, guest stays |
-| [Residency Requests](residency/requests.md) | `rules/residency/requests.md` | Handling residency applications (submit, review, approve/reject) |
-| [Events](events/README.md) | `rules/events/` | Calendar-synced events + role assignments |
-| [Event Intake](events/intake.md) | `rules/events/intake.md` | Booking lifecycle, pricing, staffing, admin proposal approvals |
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Coordinator approval gate for tasks proposed from meeting transcripts |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
