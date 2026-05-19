@@ -33,6 +33,30 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Install agent-browser, claude-code, and Google Calendar MCP globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code @cocal/google-calendar-mcp
 
+# Install the official GitHub MCP server (pinned + checksum-verified).
+# Arch-matched to the container so it works whether built on amd64 or
+# arm64 hosts. SHA-256s are the goreleaser release checksums for the
+# pinned version, independently verified; the build fails if the
+# downloaded tarball does not match (supply-chain integrity).
+ARG GITHUB_MCP_SERVER_VERSION=1.0.5
+ARG GITHUB_MCP_SERVER_SHA256_AMD64=201082f569a846eaefd4318f13bccb5d9227c2cec45037d1d292ee83111173c1
+ARG GITHUB_MCP_SERVER_SHA256_ARM64=ef5ba03df4aea7aaf52ba25be7bacb9fe64038dc17e46a85ba251998e8513f62
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) gmcp_arch="x86_64"; gmcp_sha="${GITHUB_MCP_SERVER_SHA256_AMD64}" ;; \
+      arm64) gmcp_arch="arm64";  gmcp_sha="${GITHUB_MCP_SERVER_SHA256_ARM64}" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_Linux_${gmcp_arch}.tar.gz"; \
+    mkdir -p /tmp/gmcp; \
+    curl -fsSL "$url" -o /tmp/gmcp.tar.gz; \
+    echo "${gmcp_sha}  /tmp/gmcp.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gmcp.tar.gz -C /tmp/gmcp; \
+    install -m 0755 /tmp/gmcp/github-mcp-server /usr/local/bin/github-mcp-server; \
+    rm -rf /tmp/gmcp /tmp/gmcp.tar.gz; \
+    github-mcp-server --help > /dev/null
+
 # Create app directory
 WORKDIR /app
 

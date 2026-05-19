@@ -255,6 +255,22 @@ function buildVolumeMounts(
   return mounts;
 }
 
+/**
+ * Breadbrich's GitHub PAT for the bundled github-mcp-server, read from
+ * .env (with process.env fallback). Returns undefined when unset, which
+ * leaves the GitHub MCP server unloaded inside the container.
+ *
+ * The value is intentionally NEVER placed in the container argv — it is
+ * passed through the spawned runtime's process environment instead, so it
+ * cannot leak via the debug log of containerArgs or host process args.
+ */
+function getGithubToken(): string | undefined {
+  return (
+    readEnvFile(['GITHUB_PERSONAL_ACCESS_TOKEN'])
+      .GITHUB_PERSONAL_ACCESS_TOKEN || process.env.GITHUB_PERSONAL_ACCESS_TOKEN
+  );
+}
+
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -287,6 +303,16 @@ function buildContainerArgs(
   }
   if (NANOCLAW_SUBAGENT_MODEL) {
     args.push('-e', `NANOCLAW_SUBAGENT_MODEL=${NANOCLAW_SUBAGENT_MODEL}`);
+  }
+
+  // GitHub MCP server: enable the env passthrough WITHOUT putting the
+  // secret in argv. `-e NAME` (no value) makes the runtime read the value
+  // from its own process environment, which runContainerAgent populates.
+  // This keeps the PAT out of the containerArgs debug log and host
+  // process args. Repo scope is enforced by the PAT itself (fine-grained,
+  // all BreadchainCoop repos, read+write).
+  if (getGithubToken()) {
+    args.push('-e', 'GITHUB_PERSONAL_ACCESS_TOKEN');
   }
 
   // Runtime-specific args for host gateway resolution
@@ -358,8 +384,20 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
+    // Inject the GitHub PAT only into the runtime's process environment
+    // (never argv), matching the `-e GITHUB_PERSONAL_ACCESS_TOKEN`
+    // passthrough flag added in buildContainerArgs.
+    const githubToken = getGithubToken();
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(githubToken
+        ? {
+            env: {
+              ...process.env,
+              GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
+            },
+          }
+        : {}),
     });
 
     onProcess(container, containerName);

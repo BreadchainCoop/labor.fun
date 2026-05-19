@@ -65,6 +65,7 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
 const hasGoogleCalendar = !!process.env.GOOGLE_OAUTH_CREDENTIALS;
+const hasGithub = !!process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -479,6 +480,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
         ...(hasGoogleCalendar ? ['mcp__google-calendar__*'] : []),
+        ...(hasGithub ? ['mcp__github__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -504,6 +506,24 @@ async function runQuery(
                     process.env.GOOGLE_OAUTH_CREDENTIALS!,
                   GOOGLE_ACCOUNT_MODE:
                     process.env.GOOGLE_ACCOUNT_MODE || 'breadbrich',
+                },
+              },
+            }
+          : {}),
+        ...(hasGithub
+          ? {
+              github: {
+                command: 'github-mcp-server',
+                // read+write; toolsets scoped to code/issues/PRs/CI.
+                // Repo scope is enforced by the PAT, not the server.
+                args: [
+                  'stdio',
+                  '--toolsets',
+                  'context,repos,issues,pull_requests,actions',
+                ],
+                env: {
+                  GITHUB_PERSONAL_ACCESS_TOKEN:
+                    process.env.GITHUB_PERSONAL_ACCESS_TOKEN!,
                 },
               },
             }
