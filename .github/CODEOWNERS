@@ -1,0 +1,11 @@
+# Core code - maintainers only
+# Replace with your org's maintainers team or GitHub handles, e.g. @BreadchainCoop/maintainers
+/src/
+/container/
+/groups/
+/launchd/
+/package.json
+/package-lock.json
+
+# Skills - open to contributors
+/.claude/skills/

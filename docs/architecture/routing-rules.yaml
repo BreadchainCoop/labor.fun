@@ -1,0 +1,351 @@
+# Breadbrich Engels routing rules
+# Loaded by the central orchestrator at startup. Changes require PR + merge + safe-deploy.
+# Schema: see schema comment at bottom.
+
+version: 1
+updated: 2026-04-21
+
+# Sender identity groups — referenced by rules below
+identities:
+  main_user: [ops]       # ops.localstark — superadmin
+  admins: [alice, bob, carol, dave]
+  coordinators: [nina, kai]
+  members: [alex, alexandra, kai, carol, dmarz, sam, nina, ren, john-fagan, lana, matt, mira, dave, tariq, bob]
+  guests: []                # transient, not registered
+  system: [big_breadbrich, observer, reflector, curator, scheduler]
+
+# Request type taxonomy — what the classifier can output
+request_types:
+  - task_management          # create, update, close, query tasks
+  - event_logging            # calendar entries, scheduling
+  - facility_maintenance     # repairs, issues, physical space
+  - financial_tracking       # payments, receipts, budgets, reimbursements
+  - information_retrieval    # KB queries, lookups, summaries
+  - credential_access        # logins, onboarding, permissions
+  - cross_channel_delegation # relay, coordinate across chats
+  - reminder_scheduling      # time-based nudges
+  - content_generation       # drafts, plans, documents
+  - people_management        # residency, room assignments, team changes
+  - purchasing_supplies      # shopping, inventory
+  - meta_bot_management      # breadbrich feature requests, debugging
+  - casual_social            # no action needed — react only
+
+# Urgency levels
+urgency:
+  - immediate   # respond + act within minutes
+  - normal      # respond within the hour
+  - low         # respond at next convenient time
+  - deferred    # batch, no urgency
+
+# Global settings
+defaults:
+  classifier_model: haiku
+  reasoning_model: sonnet
+  escalation_model: opus     # only for explicit escalation
+  context_cost_ceiling_per_msg_usd: 0.10
+  observer_interval_min: 15
+  reflector_cron: "0 2 * * *"    # 2am daily
+  curator_cron: "0 3 * * 0"       # 3am Sundays
+  session_timeout_min: 30
+  rate_limit:
+    per_chat_per_min: 10
+    per_sender_per_min: 5
+    global_per_min: 60
+
+# Rules are evaluated top-to-bottom; first match wins.
+# match: conditions that must be true
+# route: where this request goes
+# auth: which identity groups can invoke this rule
+# share_back: what info the central orchestrator is allowed to return
+# log_to: where the action gets audited
+# post_hooks: what happens after (e.g., broadcast, reindex)
+
+rules:
+
+  # ─── META / SYSTEM (highest priority) ─────────────────────────────
+  - id: system_observer
+    match:
+      sender_in: [system]
+      request_type: meta_bot_management
+    route: internal
+    auth: system
+    share_back: none
+    log_to: kb_audit_log
+
+  # ─── CASUAL (react-only, cheap skip) ──────────────────────────────
+  - id: casual_social_skip
+    match:
+      request_type: casual_social
+      classifier_confidence: ">=0.8"
+    route: reaction_only
+    auth: any
+    share_back: none
+    log_to: request_log
+    post_hooks: []
+
+  # ─── INFORMATION RETRIEVAL ────────────────────────────────────────
+  - id: kb_query_own_scope
+    match:
+      request_type: information_retrieval
+      scope: own_chat
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - kb_filtered_by_visibility      # respects frontmatter visibility field
+      - recent_observations_own_chat
+    log_to: request_log
+
+  - id: kb_query_cross_chat
+    match:
+      request_type: information_retrieval
+      scope: cross_chat
+    route: big_breadbrich
+    auth: [admins, coordinators, main_user]
+    share_back:
+      - kb_filtered_by_visibility_across_chats
+    log_to: request_log
+    post_hooks:
+      - audit_cross_chat_read
+
+  # ─── TASK MANAGEMENT ──────────────────────────────────────────────
+  - id: task_create
+    match:
+      request_type: task_management
+      action: create
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - created_task_id
+      - near_duplicates         # Observer/Reflector detected similar tasks
+    log_to: kb_audit_log
+    post_hooks:
+      - update_memory_pointer_index
+      - notify_owner_if_assigned
+
+  - id: task_update
+    match:
+      request_type: task_management
+      action: [update, close, reopen]
+    route: big_breadbrich
+    auth: [owners_of_target_task, admins, coordinators]
+    share_back:
+      - confirmation
+    log_to: kb_audit_log
+    post_hooks:
+      - update_memory_pointer_index
+
+  - id: task_query
+    match:
+      request_type: task_management
+      action: query
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - tasks_filtered_by_visibility_and_ownership
+    log_to: request_log
+
+  # ─── PEOPLE MANAGEMENT (RBAC strict) ──────────────────────────────
+  - id: people_query
+    match:
+      request_type: people_management
+      action: query
+    route: big_breadbrich
+    auth: [admins, main_user]
+    share_back:
+      - person_profile_redacted  # tg_ids hidden for non-admins
+    log_to: kb_audit_log
+    post_hooks: []
+
+  - id: people_modify
+    match:
+      request_type: people_management
+      action: [create, update, delete]
+    route: big_breadbrich
+    auth: [admins, main_user]
+    deny_conditions:
+      - action: delete          # no actual deletion — status change only per memory rule
+    share_back:
+      - confirmation
+    log_to: kb_audit_log
+
+  # ─── FINANCIAL ────────────────────────────────────────────────────
+  - id: financial_request
+    match:
+      request_type: financial_tracking
+      urgency: [immediate, normal]
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - request_receipt
+      - approval_status
+    log_to: kb_audit_log
+    post_hooks:
+      - route_to_approval_chain  # coordinator/admin gets DM
+      - update_budget_tracking
+
+  # ─── CROSS-CHANNEL DELEGATION ─────────────────────────────────────
+  - id: cross_channel_send
+    match:
+      request_type: cross_channel_delegation
+      action: send
+    route: big_breadbrich
+    auth: [admins, main_user]
+    share_back:
+      - delivery_receipt
+    log_to: kb_audit_log
+    post_hooks:
+      - mirror_to_source_chat    # sender sees confirmation in their origin chat
+
+  # ─── FACILITIES / MAINTENANCE ─────────────────────────────────────
+  - id: facility_report
+    match:
+      request_type: facility_maintenance
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - created_task_id
+      - related_open_issues
+    log_to: kb_audit_log
+    post_hooks:
+      - notify_ops_coordinators
+      - update_memory_pointer_index
+
+  # ─── EVENTS + CALENDAR ────────────────────────────────────────────
+  - id: event_create
+    match:
+      request_type: event_logging
+      action: create
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - event_id
+      - calendar_conflicts
+    log_to: kb_audit_log
+    post_hooks:
+      - calendar_sync
+      - notify_stakeholders
+
+  # ─── REMINDERS ────────────────────────────────────────────────────
+  - id: reminder_schedule
+    match:
+      request_type: reminder_scheduling
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - task_id
+      - scheduled_time_utc_and_local  # mitigates UTC-gotcha
+    log_to: kb_audit_log
+    post_hooks:
+      - verify_once_vs_cron       # warn if using 'once' with ambiguous tz
+
+  # ─── CONTENT GENERATION ───────────────────────────────────────────
+  - id: content_draft
+    match:
+      request_type: content_generation
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - draft_content
+    log_to: request_log
+
+  # ─── CREDENTIAL / ACCESS (sensitive) ──────────────────────────────
+  - id: credential_dm_only
+    match:
+      request_type: credential_access
+      chat_type: [group]
+    route: reject
+    auth: any
+    share_back:
+      - error_msg_dm_only        # "Sensitive info — please DM me"
+    log_to: request_log
+
+  - id: credential_dm_allowed
+    match:
+      request_type: credential_access
+      chat_type: [dm]
+    route: big_breadbrich
+    auth: [admins, main_user]    # even in DM, only admins can ask
+    share_back:
+      - credential_reference_not_value  # return path/pointer, not actual secret
+    log_to: kb_audit_log
+
+  # ─── META / DEBUG ─────────────────────────────────────────────────
+  - id: meta_debug
+    match:
+      request_type: meta_bot_management
+    route: big_breadbrich
+    auth: [main_user, admins]
+    share_back:
+      - debug_output
+    log_to: request_log
+
+  # ─── FALLBACK (any unmatched request) ─────────────────────────────
+  - id: fallback_any
+    match:
+      # matches everything not caught above
+      request_type: any
+    route: big_breadbrich
+    auth: any
+    share_back:
+      - minimal_context
+    log_to: request_log
+    post_hooks:
+      - flag_for_rule_review     # unmatched patterns signal missing rule
+
+# Post-hook definitions — what these named hooks do
+post_hooks:
+  update_memory_pointer_index:
+    description: Trigger Reflector micro-pass to update MEMORY.md for affected chat
+    action: emit_event
+    event: memory_index_dirty
+  notify_owner_if_assigned:
+    description: If task has assignee + they're not in the current chat, DM them
+    action: outbound_message
+  audit_cross_chat_read:
+    description: Log the cross-chat data read for later privacy audit
+    action: append_to_audit_log
+    file: artifacts/cross-chat-reads.log
+  route_to_approval_chain:
+    description: For financial requests, notify relevant approver (Alice for <$500, leadership for more)
+    action: conditional_notify
+  calendar_sync:
+    description: Pull new event into Google Calendar if event_logging action created it
+    action: google_calendar_api
+  mirror_to_source_chat:
+    description: After cross-channel send, confirm to the requesting chat
+    action: outbound_message
+  flag_for_rule_review:
+    description: Unmatched request pattern — logged for human review, may indicate missing rule
+    action: append_to
+    file: docs/architecture/rule-review-queue.md
+  verify_once_vs_cron:
+    description: Warn if using 'once' schedule with ambiguous timezone (UTC vs local)
+    action: classifier_validation
+
+# Visibility filter — applied to any `share_back` that touches KB
+visibility_filter:
+  rules:
+    - if: "frontmatter.visibility == 'private'"
+      then: "only_if_sender_in_editable_by OR sender is admin"
+    - if: "frontmatter.visibility == 'restricted'"
+      then: "only_if_sender_in_tags_of_file OR sender is admin"
+    - if: "frontmatter.visibility == 'open'"
+      then: "any"
+
+# Rate-limiting gate — applied before rules are evaluated
+rate_limiting:
+  responses:
+    exceeded_per_chat: "Please slow down — I can process up to 10 messages per minute per chat."
+    exceeded_per_sender: "You're sending a lot. Pausing for a moment."
+    exceeded_global: "System is busy — your request is queued."
+
+# ─── Schema for reference ─────────────────────────────────────────
+# rule:
+#   id: string (unique, snake_case)
+#   match: { request_type, action?, scope?, chat_type?, classifier_confidence?, sender_in? }
+#   route: big_breadbrich | local | internal | reject | reaction_only
+#   auth: any | [identity_group, ...]
+#   deny_conditions: optional list of conditions that deny even if auth passes
+#   share_back: [named_data_slice, ...]
+#   log_to: kb_audit_log | request_log | observer_log
+#   post_hooks: [hook_name, ...]

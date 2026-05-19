@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.npm-cache/
+
+# Build output
+dist/
+
+# Local data & runtime
+store/
+data/
+.config/
+logs/
+
+# Secrets
+*.keys.json
+.env
+kb-ui/users.json
+
+# Temp files
+.tmp-*
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Local state
+.nanoclaw/
+agents-sdk-docs
+
+# Staging
+staging-data/
+.env.staging
+.env.staging.local
+.claude-backups/
+
+# Live-edited KB content lives on the droplet under /opt/breadbrich/groups/*/context/
+# and is preserved as stateful by safe-deploy.sh — the repo cannot be the source
+# of truth without a real sync mechanism. Keep this gitignored to avoid drift;
+# add new entries via the live system (or scp) rather than via PR.
+# See project_breadbrich_kb_mount_gap.md memory for the full rationale.
+groups/*/context/

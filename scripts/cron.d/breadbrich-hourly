@@ -1,0 +1,2 @@
+# Breadbrich Engels hourly operations — PR review, TG ingestion check, memory compaction
+0 * * * * breadbrich /opt/breadbrich/scripts/hourly-ops.sh >> /opt/breadbrich/logs/hourly-ops.log 2>&1

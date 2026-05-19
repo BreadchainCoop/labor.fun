@@ -1,0 +1,43 @@
+# Breadbrich Engels Rules Index
+
+Operational rules, access control policies, and process definitions. Breadbrich Engels reads these at runtime to determine how to handle requests. Each rule file is self-contained with cross-links to related rules.
+
+## How Breadbrich Engels Uses These Rules
+
+When Breadbrich Engels starts a conversation, it reads the relevant rules based on context:
+- **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md)
+- **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
+- **Cross-channel requests**: [Messaging](messaging/README.md)
+- **Task scheduling**: [Scheduling](scheduling/README.md)
+- **Tour operations**: [Tour Management](tours/tours.md)
+- **Identity questions**: [Identity & RBAC](identity/README.md)
+- **Transcript processing**: [Transcripts](transcripts/transcripts.md)
+
+## Directory
+
+| Rule Set | Path | When to Read |
+|----------|------|-------------|
+| [Access Control](access-control/README.md) | `rules/access-control/` | Every interaction — determines what the requester can see/do |
+| [Privacy Policy](access-control/privacy-policy.md) | `rules/access-control/privacy-policy.md` | Before sharing ANY KB content |
+| [Role Matrix](access-control/role-matrix.md) | `rules/access-control/role-matrix.md` | When checking permissions |
+| [Knowledge Base](knowledge-base/README.md) | `rules/knowledge-base/` | Any KB read/write operation |
+| [Task Management](knowledge-base/tasks.md) | `rules/knowledge-base/tasks.md` | Creating, updating, or querying tasks |
+| [Storage Systems](knowledge-base/storage.md) | `rules/knowledge-base/storage.md` | Understanding markdown KB vs SQLite DB |
+| [Document Format](knowledge-base/document-format.md) | `rules/knowledge-base/document-format.md` | Creating or editing any KB document |
+| [Request Logging](knowledge-base/request-logging.md) | `rules/knowledge-base/request-logging.md` | After every interaction |
+| [Close the Loop](knowledge-base/close-the-loop.md) | `rules/knowledge-base/close-the-loop.md` | Every reply — ensure actionable info is written to KB |
+| [Messaging](messaging/README.md) | `rules/messaging/` | Formatting output, cross-channel sends |
+| [Channel Formatting](messaging/channel-formatting.md) | `rules/messaging/channel-formatting.md` | Before sending any message |
+| [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
+| [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
+| [Identity & RBAC](identity/README.md) | `rules/identity/` | Resolving who is asking, what tags they have |
+| [Tag Hierarchy](identity/tag-hierarchy.md) | `rules/identity/tag-hierarchy.md` | When assigning or checking tags |
+| [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
+| [Tour Management](tours/tours.md) | `rules/tours/` | Tour scheduling, guide shifts, visitor requests |
+| [Residency](residency/residency.md) | `rules/residency/` | Room management, occupancy tracking, guest stays |
+| [Residency Requests](residency/requests.md) | `rules/residency/requests.md` | Handling residency applications (submit, review, approve/reject) |
+| [Events](events/README.md) | `rules/events/` | Calendar-synced events + role assignments |
+| [Event Intake](events/intake.md) | `rules/events/intake.md` | Booking lifecycle, pricing, staffing, admin proposal approvals |
+| [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
+| [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Coordinator approval gate for tasks proposed from meeting transcripts |
+| [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |

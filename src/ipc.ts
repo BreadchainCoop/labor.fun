@@ -1,0 +1,3177 @@
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+
+import { CronExpressionParser } from 'cron-parser';
+import nodemailer from 'nodemailer';
+
+import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { readEnvFile } from './env.js';
+import { AvailableGroup } from './container-runner.js';
+import {
+  createAssignment,
+  createTask,
+  deleteAssignment,
+  deleteTask,
+  getAllRooms,
+  getAllUsers,
+  getEventById,
+  getTaskById,
+  updateTask,
+  createTourSlot,
+  generateWeeklySlots,
+  createTourShift,
+  createTourRequest,
+  getTourSlotById,
+  getTourShiftById,
+  getTourRequestById,
+  deleteTourShift,
+  updateTourRequestStatus,
+  createRoom,
+  createOccupancy,
+  updateOccupancy,
+  deleteOccupancy,
+  createUser,
+  createMeetingSummary,
+  getMeetingSummaryById,
+  createProposedTasksBatch,
+  getProposedTask,
+  updateProposedTaskStatus,
+  createExpense,
+  getExpense,
+  updateExpenseApproval,
+  attachReceipt,
+  markReimbursed,
+  cancelExpense,
+  Expense,
+  ExpenseStatus,
+  createResidencyRequest,
+  getResidencyRequest,
+  listResidencyRequestsByStatus,
+  updateResidencyRequestStatus,
+  isBotMessage,
+  getRecentBotMessages,
+  logKbAudit,
+  createEventBooking,
+  createProposalApproval,
+  decideProposalApproval,
+  getAllEventBookings,
+  getEventBooking,
+  getPendingProposalApproval,
+  nextEventBookingCode,
+  setEventBookingMeta,
+  transitionEventBooking,
+  updateEventBookingPricing,
+  updateEventBookingStaffing,
+  type EventBookingStatus,
+} from './db.js';
+import { writeApprovedTaskFile } from './kb-tasks.js';
+import { writeOutboundSnapshot } from './container-runner.js';
+import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
+import { logger } from './logger.js';
+import { isSenderAdmin } from './permissions.js';
+import { RegisteredGroup } from './types.js';
+
+// --- Email whitelist and transporter ---
+// Comma-separated list of allowed inbound/outbound email addresses.
+// If empty, all emails are rejected (safe default).
+const EMAIL_WHITELIST = (process.env.EMAIL_WHITELIST || '')
+  .split(',')
+  .map((e) => e.trim())
+  .filter(Boolean);
+
+if (EMAIL_WHITELIST.length === 0) {
+  logger.warn(
+    'EMAIL_WHITELIST not set — all email send/receive will be rejected',
+  );
+}
+
+const emailEnv = readEnvFile(['BREADBRICH_EMAIL', 'BREADBRICH_EMAIL_PASSWORD']);
+
+let emailTransporter: nodemailer.Transporter | null = null;
+
+function getEmailTransporter(): nodemailer.Transporter | null {
+  if (emailTransporter) return emailTransporter;
+  const user = process.env.BREADBRICH_EMAIL || emailEnv.BREADBRICH_EMAIL;
+  const pass =
+    process.env.BREADBRICH_EMAIL_PASSWORD || emailEnv.BREADBRICH_EMAIL_PASSWORD;
+  if (!user || !pass) {
+    logger.warn('BREADBRICH_EMAIL or BREADBRICH_EMAIL_PASSWORD not set — email disabled');
+    return null;
+  }
+  emailTransporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    auth: { user, pass },
+  });
+  return emailTransporter;
+}
+
+// --- KB file modification access control ---
+
+const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
+
+// Directories coordinators can write to
+const COORDINATOR_WRITABLE = ['calendar', 'tasks', 'artifacts', 'spaces'];
+
+// Directories only admins can write to
+const ADMIN_ONLY = ['people'];
+
+function canModifyKbFile(
+  filePath: string,
+  senderCtx: { is_admin: boolean; tags?: string[] } | null,
+): { allowed: boolean; reason: string } {
+  if (!senderCtx) {
+    return { allowed: false, reason: 'Unknown sender — no identity mapping' };
+  }
+
+  // Normalize path — strip leading slashes, prevent traversal
+  const normalized = filePath.replace(/^\/+/, '').replace(/\.\./g, '');
+  const topDir = normalized.split('/')[0];
+
+  // Admin can write anything
+  if (senderCtx.is_admin) {
+    return { allowed: true, reason: 'Admin access' };
+  }
+
+  // Coordinator can write to specific directories
+  const isCoordinator = (senderCtx.tags || []).includes('coordinator');
+  if (isCoordinator) {
+    if (COORDINATOR_WRITABLE.includes(topDir)) {
+      // Block personnel_notes content
+      return { allowed: true, reason: `Coordinator access to ${topDir}/` };
+    }
+    if (ADMIN_ONLY.includes(topDir)) {
+      return { allowed: false, reason: `${topDir}/ requires admin access` };
+    }
+    return {
+      allowed: false,
+      reason: `Coordinators cannot write to ${topDir}/`,
+    };
+  }
+
+  // Everyone else: no KB writes
+  return { allowed: false, reason: 'Insufficient permissions for KB writes' };
+}
+
+export interface IpcDeps {
+  sendMessage: (jid: string, text: string) => Promise<void>;
+  deleteMessage: (jid: string, messageId: string) => Promise<void>;
+  editMessage: (jid: string, messageId: string, text: string) => Promise<void>;
+  registeredGroups: () => Record<string, RegisteredGroup>;
+  registerGroup: (jid: string, group: RegisteredGroup) => void;
+  syncGroups: (force: boolean) => Promise<void>;
+  getAvailableGroups: () => AvailableGroup[];
+  writeGroupsSnapshot: (
+    groupFolder: string,
+    isMain: boolean,
+    availableGroups: AvailableGroup[],
+    registeredJids: Set<string>,
+  ) => void;
+  onTasksChanged: () => void;
+  onEventsChanged: () => void;
+}
+
+function refreshOutboundSnapshot(groupFolder: string, chatJid: string): void {
+  try {
+    const messages = getRecentBotMessages(chatJid, 10);
+    writeOutboundSnapshot(groupFolder, messages);
+  } catch (err) {
+    logger.warn(
+      { groupFolder, chatJid, err },
+      'Failed to refresh outbound snapshot',
+    );
+  }
+}
+
+let ipcWatcherRunning = false;
+
+export function startIpcWatcher(deps: IpcDeps): void {
+  if (ipcWatcherRunning) {
+    logger.debug('IPC watcher already running, skipping duplicate start');
+    return;
+  }
+  ipcWatcherRunning = true;
+
+  const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+  fs.mkdirSync(ipcBaseDir, { recursive: true });
+
+  const processIpcFiles = async () => {
+    // Scan all group IPC directories (identity determined by directory)
+    let groupFolders: string[];
+    try {
+      groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
+        const stat = fs.statSync(path.join(ipcBaseDir, f));
+        return stat.isDirectory() && f !== 'errors';
+      });
+    } catch (err) {
+      logger.error({ err }, 'Error reading IPC base directory');
+      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      return;
+    }
+
+    const registeredGroups = deps.registeredGroups();
+
+    // Build folder→isMain lookup from registered groups
+    const folderIsMain = new Map<string, boolean>();
+    for (const group of Object.values(registeredGroups)) {
+      if (group.isMain) folderIsMain.set(group.folder, true);
+    }
+
+    for (const sourceGroup of groupFolders) {
+      const isMain = folderIsMain.get(sourceGroup) === true;
+      const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
+      const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
+
+      // Process messages from this group's IPC directory
+      try {
+        if (fs.existsSync(messagesDir)) {
+          const messageFiles = fs
+            .readdirSync(messagesDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of messageFiles) {
+            const filePath = path.join(messagesDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'message' && data.chatJid && data.text) {
+                // Authorization: verify this group can send to this chatJid
+                const targetGroup = registeredGroups[data.chatJid];
+                const isSameGroup =
+                  targetGroup && targetGroup.folder === sourceGroup;
+
+                // Check if the triggering user is admin (from sender_context.json)
+                let senderIsAdmin = false;
+                if (!isMain && !isSameGroup) {
+                  try {
+                    const ctxPath = path.join(
+                      ipcBaseDir,
+                      sourceGroup,
+                      'input',
+                      'sender_context.json',
+                    );
+                    if (fs.existsSync(ctxPath)) {
+                      const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+                      senderIsAdmin = ctx.is_admin === true;
+                    }
+                  } catch {
+                    // Ignore parse errors
+                  }
+                }
+
+                if (isMain || isSameGroup || senderIsAdmin) {
+                  await deps.sendMessage(data.chatJid, data.text);
+                  refreshOutboundSnapshot(sourceGroup, data.chatJid);
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup, senderIsAdmin },
+                    'IPC message sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (
+                (data.type === 'delete_message' ||
+                  data.type === 'edit_message') &&
+                data.chatJid &&
+                data.messageId
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                const isSameGroup =
+                  targetGroup && targetGroup.folder === sourceGroup;
+
+                let senderIsAdmin = false;
+                if (!isMain && !isSameGroup) {
+                  try {
+                    const ctxPath = path.join(
+                      ipcBaseDir,
+                      sourceGroup,
+                      'input',
+                      'sender_context.json',
+                    );
+                    if (fs.existsSync(ctxPath)) {
+                      const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+                      senderIsAdmin = ctx.is_admin === true;
+                    }
+                  } catch {
+                    // Ignore parse errors
+                  }
+                }
+
+                const authorized = isMain || isSameGroup || senderIsAdmin;
+                if (!authorized) {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup, type: data.type },
+                    'Unauthorized IPC message edit/delete blocked',
+                  );
+                } else if (!isBotMessage(data.chatJid, data.messageId)) {
+                  logger.warn(
+                    {
+                      chatJid: data.chatJid,
+                      messageId: data.messageId,
+                      sourceGroup,
+                      type: data.type,
+                    },
+                    'Edit/delete blocked — message is not a bot message',
+                  );
+                } else if (data.type === 'delete_message') {
+                  await deps.deleteMessage(data.chatJid, data.messageId);
+                  refreshOutboundSnapshot(sourceGroup, data.chatJid);
+                  logger.info(
+                    {
+                      chatJid: data.chatJid,
+                      messageId: data.messageId,
+                      sourceGroup,
+                    },
+                    'IPC message deleted',
+                  );
+                } else if (data.type === 'edit_message' && data.text) {
+                  await deps.editMessage(
+                    data.chatJid,
+                    data.messageId,
+                    data.text,
+                  );
+                  refreshOutboundSnapshot(sourceGroup, data.chatJid);
+                  logger.info(
+                    {
+                      chatJid: data.chatJid,
+                      messageId: data.messageId,
+                      sourceGroup,
+                    },
+                    'IPC message edited',
+                  );
+                }
+              } else if (
+                data.type === 'email' &&
+                data.to &&
+                data.subject &&
+                data.body
+              ) {
+                // Email sending via SMTP — whitelist enforced
+                const recipient = data.to.toLowerCase().trim();
+                if (!EMAIL_WHITELIST.includes(recipient)) {
+                  logger.warn(
+                    { to: data.to, sourceGroup },
+                    'Email blocked — recipient not in whitelist',
+                  );
+                } else {
+                  const transport = getEmailTransporter();
+                  if (transport) {
+                    try {
+                      await transport.sendMail({
+                        from: `Breadbrich Engels <${process.env.BREADBRICH_EMAIL}>`,
+                        to: data.to,
+                        subject: data.subject,
+                        text: data.body,
+                      });
+                      logger.info(
+                        { to: data.to, subject: data.subject, sourceGroup },
+                        'Email sent',
+                      );
+                    } catch (emailErr) {
+                      logger.error(
+                        { to: data.to, emailErr },
+                        'Failed to send email',
+                      );
+                    }
+                  }
+                }
+              } else if (data.type === 'modify_kb_file' && data.filePath) {
+                // KB file modification — RBAC enforced
+                let senderCtx: { is_admin: boolean; tags?: string[] } | null =
+                  null;
+                try {
+                  const ctxPath = path.join(
+                    ipcBaseDir,
+                    sourceGroup,
+                    'input',
+                    'sender_context.json',
+                  );
+                  if (fs.existsSync(ctxPath)) {
+                    senderCtx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+                  }
+                } catch {
+                  // Ignore parse errors
+                }
+
+                // Main group always has access
+                if (isMain) {
+                  senderCtx = { is_admin: true, tags: ['admin'] };
+                }
+
+                const { allowed, reason } = canModifyKbFile(
+                  data.filePath,
+                  senderCtx,
+                );
+
+                if (allowed) {
+                  const normalized = data.filePath
+                    .replace(/^\/+/, '')
+                    .replace(/\.\./g, '');
+                  const fullPath = path.join(KB_CONTEXT_DIR, normalized);
+                  const action = data.action || 'write';
+
+                  if (action === 'delete') {
+                    if (fs.existsSync(fullPath)) {
+                      fs.unlinkSync(fullPath);
+                      logger.info(
+                        { filePath: normalized, sourceGroup, reason },
+                        'KB file deleted via IPC',
+                      );
+                    }
+                  } else {
+                    // Ensure parent directory exists
+                    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+                    fs.writeFileSync(fullPath, data.content || '');
+                    // Fix ownership
+                    try {
+                      const { execSync } = await import('child_process');
+                      execSync(`chown breadbrich:breadbrich "${fullPath}"`);
+                    } catch {
+                      /* ignore */
+                    }
+                    logger.info(
+                      { filePath: normalized, sourceGroup, reason },
+                      'KB file written via IPC',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { filePath: data.filePath, sourceGroup, reason },
+                    'KB file modification blocked — insufficient permissions',
+                  );
+                }
+              } else if (
+                data.type === 'add_kb_user' &&
+                data.username &&
+                data.target_telegram_jid
+              ) {
+                // PRIVILEGED: create a KB-UI auth entry + DM the credentials.
+                // Requires source group is_main=1 AND sender is admin.
+                let senderIsAdmin = false;
+                try {
+                  const ctxPath = path.join(
+                    ipcBaseDir,
+                    sourceGroup,
+                    'input',
+                    'sender_context.json',
+                  );
+                  if (fs.existsSync(ctxPath)) {
+                    const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+                    senderIsAdmin = ctx.is_admin === true;
+                  }
+                } catch {
+                  /* ignore */
+                }
+
+                if (!isMain || !senderIsAdmin) {
+                  logger.warn(
+                    {
+                      sourceGroup,
+                      isMain,
+                      senderIsAdmin,
+                      username: data.username,
+                    },
+                    'add_kb_user rejected — requires admin sender in is_main DM',
+                  );
+                } else if (!/^[a-z][a-z0-9_-]{0,31}$/.test(data.username)) {
+                  logger.warn(
+                    { username: data.username, sourceGroup },
+                    'add_kb_user rejected — invalid username format',
+                  );
+                } else {
+                  const usersFile =
+                    process.env.USERS_FILE || '/opt/breadbrich/kb-ui/users.json';
+                  let users: Record<string, string> = {};
+                  try {
+                    if (fs.existsSync(usersFile)) {
+                      users = JSON.parse(fs.readFileSync(usersFile, 'utf-8'));
+                    }
+                  } catch (err) {
+                    logger.error(
+                      { err, usersFile },
+                      'add_kb_user — could not read users file',
+                    );
+                  }
+
+                  if (users[data.username]) {
+                    logger.warn(
+                      { username: data.username, sourceGroup },
+                      'add_kb_user rejected — username already exists',
+                    );
+                  } else {
+                    const crypto = await import('crypto');
+                    const password = `cnvt-${data.username.slice(0, 2)}-${crypto
+                      .randomBytes(6)
+                      .toString('base64url')}`;
+                    users[data.username] = password;
+                    try {
+                      fs.writeFileSync(
+                        usersFile,
+                        JSON.stringify(users, null, 2),
+                      );
+                      const dmText = `Your Breadbrich Engels KB-UI account is ready.\n\nUsername: ${data.username}\nPassword: ${password}\nLogin: https://kb.example.com\n\n(Password sent via DM only; please log in and change/note it.)`;
+                      await deps.sendMessage(data.target_telegram_jid, dmText);
+                      logger.info(
+                        {
+                          username: data.username,
+                          target: data.target_telegram_jid,
+                          sourceGroup,
+                        },
+                        "KB user created and credentials DM'd",
+                      );
+                    } catch (err) {
+                      logger.error(
+                        { err, username: data.username },
+                        'add_kb_user — write or DM failed',
+                      );
+                    }
+                  }
+                }
+              } else if (
+                data.type === 'modify_group_claude_md' &&
+                data.target_folder &&
+                typeof data.new_content === 'string'
+              ) {
+                // PRIVILEGED: rewrite another group's CLAUDE.md from main.
+                // See handleModifyGroupClaudeMd for the gate composition.
+                let senderIsAdmin = false;
+                let senderId: string | null = null;
+                try {
+                  const ctxPath = path.join(
+                    ipcBaseDir,
+                    sourceGroup,
+                    'input',
+                    'sender_context.json',
+                  );
+                  if (fs.existsSync(ctxPath)) {
+                    const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+                    senderIsAdmin = ctx.is_admin === true;
+                    // SenderContext shape from src/permissions.ts uses user_id
+                    senderId =
+                      typeof ctx.user_id === 'string' ? ctx.user_id : null;
+                  }
+                } catch {
+                  /* ignore */
+                }
+                handleModifyGroupClaudeMd(
+                  {
+                    target_folder: data.target_folder,
+                    new_content: data.new_content,
+                    summary:
+                      typeof data.summary === 'string'
+                        ? data.summary
+                        : undefined,
+                  },
+                  { sourceGroup, isMain, senderIsAdmin, senderId },
+                );
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC message',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC messages directory',
+        );
+      }
+
+      // Process tasks from this group's IPC directory
+      try {
+        if (fs.existsSync(tasksDir)) {
+          const taskFiles = fs
+            .readdirSync(tasksDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of taskFiles) {
+            const filePath = path.join(tasksDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              // Pass source group identity to processTaskIpc for authorization
+              await processTaskIpc(data, sourceGroup, isMain, deps);
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC task',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+    }
+
+    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+  };
+
+  processIpcFiles();
+  logger.info('IPC watcher started (per-group namespaces)');
+}
+
+// --- Phase G3: privileged main-only CLAUDE.md modification ---
+//
+// Main-group admins can rewrite any non-self group's CLAUDE.md via this IPC.
+// Read-direction visibility (G1: /workspace/all-groups mount) lets main agents
+// learn what's happening; this is the write-direction counterpart.
+//
+// Gates compose AND, not OR:
+//   1. isMain         — source must be a main group
+//   2. senderIsAdmin  — explicit admin context check, NOT auto-elevated from isMain
+//   3. valid folder   — isValidGroupFolder rejects path-traversal attempts
+//   4. size cap       — refuses pathological payloads
+//
+// Silent by design: no notification to the target group's members. Every
+// successful write inserts a kb_audit_log row including the sender, source
+// group, byte sizes before/after, and an optional human-readable summary.
+
+const CLAUDE_MD_MAX_BYTES = 200 * 1024; // 200 KB ceiling
+
+export interface ModifyGroupClaudeMdInput {
+  target_folder: string;
+  new_content: string;
+  summary?: string;
+}
+
+export interface ModifyGroupClaudeMdResult {
+  status: 'ok' | 'rejected' | 'error';
+  reason?: string;
+  bytesBefore?: number;
+  bytesAfter?: number;
+}
+
+export function handleModifyGroupClaudeMd(
+  input: ModifyGroupClaudeMdInput,
+  ctx: {
+    sourceGroup: string;
+    isMain: boolean;
+    senderIsAdmin: boolean;
+    senderId: string | null;
+  },
+): ModifyGroupClaudeMdResult {
+  const { target_folder, new_content, summary } = input;
+
+  if (!ctx.isMain || !ctx.senderIsAdmin) {
+    logger.warn(
+      {
+        sourceGroup: ctx.sourceGroup,
+        isMain: ctx.isMain,
+        senderIsAdmin: ctx.senderIsAdmin,
+        target_folder,
+      },
+      'modify_group_claude_md rejected — requires admin sender in is_main DM',
+    );
+    return { status: 'rejected', reason: 'unauthorized' };
+  }
+
+  if (typeof target_folder !== 'string' || !isValidGroupFolder(target_folder)) {
+    logger.warn(
+      { sourceGroup: ctx.sourceGroup, target_folder },
+      'modify_group_claude_md rejected — invalid target_folder',
+    );
+    return { status: 'rejected', reason: 'invalid_target_folder' };
+  }
+
+  if (typeof new_content !== 'string') {
+    return { status: 'rejected', reason: 'invalid_new_content' };
+  }
+
+  const bytesAfter = Buffer.byteLength(new_content, 'utf-8');
+  if (bytesAfter > CLAUDE_MD_MAX_BYTES) {
+    logger.warn(
+      { sourceGroup: ctx.sourceGroup, target_folder, bytesAfter },
+      'modify_group_claude_md rejected — new_content exceeds size cap',
+    );
+    return { status: 'rejected', reason: 'oversized' };
+  }
+
+  const targetPath = path.join(
+    resolveGroupFolderPath(target_folder),
+    'CLAUDE.md',
+  );
+
+  let bytesBefore = 0;
+  try {
+    if (fs.existsSync(targetPath)) {
+      bytesBefore = fs.statSync(targetPath).size;
+    }
+  } catch {
+    /* treat as new file */
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const tmpPath = `${targetPath}.tmp`;
+    fs.writeFileSync(tmpPath, new_content);
+    fs.renameSync(tmpPath, targetPath);
+  } catch (err) {
+    logger.error(
+      { err, sourceGroup: ctx.sourceGroup, target_folder, targetPath },
+      'modify_group_claude_md — write failed',
+    );
+    return { status: 'error', reason: 'write_failed' };
+  }
+
+  try {
+    logKbAudit({
+      filePath: targetPath,
+      action: 'modify_group_claude_md',
+      changedBy: ctx.senderId ?? `unknown@${ctx.sourceGroup}`,
+      changes: {
+        sourceGroup: ctx.sourceGroup,
+        targetFolder: target_folder,
+        bytesBefore,
+        bytesAfter,
+        summary: summary ?? null,
+      },
+    });
+  } catch (err) {
+    // Don't roll back the write — the file is updated; audit failure is a
+    // secondary concern logged for follow-up.
+    logger.error(
+      { err, sourceGroup: ctx.sourceGroup, target_folder },
+      'modify_group_claude_md — audit log insert failed (file was written)',
+    );
+  }
+
+  logger.info(
+    {
+      sourceGroup: ctx.sourceGroup,
+      target_folder,
+      bytesBefore,
+      bytesAfter,
+      hasSummary: Boolean(summary),
+    },
+    'modify_group_claude_md applied',
+  );
+  return { status: 'ok', bytesBefore, bytesAfter };
+}
+
+export async function processTaskIpc(
+  data: {
+    type: string;
+    taskId?: string;
+    prompt?: string;
+    schedule_type?: string;
+    schedule_value?: string;
+    context_mode?: string;
+    script?: string;
+    groupFolder?: string;
+    chatJid?: string;
+    targetJid?: string;
+    // For register_group
+    jid?: string;
+    name?: string;
+    folder?: string;
+    trigger?: string;
+    requiresTrigger?: boolean;
+    containerConfig?: RegisteredGroup['containerConfig'];
+    // For tour operations
+    slot_date?: string;
+    slot_time?: string;
+    slot_type?: string;
+    // For residency
+    room_number?: number;
+    room_name?: string;
+    capacity?: number;
+    resident_name?: string;
+    guest_name?: string;
+    is_guest?: boolean;
+    start_date?: string;
+    end_date?: string | null;
+    date?: string;
+    // For event operations
+    event_id?: string;
+    max_capacity?: number;
+    notes?: string;
+    tour_slot_id?: string;
+    guide_name?: string;
+    shift_type?: string;
+    shift_id?: string;
+    request_id?: string;
+    status?: string;
+    requester_name?: string;
+    requester_email?: string;
+    requester_phone?: string;
+    preferred_date?: string;
+    group_size?: number;
+    // For event operations
+    person_name?: string;
+    role?: string;
+    assignment_id?: string;
+    // For meeting summaries
+    summaryId?: string;
+    title?: string;
+    transcript_text?: string;
+    summary_html?: string;
+    action_items?: string;
+    extracted_events?: string;
+    extracted_people?: string;
+    extracted_tasks?: string;
+    extracted_documents?: string;
+    clarification_questions?: string;
+    // For transcript task approval
+    summary_id?: string;
+    tasks?: Array<{
+      title: string;
+      description?: string;
+      proposed_assignee?: string;
+      proposed_due_date?: string;
+      source_quote?: string;
+    }>;
+    items?: Array<{
+      proposed_task_id: string;
+      final_title?: string;
+      final_assignee?: string;
+      final_due_date?: string;
+    }>;
+    proposed_task_id?: string;
+    reason?: string | null;
+    // For expense operations
+    expense_id?: string;
+    request_type?: 'prospective' | 'retrospective' | string;
+    decision?: 'approve' | 'deny' | 'modify' | string;
+    amount_cents?: number;
+    approved_amount_cents?: number;
+    actual_amount_cents?: number;
+    currency?: string;
+    description?: string;
+    category?: string | null;
+    vendor?: string | null;
+    justification?: string | null;
+    expected_date?: string | null;
+    incurred_date?: string | null;
+    approver_notes?: string | null;
+    receipt_path?: string | null;
+    reimbursement_method?: string;
+    // For residency requests (request_id, status declared above with tours)
+    requested_start_date?: string;
+    requested_end_date?: string | null;
+    requester_contact?: string | null;
+    room_preference?: string | null;
+    resolution_notes?: string | null;
+    // For event intake / booking
+    booking_id?: string;
+    new_status?: string;
+    intake_owner?: string;
+    intake_date?: string;
+    contract_signed_date?: string;
+    deposit_paid_date?: string;
+    cancellation_reason?: string;
+    post_event_state?: string;
+    expected_headcount?: number;
+    preferred_space?: string;
+    event_name?: string;
+    event_type?: string;
+    event_date?: string;
+    start_time?: string;
+    end_time?: string;
+    answers?: Record<string, string>;
+    pricing?: {
+      base_venue_fee?: number;
+      portfolio_discount?: boolean;
+      av_line_item?: number;
+      cleaning_fee?: number;
+      catering_passthrough?: number;
+      damage_deposit?: number;
+      total_quote?: number;
+      deposit_pct?: number;
+      final_payment_due?: string;
+    };
+    staffing?: {
+      on_site_lead?: string;
+      greeter?: string;
+      bar_kitchen?: string;
+      cleaner?: string;
+      outside_vendors?: string;
+    };
+  },
+  sourceGroup: string, // Verified identity from IPC directory
+  isMain: boolean, // Verified from directory path
+  deps: IpcDeps,
+): Promise<void> {
+  const registeredGroups = deps.registeredGroups();
+
+  switch (data.type) {
+    case 'schedule_task':
+      if (
+        data.prompt &&
+        data.schedule_type &&
+        data.schedule_value &&
+        data.targetJid
+      ) {
+        // Resolve the target group from JID
+        const targetJid = data.targetJid as string;
+        const targetGroupEntry = registeredGroups[targetJid];
+
+        if (!targetGroupEntry) {
+          logger.warn(
+            { targetJid },
+            'Cannot schedule task: target group not registered',
+          );
+          break;
+        }
+
+        const targetFolder = targetGroupEntry.folder;
+
+        // Authorization: non-main groups can only schedule for themselves
+        if (!isMain && targetFolder !== sourceGroup) {
+          logger.warn(
+            { sourceGroup, targetFolder },
+            'Unauthorized schedule_task attempt blocked',
+          );
+          break;
+        }
+
+        const scheduleType = data.schedule_type as 'cron' | 'interval' | 'once';
+
+        let nextRun: string | null = null;
+        if (scheduleType === 'cron') {
+          try {
+            const interval = CronExpressionParser.parse(data.schedule_value, {
+              tz: TIMEZONE,
+            });
+            nextRun = interval.next().toISOString();
+          } catch {
+            logger.warn(
+              { scheduleValue: data.schedule_value },
+              'Invalid cron expression',
+            );
+            break;
+          }
+        } else if (scheduleType === 'interval') {
+          const ms = parseInt(data.schedule_value, 10);
+          if (isNaN(ms) || ms <= 0) {
+            logger.warn(
+              { scheduleValue: data.schedule_value },
+              'Invalid interval',
+            );
+            break;
+          }
+          nextRun = new Date(Date.now() + ms).toISOString();
+        } else if (scheduleType === 'once') {
+          const date = new Date(data.schedule_value);
+          if (isNaN(date.getTime())) {
+            logger.warn(
+              { scheduleValue: data.schedule_value },
+              'Invalid timestamp',
+            );
+            break;
+          }
+          nextRun = date.toISOString();
+        }
+
+        const taskId =
+          data.taskId ||
+          `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const contextMode =
+          data.context_mode === 'group' || data.context_mode === 'isolated'
+            ? data.context_mode
+            : 'isolated';
+        createTask({
+          id: taskId,
+          group_folder: targetFolder,
+          chat_jid: targetJid,
+          prompt: data.prompt,
+          script: data.script || null,
+          schedule_type: scheduleType,
+          schedule_value: data.schedule_value,
+          context_mode: contextMode,
+          next_run: nextRun,
+          status: 'active',
+          created_at: new Date().toISOString(),
+        });
+        logger.info(
+          { taskId, sourceGroup, targetFolder, contextMode },
+          'Task created via IPC',
+        );
+        deps.onTasksChanged();
+      }
+      break;
+
+    case 'pause_task':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (task && (isMain || task.group_folder === sourceGroup)) {
+          updateTask(data.taskId, { status: 'paused' });
+          logger.info(
+            { taskId: data.taskId, sourceGroup },
+            'Task paused via IPC',
+          );
+          deps.onTasksChanged();
+        } else {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Unauthorized task pause attempt',
+          );
+        }
+      }
+      break;
+
+    case 'resume_task':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (task && (isMain || task.group_folder === sourceGroup)) {
+          updateTask(data.taskId, { status: 'active' });
+          logger.info(
+            { taskId: data.taskId, sourceGroup },
+            'Task resumed via IPC',
+          );
+          deps.onTasksChanged();
+        } else {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Unauthorized task resume attempt',
+          );
+        }
+      }
+      break;
+
+    case 'cancel_task':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (task && (isMain || task.group_folder === sourceGroup)) {
+          deleteTask(data.taskId);
+          logger.info(
+            { taskId: data.taskId, sourceGroup },
+            'Task cancelled via IPC',
+          );
+          deps.onTasksChanged();
+        } else {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Unauthorized task cancel attempt',
+          );
+        }
+      }
+      break;
+
+    case 'update_task':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (!task) {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Task not found for update',
+          );
+          break;
+        }
+        if (!isMain && task.group_folder !== sourceGroup) {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Unauthorized task update attempt',
+          );
+          break;
+        }
+
+        const updates: Parameters<typeof updateTask>[1] = {};
+        if (data.prompt !== undefined) updates.prompt = data.prompt;
+        if (data.script !== undefined) updates.script = data.script || null;
+        if (data.schedule_type !== undefined)
+          updates.schedule_type = data.schedule_type as
+            | 'cron'
+            | 'interval'
+            | 'once';
+        if (data.schedule_value !== undefined)
+          updates.schedule_value = data.schedule_value;
+
+        // Recompute next_run if schedule changed
+        if (data.schedule_type || data.schedule_value) {
+          const updatedTask = {
+            ...task,
+            ...updates,
+          };
+          if (updatedTask.schedule_type === 'cron') {
+            try {
+              const interval = CronExpressionParser.parse(
+                updatedTask.schedule_value,
+                { tz: TIMEZONE },
+              );
+              updates.next_run = interval.next().toISOString();
+            } catch {
+              logger.warn(
+                { taskId: data.taskId, value: updatedTask.schedule_value },
+                'Invalid cron in task update',
+              );
+              break;
+            }
+          } else if (updatedTask.schedule_type === 'interval') {
+            const ms = parseInt(updatedTask.schedule_value, 10);
+            if (!isNaN(ms) && ms > 0) {
+              updates.next_run = new Date(Date.now() + ms).toISOString();
+            }
+          }
+        }
+
+        updateTask(data.taskId, updates);
+        logger.info(
+          { taskId: data.taskId, sourceGroup, updates },
+          'Task updated via IPC',
+        );
+        deps.onTasksChanged();
+      }
+      break;
+
+    case 'refresh_groups':
+      // Only main group can request a refresh
+      if (isMain) {
+        logger.info(
+          { sourceGroup },
+          'Group metadata refresh requested via IPC',
+        );
+        await deps.syncGroups(true);
+        // Write updated snapshot immediately
+        const availableGroups = deps.getAvailableGroups();
+        deps.writeGroupsSnapshot(
+          sourceGroup,
+          true,
+          availableGroups,
+          new Set(Object.keys(registeredGroups)),
+        );
+      } else {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized refresh_groups attempt blocked',
+        );
+      }
+      break;
+
+    case 'register_group':
+      // Only main group can register new groups
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized register_group attempt blocked',
+        );
+        break;
+      }
+      if (data.jid && data.name && data.folder && data.trigger) {
+        if (!isValidGroupFolder(data.folder)) {
+          logger.warn(
+            { sourceGroup, folder: data.folder },
+            'Invalid register_group request - unsafe folder name',
+          );
+          break;
+        }
+        // Defense in depth: agent cannot set isMain via IPC.
+        // Preserve isMain from the existing registration so IPC config
+        // updates (e.g. adding additionalMounts) don't strip the flag.
+        const existingGroup = registeredGroups[data.jid];
+        deps.registerGroup(data.jid, {
+          name: data.name,
+          folder: data.folder,
+          trigger: data.trigger,
+          added_at: new Date().toISOString(),
+          containerConfig: data.containerConfig,
+          requiresTrigger: data.requiresTrigger,
+          isMain: existingGroup?.isMain,
+        });
+      } else {
+        logger.warn(
+          { data },
+          'Invalid register_group request - missing required fields',
+        );
+      }
+      break;
+
+    case 'create_tour_slot': {
+      if (!data.slot_date || !data.slot_time) {
+        logger.warn(
+          { sourceGroup },
+          'create_tour_slot: missing slot_date or slot_time',
+        );
+        break;
+      }
+      const slot = createTourSlot({
+        slot_date: data.slot_date,
+        slot_time: data.slot_time,
+        slot_type: data.slot_type || 'regular',
+        event_id: data.event_id || null,
+        max_capacity: data.max_capacity || 10,
+        notes: data.notes || null,
+      });
+      deps.onTasksChanged();
+      logger.info(
+        { slotId: slot.id, date: data.slot_date },
+        'Tour slot created',
+      );
+      break;
+    }
+
+    case 'generate_weekly_tour_slots': {
+      const created = generateWeeklySlots();
+      deps.onTasksChanged();
+      logger.info({ count: created.length }, 'Weekly tour slots generated');
+      break;
+    }
+
+    case 'claim_tour_shift': {
+      if (!data.tour_slot_id || !data.guide_name) {
+        logger.warn(
+          { sourceGroup },
+          'claim_tour_shift: missing tour_slot_id or guide_name',
+        );
+        break;
+      }
+      const tourUsers = getAllUsers();
+      let tourUser = tourUsers.find(
+        (u) => u.name.toLowerCase() === data.guide_name!.toLowerCase(),
+      );
+      if (!tourUser) {
+        tourUser = createUser(data.guide_name);
+      }
+      createTourShift({
+        tour_slot_id: data.tour_slot_id,
+        user_id: tourUser.id,
+        shift_type: data.shift_type || 'lead',
+      });
+      const claimedSlot = getTourSlotById(data.tour_slot_id);
+      const claimedSlotLabel = claimedSlot
+        ? `${claimedSlot.slot_date} at ${claimedSlot.slot_time}`
+        : data.tour_slot_id;
+      const claimMainJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (claimMainJid) {
+        await deps.sendMessage(
+          claimMainJid,
+          `${data.guide_name} claimed tour guide shift for ${claimedSlotLabel}.`,
+        );
+      }
+      deps.onTasksChanged();
+      logger.info(
+        { guide: data.guide_name, slotId: data.tour_slot_id },
+        'Tour shift claimed',
+      );
+      break;
+    }
+
+    case 'release_tour_shift': {
+      if (!data.shift_id) {
+        logger.warn({ sourceGroup }, 'release_tour_shift: missing shift_id');
+        break;
+      }
+      const existingShift = getTourShiftById(data.shift_id);
+      if (!existingShift) {
+        logger.warn(
+          { sourceGroup, shiftId: data.shift_id },
+          'release_tour_shift: shift not found',
+        );
+        break;
+      }
+      deleteTourShift(data.shift_id);
+      const releaseLabel =
+        existingShift.slot_date && existingShift.slot_time
+          ? `${existingShift.slot_date} at ${existingShift.slot_time}`
+          : existingShift.tour_slot_id;
+      const releaseMainJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (releaseMainJid) {
+        await deps.sendMessage(
+          releaseMainJid,
+          `${existingShift.user_name || 'Guide'} released from tour on ${releaseLabel}.`,
+        );
+      }
+      deps.onTasksChanged();
+      logger.info(
+        {
+          shiftId: data.shift_id,
+          guide: existingShift.user_name,
+          slotId: existingShift.tour_slot_id,
+        },
+        'Tour shift released',
+      );
+      break;
+    }
+
+    case 'update_tour_request_status': {
+      if (!data.request_id || !data.status) {
+        logger.warn(
+          { sourceGroup },
+          'update_tour_request_status: missing request_id or status',
+        );
+        break;
+      }
+      const allowedStatuses = ['pending', 'confirmed', 'cancelled'];
+      if (!allowedStatuses.includes(data.status)) {
+        logger.warn(
+          { sourceGroup, status: data.status },
+          'update_tour_request_status: invalid status',
+        );
+        break;
+      }
+      const existingRequest = getTourRequestById(data.request_id);
+      if (!existingRequest) {
+        logger.warn(
+          { sourceGroup, requestId: data.request_id },
+          'update_tour_request_status: request not found',
+        );
+        break;
+      }
+      updateTourRequestStatus(data.request_id, data.status);
+      const statusSlot = getTourSlotById(existingRequest.tour_slot_id);
+      const statusSlotLabel = statusSlot
+        ? `${statusSlot.slot_date} at ${statusSlot.slot_time}`
+        : existingRequest.tour_slot_id;
+      const statusMainJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (statusMainJid) {
+        await deps.sendMessage(
+          statusMainJid,
+          `Tour request from ${existingRequest.requester_name} (group of ${existingRequest.group_size}) for ${statusSlotLabel} marked ${data.status}.`,
+        );
+      }
+      // Requester notification: email on confirmed (if email whitelisted)
+      if (
+        data.status === 'confirmed' &&
+        existingRequest.requester_email &&
+        EMAIL_WHITELIST.includes(
+          existingRequest.requester_email.toLowerCase().trim(),
+        )
+      ) {
+        const transport = getEmailTransporter();
+        if (transport) {
+          try {
+            await transport.sendMail({
+              from: `Breadbrich Engels <${process.env.BREADBRICH_EMAIL}>`,
+              to: existingRequest.requester_email,
+              subject: `Tour confirmed — ${statusSlotLabel}`,
+              text:
+                `Hi ${existingRequest.requester_name},\n\n` +
+                `Your tour request for ${statusSlotLabel} is confirmed (group of ${existingRequest.group_size}).\n\n` +
+                `— the organization`,
+            });
+            logger.info(
+              {
+                requestId: data.request_id,
+                to: existingRequest.requester_email,
+              },
+              'Tour confirmation email sent to requester',
+            );
+          } catch (emailErr) {
+            logger.error(
+              { requestId: data.request_id, emailErr },
+              'Failed to send tour confirmation email',
+            );
+          }
+        }
+      }
+      deps.onTasksChanged();
+      logger.info(
+        { requestId: data.request_id, status: data.status },
+        'Tour request status updated',
+      );
+      break;
+    }
+
+    case 'request_tour': {
+      if (!data.tour_slot_id || !data.requester_name) {
+        logger.warn(
+          { sourceGroup },
+          'request_tour: missing tour_slot_id or requester_name',
+        );
+        break;
+      }
+      const tourRequest = createTourRequest({
+        tour_slot_id: data.tour_slot_id,
+        requester_name: data.requester_name,
+        requester_email: data.requester_email || null,
+        requester_phone: data.requester_phone || null,
+        preferred_date: data.preferred_date || null,
+        group_size: data.group_size || 1,
+        notes: data.notes || null,
+      });
+      // Notify main group about the new tour request
+      const tourSlot = getTourSlotById(data.tour_slot_id);
+      const slotLabel = tourSlot
+        ? `${tourSlot.slot_date} at ${tourSlot.slot_time}`
+        : data.tour_slot_id;
+      const mainGroupJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (mainGroupJid) {
+        await deps.sendMessage(
+          mainGroupJid,
+          `New tour request from ${data.requester_name} (group of ${data.group_size || 1}) for ${slotLabel}.`,
+        );
+      }
+      deps.onTasksChanged();
+      logger.info(
+        { requestId: tourRequest.id, name: data.requester_name },
+        'Tour request created',
+      );
+      break;
+    }
+
+    // --- Residency IPC handlers ---
+
+    case 'add_room': {
+      if (!data.room_number) {
+        logger.warn({ sourceGroup }, 'add_room: missing room_number');
+        break;
+      }
+
+      const room = createRoom({
+        room_number: data.room_number,
+        room_name: data.room_name || null,
+        capacity: data.capacity || 1,
+        notes: data.notes || null,
+      });
+
+      deps.onTasksChanged();
+      logger.info(
+        { roomId: room.id, roomNumber: data.room_number },
+        'Room created',
+      );
+      break;
+    }
+
+    case 'add_occupancy': {
+      if (!data.room_number || !data.start_date) {
+        logger.warn({ sourceGroup }, 'add_occupancy: missing required fields');
+        break;
+      }
+
+      const occRooms = getAllRooms();
+      const occRoom = occRooms.find((r) => r.room_number === data.room_number);
+      if (!occRoom) {
+        logger.warn(
+          { sourceGroup, roomNumber: data.room_number },
+          'add_occupancy: room not found',
+        );
+        break;
+      }
+
+      let userId = null;
+      if (!data.is_guest) {
+        const users = getAllUsers();
+        const existing = users.find(
+          (u) => u.name.toLowerCase() === data.resident_name!.toLowerCase(),
+        );
+        if (existing) {
+          userId = existing.id;
+        } else {
+          const newUser = createUser(data.resident_name!);
+          userId = newUser.id;
+        }
+      }
+
+      createOccupancy({
+        room_id: occRoom.id,
+        user_id: userId,
+        guest_name: data.is_guest ? data.guest_name! : null,
+        start_date: data.start_date,
+        end_date: data.end_date || null,
+        is_guest: data.is_guest!,
+        notes: data.notes || null,
+      });
+
+      deps.onTasksChanged();
+      const who = data.is_guest ? data.guest_name : data.resident_name;
+      logger.info(
+        { roomNumber: data.room_number, name: who },
+        'Occupancy added',
+      );
+      break;
+    }
+
+    case 'check_room_availability': {
+      const checkDate = data.date || new Date().toISOString().split('T')[0];
+      const availRooms = getAllRooms();
+
+      const results = availRooms.map((room) => {
+        const activeOcc = (room.occupancy || []).filter(
+          (o) =>
+            o.start_date <= checkDate &&
+            (!o.end_date || o.end_date >= checkDate),
+        );
+        return {
+          room_number: room.room_number,
+          room_name: room.room_name,
+          capacity: room.capacity,
+          current_occupants: activeOcc.length,
+          available_spots: room.capacity - activeOcc.length,
+          occupant_names: activeOcc.map((o) =>
+            o.is_guest ? o.guest_name : o.user_name,
+          ),
+        };
+      });
+
+      const availableRooms = results.filter((r) => r.available_spots > 0);
+      const resultText =
+        availableRooms.length > 0
+          ? availableRooms
+              .map(
+                (r) =>
+                  `Room ${r.room_number}${r.room_name ? ` (${r.room_name})` : ''}: ${r.available_spots}/${r.capacity} spots open`,
+              )
+              .join('\n')
+          : 'No rooms available on ' + checkDate;
+
+      logger.info(
+        { checkDate, available: availableRooms.length, resultText },
+        'Room availability checked',
+      );
+      break;
+    }
+
+    case 'edit_occupancy': {
+      if (!data.name || !data.room_number) {
+        logger.warn(
+          { sourceGroup },
+          'edit_occupancy: missing name or room_number',
+        );
+        break;
+      }
+
+      const editRooms = getAllRooms();
+      const editRoom = editRooms.find(
+        (r) => r.room_number === data.room_number,
+      );
+      if (!editRoom) break;
+
+      const editOcc = (editRoom.occupancy || []).find((o) => {
+        const occName = o.is_guest ? o.guest_name : o.user_name;
+        return occName && occName.toLowerCase() === data.name!.toLowerCase();
+      });
+      if (!editOcc) {
+        logger.warn(
+          { name: data.name, roomNumber: data.room_number },
+          'edit_occupancy: occupancy not found',
+        );
+        break;
+      }
+
+      updateOccupancy(editOcc.id, {
+        start_date: data.start_date,
+        end_date: data.end_date,
+        notes: data.notes,
+      });
+
+      deps.onTasksChanged();
+      logger.info({ occId: editOcc.id, name: data.name }, 'Occupancy updated');
+      break;
+    }
+
+    case 'remove_occupancy': {
+      if (!data.name || !data.room_number) {
+        logger.warn(
+          { sourceGroup },
+          'remove_occupancy: missing name or room_number',
+        );
+        break;
+      }
+
+      const rmRooms = getAllRooms();
+      const rmRoom = rmRooms.find((r) => r.room_number === data.room_number);
+      if (!rmRoom) break;
+
+      const rmOcc = (rmRoom.occupancy || []).find((o) => {
+        const occName = o.is_guest ? o.guest_name : o.user_name;
+        return occName && occName.toLowerCase() === data.name!.toLowerCase();
+      });
+      if (!rmOcc) {
+        logger.warn(
+          { name: data.name, roomNumber: data.room_number },
+          'remove_occupancy: occupancy not found',
+        );
+        break;
+      }
+
+      deleteOccupancy(rmOcc.id);
+      deps.onTasksChanged();
+      logger.info(
+        { occId: rmOcc.id, name: data.name, roomNumber: data.room_number },
+        'Occupancy removed',
+      );
+      break;
+    }
+
+    // --- Residency request (application) IPC handlers ---
+
+    case 'submit_residency_request': {
+      if (
+        !data.requester_name ||
+        !data.request_type ||
+        !data.requested_start_date
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'submit_residency_request: missing required fields',
+        );
+        break;
+      }
+      if (data.request_type !== 'resident' && data.request_type !== 'guest') {
+        logger.warn(
+          { sourceGroup, requestType: data.request_type },
+          'submit_residency_request: invalid request_type',
+        );
+        break;
+      }
+      if (
+        data.requested_end_date &&
+        data.requested_end_date < data.requested_start_date
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'submit_residency_request: end date before start date',
+        );
+        break;
+      }
+
+      // Resolve the originating chat JID from the trusted sourceGroup folder
+      // mapping only. `data.chatJid` is untrusted input from the IPC payload
+      // and is deliberately ignored to prevent a crafted IPC file from
+      // spoofing the chat that will receive the decision notification.
+      const originJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === sourceGroup,
+      )?.[0];
+
+      if (!originJid) {
+        logger.warn(
+          { sourceGroup },
+          'submit_residency_request: unable to resolve origin chat JID; aborting',
+        );
+        break;
+      }
+
+      const residencyRequest = createResidencyRequest({
+        chat_jid: originJid,
+        source_group: sourceGroup,
+        requester_name: data.requester_name,
+        requester_contact: data.requester_contact || null,
+        request_type: data.request_type,
+        requested_start_date: data.requested_start_date,
+        requested_end_date: data.requested_end_date || null,
+        room_preference: data.room_preference || null,
+        notes: data.notes || null,
+      });
+
+      // Notify the main group about the new request
+      const mainGroupJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (mainGroupJid) {
+        const range = data.requested_end_date
+          ? `${data.requested_start_date} → ${data.requested_end_date}`
+          : `${data.requested_start_date} (ongoing)`;
+        const parts = [
+          `New residency request (${data.request_type}): ${data.requester_name}`,
+          `Dates: ${range}`,
+        ];
+        if (data.room_preference)
+          parts.push(`Room preference: ${data.room_preference}`);
+        if (data.requester_contact)
+          parts.push(`Contact: ${data.requester_contact}`);
+        if (data.notes) parts.push(`Notes: ${data.notes}`);
+        parts.push(`Request ID: ${residencyRequest.id}`);
+        parts.push(
+          `Review with: review_residency_request request_id="${residencyRequest.id}" decision="approve|reject"`,
+        );
+        await deps.sendMessage(mainGroupJid, parts.join('\n'));
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        {
+          requestId: residencyRequest.id,
+          name: data.requester_name,
+          type: data.request_type,
+          sourceGroup,
+        },
+        'Residency request submitted',
+      );
+      break;
+    }
+
+    case 'review_residency_request': {
+      if (!data.request_id || !data.decision) {
+        logger.warn(
+          { sourceGroup },
+          'review_residency_request: missing request_id or decision',
+        );
+        break;
+      }
+      if (data.decision !== 'approve' && data.decision !== 'reject') {
+        logger.warn(
+          { sourceGroup, decision: data.decision },
+          'review_residency_request: invalid decision',
+        );
+        break;
+      }
+      // Authorization: main group only. The MCP tool also gates this, but we
+      // enforce here as defense-in-depth.
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup, requestId: data.request_id },
+          'review_residency_request: unauthorized (not main group)',
+        );
+        break;
+      }
+
+      const existing = getResidencyRequest(data.request_id);
+      if (!existing) {
+        logger.warn(
+          { sourceGroup, requestId: data.request_id },
+          'review_residency_request: request not found',
+        );
+        break;
+      }
+      if (existing.status !== 'pending') {
+        logger.warn(
+          { requestId: data.request_id, status: existing.status },
+          'review_residency_request: request already resolved',
+        );
+        break;
+      }
+
+      const nextStatus = data.decision === 'approve' ? 'approved' : 'rejected';
+      updateResidencyRequestStatus(
+        data.request_id,
+        nextStatus,
+        sourceGroup,
+        data.resolution_notes || null,
+      );
+
+      // Notify the originating chat of the decision
+      if (existing.chat_jid) {
+        const verb = nextStatus === 'approved' ? 'approved' : 'declined';
+        const lines = [
+          `Your residency request has been ${verb}.`,
+          `Applicant: ${existing.requester_name} (${existing.request_type})`,
+        ];
+        if (data.resolution_notes) lines.push(`Note: ${data.resolution_notes}`);
+        if (nextStatus === 'approved') {
+          lines.push(
+            'Next step: a coordinator will be in touch to confirm room and onboarding details.',
+          );
+        }
+        try {
+          await deps.sendMessage(existing.chat_jid, lines.join('\n'));
+        } catch (err) {
+          logger.warn(
+            { err, chatJid: existing.chat_jid },
+            'review_residency_request: failed to notify originating chat',
+          );
+        }
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        { requestId: data.request_id, decision: nextStatus, sourceGroup },
+        'Residency request reviewed',
+      );
+      break;
+    }
+
+    case 'list_residency_requests': {
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'list_residency_requests: unauthorized (not main group)',
+        );
+        break;
+      }
+      const filterStatus = data.status || undefined;
+      const rows = listResidencyRequestsByStatus(filterStatus || undefined);
+
+      const mainGroupJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (mainGroupJid) {
+        if (rows.length === 0) {
+          await deps.sendMessage(
+            mainGroupJid,
+            filterStatus
+              ? `No residency requests with status "${filterStatus}".`
+              : 'No residency requests on record.',
+          );
+        } else {
+          const lines = rows.slice(0, 20).map((r) => {
+            const range = r.requested_end_date
+              ? `${r.requested_start_date}→${r.requested_end_date}`
+              : `${r.requested_start_date} (ongoing)`;
+            return `- [${r.status}] ${r.id}: ${r.requester_name} (${r.request_type}) ${range}`;
+          });
+          const header = filterStatus
+            ? `Residency requests (status=${filterStatus}):`
+            : 'Residency requests:';
+          const suffix =
+            rows.length > 20 ? `\n…and ${rows.length - 20} more.` : '';
+          await deps.sendMessage(
+            mainGroupJid,
+            `${header}\n${lines.join('\n')}${suffix}`,
+          );
+        }
+      }
+      logger.info(
+        { count: rows.length, status: filterStatus, sourceGroup },
+        'Residency requests listed',
+      );
+      break;
+    }
+
+    // --- Event IPC handlers ---
+
+    case 'assign_event_role': {
+      if (!data.event_id || !data.person_name || !data.role) {
+        logger.warn(
+          { sourceGroup },
+          'Events: missing required fields for assignment',
+        );
+        break;
+      }
+
+      const validRoles = new Set([
+        'host',
+        'setup',
+        'cleanup',
+        'catering',
+        'security',
+        'other',
+      ]);
+      if (!validRoles.has(data.role)) {
+        logger.warn({ sourceGroup, role: data.role }, 'Events: invalid role');
+        break;
+      }
+
+      const event = getEventById(data.event_id);
+      if (!event) {
+        logger.warn(
+          { sourceGroup, eventId: data.event_id },
+          'Events: event not found',
+        );
+        break;
+      }
+
+      // Find or create user by name
+      const eventUsers = getAllUsers();
+      let eventUser = eventUsers.find(
+        (u) => u.name.toLowerCase() === data.person_name!.toLowerCase(),
+      );
+      if (!eventUser) {
+        eventUser = createUser(data.person_name);
+        logger.info({ name: data.person_name }, 'Events: created new user');
+      }
+
+      createAssignment({
+        event_id: data.event_id,
+        user_id: eventUser.id,
+        role: data.role,
+        notes: data.notes || null,
+      });
+
+      deps.onEventsChanged();
+      logger.info(
+        {
+          eventId: data.event_id,
+          eventTitle: event.title,
+          userName: eventUser.name,
+          role: data.role,
+        },
+        'Events: assignment created',
+      );
+      break;
+    }
+
+    case 'remove_event_assignment': {
+      if (!data.assignment_id) {
+        logger.warn({ sourceGroup }, 'Events: missing assignment_id');
+        break;
+      }
+
+      deleteAssignment(data.assignment_id);
+      deps.onEventsChanged();
+      logger.info(
+        { assignmentId: data.assignment_id },
+        'Events: assignment removed',
+      );
+      break;
+    }
+
+    // --- Meeting summary IPC handler ---
+
+    case 'save_meeting_summary': {
+      if (!data.summaryId || !data.title || !data.transcript_text) {
+        logger.warn(
+          { sourceGroup },
+          'save_meeting_summary: missing required fields',
+        );
+        break;
+      }
+
+      const targetJid =
+        data.chatJid ||
+        Object.entries(registeredGroups).find(
+          ([, g]) => g.folder === sourceGroup,
+        )?.[0];
+
+      if (!targetJid) {
+        logger.warn(
+          { sourceGroup },
+          'save_meeting_summary: cannot resolve chat JID',
+        );
+        break;
+      }
+
+      // Status is 'completed' only when summary_html and action_items are present
+      const summaryStatus =
+        data.summary_html && data.action_items ? 'completed' : 'pending';
+
+      createMeetingSummary({
+        id: data.summaryId,
+        chat_jid: targetJid,
+        group_folder: sourceGroup,
+        title: data.title,
+        transcript_text: data.transcript_text,
+        summary_html: data.summary_html || null,
+        action_items: data.action_items || null,
+        extracted_events: data.extracted_events || null,
+        extracted_people: data.extracted_people || null,
+        extracted_tasks: data.extracted_tasks || null,
+        extracted_documents: data.extracted_documents || null,
+        clarification_questions: data.clarification_questions || null,
+        status: summaryStatus,
+      });
+
+      deps.onTasksChanged();
+      logger.info(
+        { summaryId: data.summaryId, title: data.title, sourceGroup },
+        'Meeting summary saved',
+      );
+      break;
+    }
+
+    // --- Transcript task approval handlers ---
+
+    case 'propose_meeting_tasks': {
+      if (
+        !data.summary_id ||
+        !Array.isArray(data.tasks) ||
+        data.tasks.length === 0
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'propose_meeting_tasks: missing summary_id or tasks',
+        );
+        break;
+      }
+
+      const summary = getMeetingSummaryById(data.summary_id);
+      if (!summary) {
+        logger.warn(
+          { sourceGroup, summaryId: data.summary_id },
+          'propose_meeting_tasks: unknown summary_id',
+        );
+        break;
+      }
+      if (summary.group_folder !== sourceGroup) {
+        logger.warn(
+          {
+            sourceGroup,
+            summaryId: data.summary_id,
+            summaryGroup: summary.group_folder,
+          },
+          'propose_meeting_tasks: summary belongs to a different group — refusing cross-group attach',
+        );
+        break;
+      }
+
+      const proposerCtx = readSenderContext(sourceGroup);
+      const senderUserId = proposerCtx?.user_id ?? null;
+
+      const batchTs = Date.now();
+      const batchSuffix = Math.random().toString(36).slice(2, 8);
+      const rows = data.tasks.map((t, idx) => ({
+        id: `PT-${batchTs}-${batchSuffix}-${idx}`,
+        summary_id: data.summary_id!,
+        chat_jid: summary.chat_jid,
+        group_folder: sourceGroup,
+        requester_user_id: senderUserId,
+        title: t.title,
+        description: t.description ?? null,
+        proposed_assignee: t.proposed_assignee ?? null,
+        proposed_due_date: t.proposed_due_date ?? null,
+        source_quote: t.source_quote ?? null,
+      }));
+
+      createProposedTasksBatch(rows);
+
+      const mainGroupJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      )?.[0];
+      if (mainGroupJid) {
+        const lines = rows.map((r, i) => {
+          const meta = [
+            r.proposed_assignee ? `proposed: ${r.proposed_assignee}` : null,
+            r.proposed_due_date ? `due ${r.proposed_due_date}` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ');
+          const metaSuffix = meta ? ` — ${meta}` : '';
+          return `${i + 1}. *${r.title}*${metaSuffix}\n   id: \`${r.id}\``;
+        });
+        const body =
+          `📝 Coordinator review needed: *${rows.length}* proposed task(s) from "${summary.title}"\n\n` +
+          lines.join('\n\n') +
+          `\n\nReply with "approve PT-..." or "reject PT-..." for each item.`;
+        await deps.sendMessage(mainGroupJid, body);
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        { summaryId: data.summary_id, count: rows.length, sourceGroup },
+        'Proposed tasks created; coordinator notified',
+      );
+      break;
+    }
+
+    case 'approve_proposed_tasks': {
+      if (!Array.isArray(data.items) || data.items.length === 0) {
+        logger.warn({ sourceGroup }, 'approve_proposed_tasks: missing items');
+        break;
+      }
+
+      const senderCtx = readSenderContext(sourceGroup);
+      const isCoordinator =
+        senderCtx !== null &&
+        (senderCtx.is_admin ||
+          senderCtx.tags.includes('coordinator') ||
+          senderCtx.tags.includes('admin'));
+
+      const mainGroupJid = findMainGroupJid(registeredGroups);
+
+      // Fail closed: without a valid sender_context.json declaring coordinator
+      // or admin authority, refuse. We do NOT fabricate identity just because
+      // the call originated from the main group — every approval must be
+      // traceable to a real user_id for audit purposes.
+      if (!isCoordinator) {
+        logger.warn(
+          { sourceGroup, hasSenderCtx: senderCtx !== null, isMain },
+          'approve_proposed_tasks: rejected — no valid coordinator identity',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            '⚠️ Only coordinators can approve proposed tasks. The caller must have a sender_context with the coordinator or admin tag.',
+          );
+        }
+        break;
+      }
+
+      const approverId = senderCtx.user_id;
+
+      const created: Array<{
+        proposedId: string;
+        taskId: string;
+        title: string;
+      }> = [];
+      const skipped: string[] = [];
+
+      const failed: string[] = [];
+
+      for (const item of data.items) {
+        const proposed = getProposedTask(item.proposed_task_id);
+        if (!proposed) {
+          skipped.push(`${item.proposed_task_id} (not found)`);
+          continue;
+        }
+        // Process pending rows (the normal case) and approved rows (left over
+        // from a previous attempt where the KB write failed). 'created' and
+        // 'rejected' are terminal and skipped.
+        if (proposed.status !== 'pending' && proposed.status !== 'approved') {
+          skipped.push(`${proposed.id} (status=${proposed.status})`);
+          continue;
+        }
+
+        if (proposed.status === 'pending') {
+          updateProposedTaskStatus(proposed.id, 'approved', approverId);
+        }
+
+        let taskId: string;
+        try {
+          taskId = writeApprovedTaskFile(proposed, {
+            title: item.final_title,
+            assignee: item.final_assignee,
+            due_date: item.final_due_date,
+            approved_by: approverId,
+          });
+        } catch (err) {
+          // Revert so the row stays approve-able on retry.
+          updateProposedTaskStatus(proposed.id, 'pending', null);
+          logger.error(
+            { proposedId: proposed.id, err },
+            'Failed to write approved task file — reverted to pending',
+          );
+          failed.push(`${proposed.id} (write failed)`);
+          continue;
+        }
+
+        updateProposedTaskStatus(proposed.id, 'created', approverId, {
+          resulting_task_id: taskId,
+        });
+
+        created.push({
+          proposedId: proposed.id,
+          taskId,
+          title: item.final_title || proposed.title,
+        });
+      }
+
+      if (
+        mainGroupJid &&
+        (created.length > 0 || skipped.length > 0 || failed.length > 0)
+      ) {
+        const parts: string[] = [];
+        if (created.length > 0) {
+          parts.push(
+            `✅ Approved ${created.length} task(s):\n` +
+              created.map((c) => `• *${c.title}* → ${c.taskId}`).join('\n'),
+          );
+        }
+        if (skipped.length > 0) {
+          parts.push(`Skipped: ${skipped.join(', ')}`);
+        }
+        if (failed.length > 0) {
+          parts.push(
+            `⚠️ Failed: ${failed.join(', ')} — see logs and retry approve_proposed_tasks.`,
+          );
+        }
+        await deps.sendMessage(mainGroupJid, parts.join('\n\n'));
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        {
+          createdCount: created.length,
+          skippedCount: skipped.length,
+          failedCount: failed.length,
+          approver: approverId,
+        },
+        'Proposed tasks approved batch processed',
+      );
+      break;
+    }
+
+    case 'reject_proposed_task': {
+      if (!data.proposed_task_id) {
+        logger.warn(
+          { sourceGroup },
+          'reject_proposed_task: missing proposed_task_id',
+        );
+        break;
+      }
+
+      const senderCtx = readSenderContext(sourceGroup);
+      const isCoordinator =
+        senderCtx !== null &&
+        (senderCtx.is_admin ||
+          senderCtx.tags.includes('coordinator') ||
+          senderCtx.tags.includes('admin'));
+
+      const mainGroupJid = findMainGroupJid(registeredGroups);
+
+      // Fail closed: same reasoning as approve_proposed_tasks. We require a
+      // real user_id in resolved_by; isMain alone is not enough.
+      if (!isCoordinator) {
+        logger.warn(
+          { sourceGroup, hasSenderCtx: senderCtx !== null, isMain },
+          'reject_proposed_task: rejected — no valid coordinator identity',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            '⚠️ Only coordinators can reject proposed tasks. The caller must have a sender_context with the coordinator or admin tag.',
+          );
+        }
+        break;
+      }
+
+      const proposed = getProposedTask(data.proposed_task_id);
+      if (!proposed || proposed.status !== 'pending') {
+        logger.warn(
+          { id: data.proposed_task_id, status: proposed?.status },
+          'reject_proposed_task: not pending',
+        );
+        break;
+      }
+
+      const approverId = senderCtx.user_id;
+      updateProposedTaskStatus(proposed.id, 'rejected', approverId, {
+        rejection_reason: data.reason ?? null,
+      });
+
+      if (mainGroupJid) {
+        await deps.sendMessage(
+          mainGroupJid,
+          `❌ Rejected: *${proposed.title}*${data.reason ? ` — ${data.reason}` : ''}`,
+        );
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        { proposedId: proposed.id, reason: data.reason, approver: approverId },
+        'Proposed task rejected',
+      );
+      break;
+    }
+
+    // --- Expense IPC handlers ---
+
+    // --- Expense IPC handlers ---
+
+    case 'expense_request': {
+      if (
+        !data.amount_cents ||
+        !data.description ||
+        !data.request_type ||
+        !data.chatJid
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'expense_request: missing required fields',
+        );
+        break;
+      }
+      if (data.amount_cents <= 0) {
+        logger.warn({ sourceGroup }, 'expense_request: non-positive amount');
+        break;
+      }
+      if (
+        data.request_type === 'retrospective' &&
+        (!data.incurred_date || !data.receipt_path || !data.justification)
+      ) {
+        logger.warn(
+          { sourceGroup },
+          'retrospective expense missing incurred_date, receipt_path, or justification',
+        );
+        break;
+      }
+
+      const senderCtx = readSenderContext(sourceGroup);
+      const requesterUserId =
+        senderCtx?.user_id || data.groupFolder || sourceGroup;
+
+      const expenseId = generateExpenseId();
+      const initialStatus: ExpenseStatus =
+        data.request_type === 'prospective'
+          ? 'pending_approval'
+          : 'submitted_retro';
+
+      createExpense({
+        id: expenseId,
+        chat_jid: data.chatJid,
+        requester_user_id: requesterUserId,
+        request_type: data.request_type as 'prospective' | 'retrospective',
+        amount_cents: data.amount_cents,
+        currency: data.currency || 'USD',
+        description: data.description,
+        category: data.category ?? null,
+        vendor: data.vendor ?? null,
+        justification: data.justification ?? null,
+        expected_date: data.expected_date ?? null,
+        incurred_date: data.incurred_date ?? null,
+        event_id: data.event_id ?? null,
+        receipt_path: data.receipt_path ?? null,
+        status: initialStatus,
+        created_at: new Date().toISOString(),
+      });
+
+      const mainGroupJid = findMainGroupJid(registeredGroups);
+      const pathLabel =
+        data.request_type === 'prospective' ? 'prospective' : 'RETROSPECTIVE';
+      const requesterLabel = senderCtx?.display_name || requesterUserId;
+      const approvalActions =
+        data.request_type === 'prospective'
+          ? 'approve / deny / modify'
+          : 'approve / deny';
+      if (mainGroupJid) {
+        await deps.sendMessage(
+          mainGroupJid,
+          `New ${pathLabel} expense ${expenseId}: ${formatMoney(data.amount_cents, data.currency || 'USD')} — ${data.description} (requested by ${requesterLabel}). Reply to ${approvalActions}.`,
+        );
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        {
+          expenseId,
+          requester: requesterUserId,
+          amount: data.amount_cents,
+          type: data.request_type,
+        },
+        'Expense created',
+      );
+      break;
+    }
+
+    case 'expense_decision': {
+      if (
+        !data.expense_id ||
+        !data.decision ||
+        !['approve', 'deny', 'modify'].includes(data.decision)
+      ) {
+        logger.warn({ sourceGroup }, 'expense_decision: missing fields');
+        break;
+      }
+      const expense = getExpense(data.expense_id);
+      if (!expense) {
+        logger.warn({ id: data.expense_id }, 'expense not found');
+        break;
+      }
+      if (!isDecidableStatus(expense.status)) {
+        logger.warn(
+          { id: data.expense_id, status: expense.status },
+          'expense already resolved',
+        );
+        break;
+      }
+
+      const approverCtx = readSenderContext(sourceGroup);
+      if (!approverCtx) {
+        logger.warn({ sourceGroup }, 'expense_decision: no sender context');
+        break;
+      }
+      if (approverCtx.user_id === expense.requester_user_id) {
+        logger.warn(
+          { user: approverCtx.user_id, expenseId: expense.id },
+          'Requester cannot approve own expense',
+        );
+        const requesterChat = expense.chat_jid;
+        await deps.sendMessage(
+          requesterChat,
+          `You cannot approve your own expense ${expense.id}. Another approver must review it.`,
+        );
+        break;
+      }
+      if (
+        !canApprove(approverCtx, expense.amount_cents, expense.request_type)
+      ) {
+        logger.warn(
+          {
+            approver: approverCtx.user_id,
+            amount: expense.amount_cents,
+            tags: approverCtx.tags,
+          },
+          'Unauthorized approval attempt',
+        );
+        const mainJid = findMainGroupJid(registeredGroups);
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `${approverCtx.display_name} does not have authority to approve expense ${expense.id} (${formatMoney(expense.amount_cents, expense.currency)}). See rules/finance/expenses.md.`,
+          );
+        }
+        break;
+      }
+      if (
+        data.decision === 'modify' &&
+        expense.request_type === 'retrospective'
+      ) {
+        logger.warn({ id: expense.id }, 'Cannot modify retrospective expense');
+        break;
+      }
+      if (
+        data.decision === 'modify' &&
+        (!data.approved_amount_cents || data.approved_amount_cents <= 0)
+      ) {
+        logger.warn(
+          { id: expense.id, approved_amount_cents: data.approved_amount_cents },
+          'modify decision requires positive approved_amount_cents',
+        );
+        break;
+      }
+
+      let newStatus: ExpenseStatus;
+      if (data.decision === 'approve') {
+        newStatus =
+          expense.request_type === 'prospective'
+            ? 'receipt_pending'
+            : 'approved_retro';
+      } else if (data.decision === 'deny') {
+        newStatus =
+          expense.request_type === 'prospective' ? 'denied' : 'denied_retro';
+      } else {
+        newStatus = 'receipt_pending';
+      }
+
+      const approvedAmount =
+        data.decision === 'modify' && data.approved_amount_cents
+          ? data.approved_amount_cents
+          : expense.amount_cents;
+
+      updateExpenseApproval(
+        expense.id,
+        newStatus,
+        approverCtx.user_id,
+        approvedAmount,
+        data.approver_notes ?? null,
+      );
+
+      await deps.sendMessage(
+        expense.chat_jid,
+        renderDecisionMessage(
+          expense,
+          data.decision as 'approve' | 'deny' | 'modify',
+          approvedAmount,
+          data.approver_notes ?? null,
+        ),
+      );
+
+      if (
+        expense.request_type === 'retrospective' &&
+        data.decision === 'approve'
+      ) {
+        const mainJid = findMainGroupJid(registeredGroups);
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `Retrospective expense ${expense.id} approved — finance please reimburse (${formatMoney(approvedAmount, expense.currency)}).`,
+          );
+        }
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        {
+          expenseId: expense.id,
+          decision: data.decision,
+          approver: approverCtx.user_id,
+          newStatus,
+        },
+        'Expense decision processed',
+      );
+      break;
+    }
+
+    case 'expense_receipt': {
+      if (!data.expense_id || !data.receipt_path) {
+        logger.warn({ sourceGroup }, 'expense_receipt: missing fields');
+        break;
+      }
+      const rExpense = getExpense(data.expense_id);
+      if (!rExpense) {
+        logger.warn({ id: data.expense_id }, 'expense not found');
+        break;
+      }
+      if (rExpense.status !== 'receipt_pending') {
+        logger.warn(
+          { id: data.expense_id, status: rExpense.status },
+          'receipt submitted in wrong state',
+        );
+        break;
+      }
+
+      const submitterCtx = readSenderContext(sourceGroup);
+      if (
+        !submitterCtx ||
+        submitterCtx.user_id !== rExpense.requester_user_id
+      ) {
+        logger.warn(
+          {
+            submitter: submitterCtx?.user_id,
+            requester: rExpense.requester_user_id,
+          },
+          'non-requester tried to attach receipt',
+        );
+        break;
+      }
+
+      attachReceipt(
+        data.expense_id,
+        data.receipt_path,
+        data.actual_amount_cents ?? null,
+      );
+
+      const mainJid = findMainGroupJid(registeredGroups);
+      if (
+        data.actual_amount_cents &&
+        rExpense.approved_amount_cents !== null &&
+        data.actual_amount_cents !== rExpense.approved_amount_cents &&
+        mainJid
+      ) {
+        await deps.sendMessage(
+          mainJid,
+          `Heads up: expense ${data.expense_id} receipt is ${formatMoney(data.actual_amount_cents, rExpense.currency)} vs approved ${formatMoney(rExpense.approved_amount_cents, rExpense.currency)}.`,
+        );
+      }
+      if (mainJid) {
+        await deps.sendMessage(
+          mainJid,
+          `Receipt received for ${data.expense_id} — ready for reimbursement.`,
+        );
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        { expenseId: data.expense_id, actual: data.actual_amount_cents },
+        'Receipt submitted',
+      );
+      break;
+    }
+
+    case 'expense_reimburse': {
+      if (!data.expense_id || !data.reimbursement_method) {
+        logger.warn({ sourceGroup }, 'expense_reimburse: missing fields');
+        break;
+      }
+      const rbExpense = getExpense(data.expense_id);
+      if (!rbExpense) {
+        logger.warn({ id: data.expense_id }, 'expense not found');
+        break;
+      }
+      if (
+        rbExpense.status !== 'receipt_submitted' &&
+        rbExpense.status !== 'approved_retro'
+      ) {
+        logger.warn(
+          { id: data.expense_id, status: rbExpense.status },
+          'reimbursement attempted in wrong state',
+        );
+        break;
+      }
+      const reimburserCtx = readSenderContext(sourceGroup);
+      if (!reimburserCtx || !hasFinanceAuthority(reimburserCtx)) {
+        logger.warn(
+          { user: reimburserCtx?.user_id, tags: reimburserCtx?.tags },
+          'non-finance user tried to reimburse',
+        );
+        break;
+      }
+
+      markReimbursed(
+        data.expense_id,
+        reimburserCtx.user_id,
+        data.reimbursement_method,
+      );
+      await deps.sendMessage(
+        rbExpense.chat_jid,
+        `Reimbursement processed for expense ${data.expense_id} via ${data.reimbursement_method}.`,
+      );
+
+      deps.onTasksChanged();
+      logger.info(
+        {
+          expenseId: data.expense_id,
+          method: data.reimbursement_method,
+          by: reimburserCtx.user_id,
+        },
+        'Expense reimbursed',
+      );
+      break;
+    }
+
+    case 'expense_cancel': {
+      if (!data.expense_id) {
+        logger.warn({ sourceGroup }, 'expense_cancel: missing expense_id');
+        break;
+      }
+      const cExpense = getExpense(data.expense_id);
+      if (!cExpense) break;
+      if (
+        cExpense.status === 'reimbursed' ||
+        cExpense.status === 'cancelled' ||
+        cExpense.status === 'denied' ||
+        cExpense.status === 'denied_retro'
+      ) {
+        logger.warn(
+          { id: data.expense_id, status: cExpense.status },
+          'cannot cancel terminal expense',
+        );
+        break;
+      }
+      const cancellerCtx = readSenderContext(sourceGroup);
+      if (
+        !cancellerCtx ||
+        cancellerCtx.user_id !== cExpense.requester_user_id
+      ) {
+        logger.warn(
+          {
+            canceller: cancellerCtx?.user_id,
+            requester: cExpense.requester_user_id,
+          },
+          'only requester can cancel expense',
+        );
+        break;
+      }
+
+      const cancelReason =
+        typeof data.reason === 'string' ? data.reason.trim() : '';
+      cancelExpense(data.expense_id, cancellerCtx.user_id);
+      await deps.sendMessage(
+        cExpense.chat_jid,
+        cancelReason
+          ? `Expense ${data.expense_id} cancelled. Reason: ${cancelReason}`
+          : `Expense ${data.expense_id} cancelled.`,
+      );
+      deps.onTasksChanged();
+      logger.info(
+        {
+          expenseId: data.expense_id,
+          by: cancellerCtx.user_id,
+          reason: cancelReason || undefined,
+        },
+        'Expense cancelled',
+      );
+      break;
+    }
+
+    // --- Event intake / booking IPC handlers ---
+
+    case 'event_intake_submitted': {
+      if (!data.requester_name || !data.event_name || !data.event_date) {
+        logger.warn(
+          { sourceGroup },
+          'event_intake_submitted: missing required fields',
+        );
+        break;
+      }
+
+      const sourceJid = findChatJidForGroup(registeredGroups, sourceGroup);
+      if (!sourceJid) {
+        logger.warn(
+          { sourceGroup },
+          'event_intake_submitted: cannot resolve source chat jid',
+        );
+        break;
+      }
+
+      const requesterUserId = resolveOrCreateUserId(data.requester_name);
+      const id = nextEventBookingCode();
+
+      createEventBooking(
+        {
+          id,
+          chat_jid: sourceJid,
+          requester_user_id: requesterUserId,
+          requester_name: data.requester_name,
+          requester_email: data.requester_email ?? null,
+          requester_phone: data.requester_phone ?? null,
+          event_name: data.event_name,
+          event_type: data.event_type ?? null,
+          event_date: data.event_date,
+          start_time: data.start_time ?? null,
+          end_time: data.end_time ?? null,
+          expected_headcount: data.expected_headcount ?? null,
+          preferred_space: data.preferred_space ?? null,
+          status: 'inquiry',
+        },
+        data.answers,
+      );
+
+      writeBookingsSnapshot();
+
+      const mainJid = findMainGroupJid(registeredGroups);
+      if (mainJid) {
+        await deps.sendMessage(
+          mainJid,
+          `📩 New event inquiry: ${id} — ${data.requester_name} for "${data.event_name}" on ${data.event_date} (${data.expected_headcount ?? '?'} guests, ${data.preferred_space ?? 'space TBD'}).`,
+        );
+      }
+      // Confirm to the source chat (skip if it's the main group — already pinged)
+      if (sourceJid !== mainJid) {
+        await deps.sendMessage(
+          sourceJid,
+          `Got it — your inquiry is logged as ${id}. We'll be in touch within 2 business days.`,
+        );
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        { id, requesterUserId, eventDate: data.event_date, sourceGroup },
+        'Event inquiry created',
+      );
+      break;
+    }
+
+    case 'event_internal_intake_recorded': {
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'event_internal_intake_recorded: not main group',
+        );
+        break;
+      }
+      if (!data.booking_id) {
+        logger.warn(
+          { sourceGroup },
+          'event_internal_intake_recorded: missing booking_id',
+        );
+        break;
+      }
+      const booking = getEventBooking(data.booking_id);
+      if (!booking) {
+        logger.warn(
+          { sourceGroup, bookingId: data.booking_id },
+          'event_internal_intake_recorded: booking not found',
+        );
+        break;
+      }
+
+      const senderCtx = readSenderContext(sourceGroup);
+      if (!senderHasAnyTag(senderCtx, ['operations', 'coordinator'])) {
+        logger.warn(
+          { sourceGroup, sender: senderCtx?.user_id },
+          'event_internal_intake_recorded: insufficient tags',
+        );
+        break;
+      }
+      const actor = senderCtx?.user_id ?? 'unknown';
+
+      if (data.pricing) {
+        updateEventBookingPricing(
+          data.booking_id,
+          {
+            base_venue_fee: data.pricing.base_venue_fee,
+            portfolio_discount:
+              data.pricing.portfolio_discount === undefined
+                ? undefined
+                : data.pricing.portfolio_discount
+                  ? 1
+                  : 0,
+            av_line_item: data.pricing.av_line_item,
+            cleaning_fee: data.pricing.cleaning_fee,
+            catering_passthrough: data.pricing.catering_passthrough,
+            damage_deposit: data.pricing.damage_deposit,
+            total_quote: data.pricing.total_quote,
+            deposit_pct: data.pricing.deposit_pct,
+            final_payment_due: data.pricing.final_payment_due,
+          },
+          actor,
+        );
+      }
+      if (data.staffing) {
+        const s = data.staffing;
+        updateEventBookingStaffing(
+          data.booking_id,
+          {
+            on_site_lead_user_id: s.on_site_lead
+              ? resolveOrCreateUserId(s.on_site_lead)
+              : undefined,
+            greeter_user_id: s.greeter
+              ? resolveOrCreateUserId(s.greeter)
+              : undefined,
+            bar_kitchen_user_id: s.bar_kitchen
+              ? resolveOrCreateUserId(s.bar_kitchen)
+              : undefined,
+            cleaner_user_id: s.cleaner
+              ? resolveOrCreateUserId(s.cleaner)
+              : undefined,
+            outside_vendors: s.outside_vendors,
+          },
+          actor,
+        );
+      }
+      if (data.intake_owner || data.intake_date) {
+        setEventBookingMeta(data.booking_id, {
+          intake_owner_user_id: data.intake_owner
+            ? resolveOrCreateUserId(data.intake_owner)
+            : undefined,
+          intake_date: data.intake_date,
+        });
+      }
+
+      writeBookingsSnapshot();
+
+      const mainJid = findMainGroupJid(registeredGroups);
+      if (mainJid) {
+        const parts: string[] = [];
+        if (data.pricing) parts.push('pricing');
+        if (data.staffing) parts.push('staffing');
+        if (data.intake_owner || data.intake_date) parts.push('meta');
+        const what = parts.length > 0 ? parts.join(', ') : 'no fields';
+        await deps.sendMessage(
+          mainJid,
+          `✏️  ${data.booking_id} updated by ${senderCtx?.display_name ?? actor} (${what}).`,
+        );
+      }
+
+      deps.onTasksChanged();
+      logger.info(
+        { bookingId: data.booking_id, actor },
+        'Event booking internal intake recorded',
+      );
+      break;
+    }
+
+    case 'event_proposal_approval_requested': {
+      if (!isMain) break;
+      if (!data.booking_id) {
+        logger.warn(
+          { sourceGroup },
+          'event_proposal_approval_requested: missing booking_id',
+        );
+        break;
+      }
+      const booking = getEventBooking(data.booking_id);
+      if (!booking) {
+        logger.warn(
+          { sourceGroup, bookingId: data.booking_id },
+          'event_proposal_approval_requested: booking not found',
+        );
+        break;
+      }
+      const senderCtx = readSenderContext(sourceGroup);
+      if (!senderHasAnyTag(senderCtx, ['operations', 'coordinator'])) {
+        logger.warn(
+          { sourceGroup, sender: senderCtx?.user_id },
+          'event_proposal_approval_requested: insufficient tags',
+        );
+        break;
+      }
+      // Block double-pending requests
+      const pending = getPendingProposalApproval(data.booking_id);
+      if (pending) {
+        const mainJid = findMainGroupJid(registeredGroups);
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `${data.booking_id} already has a pending approval (${pending.id}). Decide that one first.`,
+          );
+        }
+        break;
+      }
+      // Pricing must be set
+      const missing: string[] = [];
+      if (booking.total_quote == null) missing.push('total_quote');
+      if (booking.deposit_pct == null) missing.push('deposit_pct');
+      if (!booking.final_payment_due) missing.push('final_payment_due');
+      if (missing.length > 0) {
+        const mainJid = findMainGroupJid(registeredGroups);
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `Cannot request approval for ${data.booking_id} — pricing missing: ${missing.join(', ')}.`,
+          );
+        }
+        break;
+      }
+
+      const approval = createProposalApproval(
+        data.booking_id,
+        senderCtx?.user_id ?? 'unknown',
+      );
+
+      const mainJid = findMainGroupJid(registeredGroups);
+      if (mainJid) {
+        await deps.sendMessage(
+          mainJid,
+          `🔔 ${data.booking_id} needs admin sign-off — $${booking.total_quote} quote, ${booking.expected_headcount ?? '?'} guests, ${booking.event_date}. Reply "approved ${data.booking_id}" or "rejected ${data.booking_id}" (admin tag required). Approval ID: ${approval.id}`,
+        );
+      }
+      logger.info(
+        { bookingId: data.booking_id, approvalId: approval.id },
+        'Proposal approval requested',
+      );
+      break;
+    }
+
+    case 'event_proposal_decided': {
+      if (!isMain) break;
+      if (!data.booking_id || !data.decision) {
+        logger.warn({ sourceGroup }, 'event_proposal_decided: missing fields');
+        break;
+      }
+      if (data.decision !== 'approved' && data.decision !== 'rejected') {
+        logger.warn(
+          { sourceGroup, decision: data.decision },
+          'event_proposal_decided: invalid decision',
+        );
+        break;
+      }
+      const senderCtx = readSenderContext(sourceGroup);
+      if (!senderCtx?.is_admin) {
+        const mainJid = findMainGroupJid(registeredGroups);
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `Only admins can decide proposal approvals. ${senderCtx?.display_name ?? 'Sender'} is not an admin.`,
+          );
+        }
+        break;
+      }
+      const pending = getPendingProposalApproval(data.booking_id);
+      if (!pending) {
+        const mainJid = findMainGroupJid(registeredGroups);
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `No pending approval for ${data.booking_id}.`,
+          );
+        }
+        break;
+      }
+      decideProposalApproval(
+        pending.id,
+        data.decision,
+        senderCtx.user_id ?? 'unknown',
+        data.cancellation_reason,
+      );
+
+      const mainJid = findMainGroupJid(registeredGroups);
+      if (mainJid) {
+        await deps.sendMessage(
+          mainJid,
+          `${data.decision === 'approved' ? '✅' : '❌'} ${data.booking_id} proposal ${data.decision} by ${senderCtx.display_name ?? senderCtx.user_id}.${data.decision === 'approved' ? ' Ops can now run transition_event_booking → proposal_sent.' : ''}`,
+        );
+      }
+      logger.info(
+        {
+          bookingId: data.booking_id,
+          approvalId: pending.id,
+          decision: data.decision,
+        },
+        'Proposal approval decided',
+      );
+      break;
+    }
+
+    case 'event_booking_transitioned': {
+      if (!isMain) break;
+      if (!data.booking_id || !data.new_status) {
+        logger.warn(
+          { sourceGroup },
+          'event_booking_transitioned: missing fields',
+        );
+        break;
+      }
+      const senderCtx = readSenderContext(sourceGroup);
+      const isCancel = data.new_status === 'cancelled';
+      const allowedTags = isCancel
+        ? ['operations', 'coordinator', 'admin']
+        : ['operations', 'coordinator'];
+      if (!senderHasAnyTag(senderCtx, allowedTags)) {
+        logger.warn(
+          { sourceGroup, sender: senderCtx?.user_id, status: data.new_status },
+          'event_booking_transitioned: insufficient tags',
+        );
+        break;
+      }
+
+      const mainJid = findMainGroupJid(registeredGroups);
+      try {
+        const updated = transitionEventBooking(
+          data.booking_id,
+          data.new_status as EventBookingStatus,
+          senderCtx?.user_id ?? 'unknown',
+          {
+            contract_signed_date: data.contract_signed_date,
+            deposit_paid_date: data.deposit_paid_date,
+            cancellation_reason: data.cancellation_reason,
+            post_event_state: data.post_event_state,
+          },
+        );
+
+        writeBookingsSnapshot();
+
+        if (mainJid) {
+          let msg = `${data.booking_id} → ${updated.status} by ${senderCtx?.display_name ?? senderCtx?.user_id}.`;
+          if (updated.status === 'confirmed') {
+            msg += ` Reminder: create the GCal entry manually and set calendar_entry_code on the booking once it syncs back.`;
+          }
+          await deps.sendMessage(mainJid, msg);
+        }
+
+        // Notify host on terminal-ish states
+        const hostJid = updated.chat_jid;
+        if (hostJid && hostJid !== mainJid) {
+          if (updated.status === 'confirmed') {
+            await deps.sendMessage(
+              hostJid,
+              `${data.booking_id}: confirmed. Contract signed ${updated.contract_signed_date}, deposit paid ${updated.deposit_paid_date}. We'll be in touch with day-of details.`,
+            );
+          } else if (updated.status === 'cancelled') {
+            await deps.sendMessage(
+              hostJid,
+              `${data.booking_id}: cancelled. ${updated.cancellation_reason ?? ''}`,
+            );
+          }
+        }
+
+        deps.onTasksChanged();
+        logger.info(
+          { bookingId: data.booking_id, newStatus: updated.status },
+          'Event booking transitioned',
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(
+          { bookingId: data.booking_id, newStatus: data.new_status, message },
+          'Transition rejected',
+        );
+        if (mainJid) {
+          await deps.sendMessage(
+            mainJid,
+            `Cannot transition ${data.booking_id} to ${data.new_status}: ${message}`,
+          );
+        }
+      }
+      break;
+    }
+
+    default:
+      logger.warn({ type: data.type }, 'Unknown IPC task type');
+  }
+}
+
+// --- Expense helpers ---
+
+interface IpcSenderContext {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+  is_admin: boolean;
+}
+
+function readSenderContext(sourceGroup: string): IpcSenderContext | null {
+  try {
+    const ctxPath = path.join(
+      DATA_DIR,
+      'ipc',
+      sourceGroup,
+      'input',
+      'sender_context.json',
+    );
+    if (!fs.existsSync(ctxPath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
+    if (typeof parsed?.user_id !== 'string') return null;
+    return {
+      user_id: parsed.user_id,
+      display_name: parsed.display_name || parsed.user_id,
+      tags: Array.isArray(parsed.tags) ? parsed.tags : [],
+      is_admin: parsed.is_admin === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function findMainGroupJid(
+  registeredGroups: Record<string, RegisteredGroup>,
+): string | undefined {
+  return Object.entries(registeredGroups).find(([, g]) => g.isMain)?.[0];
+}
+
+function generateExpenseId(): string {
+  return `exp-${crypto.randomUUID()}`;
+}
+
+function formatMoney(cents: number, currency: string = 'USD'): string {
+  const amount = (cents / 100).toFixed(2);
+  return currency === 'USD' ? `$${amount}` : `${amount} ${currency}`;
+}
+
+function isDecidableStatus(status: ExpenseStatus): boolean {
+  return status === 'pending_approval' || status === 'submitted_retro';
+}
+
+function hasFinanceAuthority(ctx: IpcSenderContext): boolean {
+  return ctx.is_admin || ctx.tags.includes('finance');
+}
+
+function canApprove(
+  ctx: IpcSenderContext,
+  amountCents: number,
+  requestType: 'prospective' | 'retrospective',
+): boolean {
+  // Retrospective approvals require admin — no coordinator shortcut for past spending
+  if (requestType === 'retrospective') return ctx.is_admin;
+
+  // Admin can approve any amount
+  if (ctx.is_admin) return true;
+
+  // Coordinator can approve under $500 (50000 cents)
+  if (ctx.tags.includes('coordinator') && amountCents < 50000) return true;
+
+  return false;
+}
+
+function renderDecisionMessage(
+  expense: Expense,
+  decision: 'approve' | 'deny' | 'modify',
+  approvedAmount: number,
+  notes: string | null,
+): string {
+  const amount = formatMoney(approvedAmount, expense.currency);
+  const originalAmount = formatMoney(expense.amount_cents, expense.currency);
+  const notesLine = notes ? ` — ${notes}` : '';
+  if (decision === 'approve') {
+    return `Expense ${expense.id} approved for ${amount}. ${expense.request_type === 'prospective' ? 'Submit a receipt with submit_receipt after you spend.' : 'Finance will process reimbursement.'}${notesLine}`;
+  }
+  if (decision === 'deny') {
+    return `Expense ${expense.id} denied${notesLine}`;
+  }
+  return `Expense ${expense.id} approved at ${amount} (requested ${originalAmount})${notesLine}. Submit a receipt via submit_receipt when you spend, or cancel_expense if the new amount doesn't work.`;
+}
+
+// --- Event intake / booking helpers ---
+
+function senderHasAnyTag(
+  ctx: IpcSenderContext | null,
+  tags: string[],
+): boolean {
+  if (!ctx) return false;
+  if (ctx.is_admin) return true;
+  return (ctx.tags ?? []).some((t) => tags.includes(t));
+}
+
+function findChatJidForGroup(
+  registeredGroups: Record<string, RegisteredGroup>,
+  groupFolder: string,
+): string | undefined {
+  return Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === groupFolder,
+  )?.[0];
+}
+
+function resolveOrCreateUserId(name: string): string {
+  const users = getAllUsers();
+  const existing = users.find(
+    (u) => u.name.toLowerCase() === name.toLowerCase(),
+  );
+  if (existing) return existing.id;
+  return createUser(name).id;
+}
+
+function writeBookingsSnapshot(): void {
+  try {
+    const rows = getAllEventBookings().map((b) => ({
+      id: b.id,
+      requester_name: b.requester_name,
+      event_name: b.event_name,
+      event_date: b.event_date,
+      status: b.status,
+      total_quote: b.total_quote,
+    }));
+    const ipcBaseDir = path.join(DATA_DIR, 'ipc');
+    fs.mkdirSync(ipcBaseDir, { recursive: true });
+    const snapshotPath = path.join(ipcBaseDir, 'event_bookings_snapshot.json');
+    const tmp = `${snapshotPath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(rows));
+    fs.renameSync(tmp, snapshotPath);
+  } catch (err) {
+    logger.warn({ err }, 'Failed to write event bookings snapshot');
+  }
+}

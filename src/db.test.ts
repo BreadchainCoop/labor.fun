@@ -1,0 +1,849 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+
+import {
+  _initTestDatabase,
+  createMeetingSummary,
+  createResidencyRequest,
+  createTask,
+  deleteTask,
+  getAllChats,
+  getAllRegisteredGroups,
+  getLastBotMessageTimestamp,
+  getMeetingSummariesByGroup,
+  getMeetingSummaryById,
+  getMessagesSince,
+  getNewMessages,
+  getResidencyRequest,
+  getTaskById,
+  listResidencyRequestsByStatus,
+  setRegisteredGroup,
+  storeChatMetadata,
+  storeMessage,
+  updateMeetingSummary,
+  updateResidencyRequestStatus,
+  updateTask,
+} from './db.js';
+import { formatMessages } from './router.js';
+
+beforeEach(() => {
+  _initTestDatabase();
+});
+
+// Helper to store a message using the normalized NewMessage interface
+function store(overrides: {
+  id: string;
+  chat_jid: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me?: boolean;
+}) {
+  storeMessage({
+    id: overrides.id,
+    chat_jid: overrides.chat_jid,
+    sender: overrides.sender,
+    sender_name: overrides.sender_name,
+    content: overrides.content,
+    timestamp: overrides.timestamp,
+    is_from_me: overrides.is_from_me ?? false,
+  });
+}
+
+// --- storeMessage (NewMessage format) ---
+
+describe('storeMessage', () => {
+  it('stores a message and retrieves it', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-1',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'hello world',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe('msg-1');
+    expect(messages[0].sender).toBe('123@s.whatsapp.net');
+    expect(messages[0].sender_name).toBe('Alice');
+    expect(messages[0].content).toBe('hello world');
+  });
+
+  it('filters out empty content', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-2',
+      chat_jid: 'group@g.us',
+      sender: '111@s.whatsapp.net',
+      sender_name: 'Dave',
+      content: '',
+      timestamp: '2024-01-01T00:00:04.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(0);
+  });
+
+  it('stores is_from_me flag', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-3',
+      chat_jid: 'group@g.us',
+      sender: 'me@s.whatsapp.net',
+      sender_name: 'Me',
+      content: 'my message',
+      timestamp: '2024-01-01T00:00:05.000Z',
+      is_from_me: true,
+    });
+
+    // Message is stored (we can retrieve it — is_from_me doesn't affect retrieval)
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it('upserts on duplicate id+chat_jid', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-dup',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'original',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    store({
+      id: 'msg-dup',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'updated',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content).toBe('updated');
+  });
+});
+
+// --- reply context persistence ---
+
+describe('reply context', () => {
+  it('stores and retrieves reply_to fields', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'reply-1',
+      chat_jid: 'group@g.us',
+      sender: '123',
+      sender_name: 'Alice',
+      content: 'Yes, on my way!',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      reply_to_message_id: '42',
+      reply_to_message_content: 'Are you coming tonight?',
+      reply_to_sender_name: 'Bob',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].reply_to_message_id).toBe('42');
+    expect(messages[0].reply_to_message_content).toBe(
+      'Are you coming tonight?',
+    );
+    expect(messages[0].reply_to_sender_name).toBe('Bob');
+  });
+
+  it('returns null for messages without reply context', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'no-reply',
+      chat_jid: 'group@g.us',
+      sender: '123',
+      sender_name: 'Alice',
+      content: 'Just a normal message',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].reply_to_message_id).toBeNull();
+    expect(messages[0].reply_to_message_content).toBeNull();
+    expect(messages[0].reply_to_sender_name).toBeNull();
+  });
+
+  it('retrieves reply context via getNewMessages', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'reply-2',
+      chat_jid: 'group@g.us',
+      sender: '456',
+      sender_name: 'Carol',
+      content: 'Agreed',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      reply_to_message_id: '99',
+      reply_to_message_content: 'We should meet',
+      reply_to_sender_name: 'Dave',
+    });
+
+    const { messages } = getNewMessages(
+      ['group@g.us'],
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].reply_to_message_id).toBe('99');
+    expect(messages[0].reply_to_sender_name).toBe('Dave');
+  });
+});
+
+// --- getMessagesSince ---
+
+describe('getMessagesSince', () => {
+  beforeEach(() => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'm1',
+      chat_jid: 'group@g.us',
+      sender: 'Alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'first',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+    store({
+      id: 'm2',
+      chat_jid: 'group@g.us',
+      sender: 'Bob@s.whatsapp.net',
+      sender_name: 'Bob',
+      content: 'second',
+      timestamp: '2024-01-01T00:00:02.000Z',
+    });
+    storeMessage({
+      id: 'm3',
+      chat_jid: 'group@g.us',
+      sender: 'Bot@s.whatsapp.net',
+      sender_name: 'Bot',
+      content: 'bot reply',
+      timestamp: '2024-01-01T00:00:03.000Z',
+      is_bot_message: true,
+    });
+    store({
+      id: 'm4',
+      chat_jid: 'group@g.us',
+      sender: 'Carol@s.whatsapp.net',
+      sender_name: 'Carol',
+      content: 'third',
+      timestamp: '2024-01-01T00:00:04.000Z',
+    });
+  });
+
+  it('returns messages after the given timestamp', () => {
+    const msgs = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:02.000Z',
+      'Breadbrich Engels',
+    );
+    // Should exclude m1, m2 (before/at timestamp), m3 (bot message)
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].content).toBe('third');
+  });
+
+  it('excludes bot messages via is_bot_message flag', () => {
+    const msgs = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    const botMsgs = msgs.filter((m) => m.content === 'bot reply');
+    expect(botMsgs).toHaveLength(0);
+  });
+
+  it('returns all non-bot messages when sinceTimestamp is empty', () => {
+    const msgs = getMessagesSince('group@g.us', '', 'Breadbrich Engels');
+    // 3 user messages (bot message excluded)
+    expect(msgs).toHaveLength(3);
+  });
+
+  it('recovers cursor from last bot reply when lastAgentTimestamp is missing', () => {
+    // beforeEach already inserts m3 (bot reply at 00:00:03) and m4 (user at 00:00:04)
+    // Add more old history before the bot reply
+    for (let i = 1; i <= 50; i++) {
+      store({
+        id: `history-${i}`,
+        chat_jid: 'group@g.us',
+        sender: 'user@s.whatsapp.net',
+        sender_name: 'User',
+        content: `old message ${i}`,
+        timestamp: `2023-06-${String(i).padStart(2, '0')}T12:00:00.000Z`,
+      });
+    }
+
+    // New message after the bot reply (m3 at 00:00:03)
+    store({
+      id: 'new-1',
+      chat_jid: 'group@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'new message after bot reply',
+      timestamp: '2024-01-02T00:00:00.000Z',
+    });
+
+    // Recover cursor from the last bot message (m3 from beforeEach)
+    const recovered = getLastBotMessageTimestamp('group@g.us', 'Breadbrich Engels');
+    expect(recovered).toBe('2024-01-01T00:00:03.000Z');
+
+    // Using recovered cursor: only gets messages after the bot reply
+    const msgs = getMessagesSince('group@g.us', recovered!, 'Breadbrich Engels', 10);
+    // m4 (third, 00:00:04) + new-1 — skips all 50 old messages and m1/m2
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0].content).toBe('third');
+    expect(msgs[1].content).toBe('new message after bot reply');
+  });
+
+  it('caps messages to configured limit even with recovered cursor', () => {
+    // beforeEach inserts m3 (bot at 00:00:03). Add 30 messages after it.
+    for (let i = 1; i <= 30; i++) {
+      store({
+        id: `pending-${i}`,
+        chat_jid: 'group@g.us',
+        sender: 'user@s.whatsapp.net',
+        sender_name: 'User',
+        content: `pending message ${i}`,
+        timestamp: `2024-02-${String(i).padStart(2, '0')}T12:00:00.000Z`,
+      });
+    }
+
+    const recovered = getLastBotMessageTimestamp('group@g.us', 'Breadbrich Engels');
+    expect(recovered).toBe('2024-01-01T00:00:03.000Z');
+
+    // With limit=10, only the 10 most recent are returned
+    const msgs = getMessagesSince('group@g.us', recovered!, 'Breadbrich Engels', 10);
+    expect(msgs).toHaveLength(10);
+    // Most recent 10: pending-21 through pending-30
+    expect(msgs[0].content).toBe('pending message 21');
+    expect(msgs[9].content).toBe('pending message 30');
+  });
+
+  it('returns last N messages when no bot reply and no cursor exist', () => {
+    // Use a fresh group with no bot messages
+    storeChatMetadata('fresh@g.us', '2024-01-01T00:00:00.000Z');
+    for (let i = 1; i <= 20; i++) {
+      store({
+        id: `fresh-${i}`,
+        chat_jid: 'fresh@g.us',
+        sender: 'user@s.whatsapp.net',
+        sender_name: 'User',
+        content: `message ${i}`,
+        timestamp: `2024-02-${String(i).padStart(2, '0')}T12:00:00.000Z`,
+      });
+    }
+
+    const recovered = getLastBotMessageTimestamp('fresh@g.us', 'Breadbrich Engels');
+    expect(recovered).toBeUndefined();
+
+    // No cursor → sinceTimestamp = '' but limit caps the result
+    const msgs = getMessagesSince('fresh@g.us', '', 'Breadbrich Engels', 10);
+    expect(msgs).toHaveLength(10);
+
+    const prompt = formatMessages(msgs, 'Asia/Jerusalem');
+    const messageTagCount = (prompt.match(/<message /g) || []).length;
+    expect(messageTagCount).toBe(10);
+  });
+
+  it('filters pre-migration bot messages via content prefix backstop', () => {
+    // Simulate a message written before migration: has prefix but is_bot_message = 0
+    store({
+      id: 'm5',
+      chat_jid: 'group@g.us',
+      sender: 'Bot@s.whatsapp.net',
+      sender_name: 'Bot',
+      content: 'Breadbrich Engels: old bot reply',
+      timestamp: '2024-01-01T00:00:05.000Z',
+    });
+    const msgs = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:04.000Z',
+      'Breadbrich Engels',
+    );
+    expect(msgs).toHaveLength(0);
+  });
+});
+
+// --- getNewMessages ---
+
+describe('getNewMessages', () => {
+  beforeEach(() => {
+    storeChatMetadata('group1@g.us', '2024-01-01T00:00:00.000Z');
+    storeChatMetadata('group2@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'a1',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'g1 msg1',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+    store({
+      id: 'a2',
+      chat_jid: 'group2@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'g2 msg1',
+      timestamp: '2024-01-01T00:00:02.000Z',
+    });
+    storeMessage({
+      id: 'a3',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'bot reply',
+      timestamp: '2024-01-01T00:00:03.000Z',
+      is_bot_message: true,
+    });
+    store({
+      id: 'a4',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'g1 msg2',
+      timestamp: '2024-01-01T00:00:04.000Z',
+    });
+  });
+
+  it('returns new messages across multiple groups', () => {
+    const { messages, newTimestamp } = getNewMessages(
+      ['group1@g.us', 'group2@g.us'],
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+    );
+    // Excludes bot message, returns 3 user messages
+    expect(messages).toHaveLength(3);
+    expect(newTimestamp).toBe('2024-01-01T00:00:04.000Z');
+  });
+
+  it('filters by timestamp', () => {
+    const { messages } = getNewMessages(
+      ['group1@g.us', 'group2@g.us'],
+      '2024-01-01T00:00:02.000Z',
+      'Breadbrich Engels',
+    );
+    // Only g1 msg2 (after ts, not bot)
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content).toBe('g1 msg2');
+  });
+
+  it('returns empty for no registered groups', () => {
+    const { messages, newTimestamp } = getNewMessages([], '', 'Breadbrich Engels');
+    expect(messages).toHaveLength(0);
+    expect(newTimestamp).toBe('');
+  });
+});
+
+// --- storeChatMetadata ---
+
+describe('storeChatMetadata', () => {
+  it('stores chat with JID as default name', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    const chats = getAllChats();
+    expect(chats).toHaveLength(1);
+    expect(chats[0].jid).toBe('group@g.us');
+    expect(chats[0].name).toBe('group@g.us');
+  });
+
+  it('stores chat with explicit name', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z', 'My Group');
+    const chats = getAllChats();
+    expect(chats[0].name).toBe('My Group');
+  });
+
+  it('updates name on subsequent call with name', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z', 'Updated Name');
+    const chats = getAllChats();
+    expect(chats).toHaveLength(1);
+    expect(chats[0].name).toBe('Updated Name');
+  });
+
+  it('preserves newer timestamp on conflict', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:05.000Z');
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z');
+    const chats = getAllChats();
+    expect(chats[0].last_message_time).toBe('2024-01-01T00:00:05.000Z');
+  });
+});
+
+// --- Task CRUD ---
+
+describe('task CRUD', () => {
+  it('creates and retrieves a task', () => {
+    createTask({
+      id: 'task-1',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'do something',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: '2024-06-01T00:00:00.000Z',
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const task = getTaskById('task-1');
+    expect(task).toBeDefined();
+    expect(task!.prompt).toBe('do something');
+    expect(task!.status).toBe('active');
+  });
+
+  it('updates task status', () => {
+    createTask({
+      id: 'task-2',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'test',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    updateTask('task-2', { status: 'paused' });
+    expect(getTaskById('task-2')!.status).toBe('paused');
+  });
+
+  it('deletes a task and its run logs', () => {
+    createTask({
+      id: 'task-3',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'delete me',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    deleteTask('task-3');
+    expect(getTaskById('task-3')).toBeUndefined();
+  });
+});
+
+// --- LIMIT behavior ---
+
+describe('message query LIMIT', () => {
+  beforeEach(() => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    for (let i = 1; i <= 10; i++) {
+      store({
+        id: `lim-${i}`,
+        chat_jid: 'group@g.us',
+        sender: 'user@s.whatsapp.net',
+        sender_name: 'User',
+        content: `message ${i}`,
+        timestamp: `2024-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+      });
+    }
+  });
+
+  it('getNewMessages caps to limit and returns most recent in chronological order', () => {
+    const { messages, newTimestamp } = getNewMessages(
+      ['group@g.us'],
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+      3,
+    );
+    expect(messages).toHaveLength(3);
+    expect(messages[0].content).toBe('message 8');
+    expect(messages[2].content).toBe('message 10');
+    // Chronological order preserved
+    expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
+    // newTimestamp reflects latest returned row
+    expect(newTimestamp).toBe('2024-01-01T00:00:10.000Z');
+  });
+
+  it('getMessagesSince caps to limit and returns most recent in chronological order', () => {
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+      3,
+    );
+    expect(messages).toHaveLength(3);
+    expect(messages[0].content).toBe('message 8');
+    expect(messages[2].content).toBe('message 10');
+    expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
+  });
+
+  it('returns all messages when count is under the limit', () => {
+    const { messages } = getNewMessages(
+      ['group@g.us'],
+      '2024-01-01T00:00:00.000Z',
+      'Breadbrich Engels',
+      50,
+    );
+    expect(messages).toHaveLength(10);
+  });
+});
+
+// --- RegisteredGroup isMain round-trip ---
+
+describe('registered group isMain', () => {
+  it('persists isMain=true through set/get round-trip', () => {
+    setRegisteredGroup('main@s.whatsapp.net', {
+      name: 'Main Chat',
+      folder: 'whatsapp_main',
+      trigger: '@Breadbrich Engels',
+      added_at: '2024-01-01T00:00:00.000Z',
+      isMain: true,
+    });
+
+    const groups = getAllRegisteredGroups();
+    const group = groups['main@s.whatsapp.net'];
+    expect(group).toBeDefined();
+    expect(group.isMain).toBe(true);
+    expect(group.folder).toBe('whatsapp_main');
+  });
+
+  it('omits isMain for non-main groups', () => {
+    setRegisteredGroup('group@g.us', {
+      name: 'Family Chat',
+      folder: 'whatsapp_family-chat',
+      trigger: '@Breadbrich Engels',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const groups = getAllRegisteredGroups();
+    const group = groups['group@g.us'];
+    expect(group).toBeDefined();
+    expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- Meeting summary CRUD ---
+
+describe('meeting summary CRUD', () => {
+  const baseSummary = {
+    id: 'mtg-123',
+    chat_jid: 'group@g.us',
+    group_folder: 'slack_main',
+    title: 'Weekly Standup',
+    transcript_text: 'Alice: Hello\nBob: Hi',
+    summary_html: '<html>summary</html>',
+    action_items: JSON.stringify([
+      { description: 'Fix bug', assignee: 'Alice' },
+    ]),
+    extracted_events: null,
+    extracted_people: null,
+    extracted_tasks: null,
+    extracted_documents: null,
+    clarification_questions: null,
+    status: 'completed',
+  };
+
+  it('creates and retrieves a meeting summary by ID', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    createMeetingSummary(baseSummary);
+
+    const summary = getMeetingSummaryById('mtg-123');
+    expect(summary).toBeDefined();
+    expect(summary!.title).toBe('Weekly Standup');
+    expect(summary!.transcript_text).toBe('Alice: Hello\nBob: Hi');
+    expect(summary!.summary_html).toBe('<html>summary</html>');
+    expect(summary!.status).toBe('completed');
+    expect(summary!.created_at).toBeDefined();
+    // created_at should be ISO format (contains T)
+    expect(summary!.created_at).toContain('T');
+  });
+
+  it('returns undefined for non-existent summary', () => {
+    expect(getMeetingSummaryById('mtg-nonexistent')).toBeUndefined();
+  });
+
+  it('retrieves summaries by group folder', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    createMeetingSummary(baseSummary);
+    createMeetingSummary({
+      ...baseSummary,
+      id: 'mtg-456',
+      title: 'Retro',
+      group_folder: 'slack_main',
+    });
+    createMeetingSummary({
+      ...baseSummary,
+      id: 'mtg-789',
+      title: 'Other Group Meeting',
+      group_folder: 'telegram_dev',
+    });
+
+    const mainSummaries = getMeetingSummariesByGroup('slack_main');
+    expect(mainSummaries).toHaveLength(2);
+
+    const devSummaries = getMeetingSummariesByGroup('telegram_dev');
+    expect(devSummaries).toHaveLength(1);
+    expect(devSummaries[0].title).toBe('Other Group Meeting');
+  });
+
+  it('updates summary status and fields', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    createMeetingSummary({
+      ...baseSummary,
+      status: 'pending',
+      summary_html: null,
+    });
+
+    const before = getMeetingSummaryById('mtg-123');
+    expect(before!.status).toBe('pending');
+    expect(before!.summary_html).toBeNull();
+
+    updateMeetingSummary('mtg-123', {
+      status: 'completed',
+      summary_html: '<html>updated</html>',
+      action_items: JSON.stringify([{ description: 'New item' }]),
+    });
+
+    const after = getMeetingSummaryById('mtg-123');
+    expect(after!.status).toBe('completed');
+    expect(after!.summary_html).toBe('<html>updated</html>');
+    expect(after!.action_items).toContain('New item');
+  });
+
+  it('no-ops when updateMeetingSummary has no fields', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    createMeetingSummary(baseSummary);
+
+    // Should not throw
+    updateMeetingSummary('mtg-123', {});
+    const summary = getMeetingSummaryById('mtg-123');
+    expect(summary!.title).toBe('Weekly Standup');
+  });
+});
+
+describe('residency request CRUD', () => {
+  const baseRequest = {
+    chat_jid: 'slack_main@organization',
+    source_group: 'slack_main',
+    requester_name: 'Alex Applicant',
+    requester_contact: 'alex@example.com',
+    request_type: 'resident',
+    requested_start_date: '2026-05-01',
+    requested_end_date: null,
+    room_preference: null,
+    notes: null,
+  };
+
+  it('create → get roundtrip preserves fields and defaults to pending', () => {
+    storeChatMetadata('slack_main@organization', '2026-04-23T00:00:00.000Z');
+
+    const created = createResidencyRequest(baseRequest);
+    expect(created.id).toMatch(/^rr-/);
+    expect(created.status).toBe('pending');
+    expect(created.created_at).toContain('T');
+    expect(created.resolved_by).toBeNull();
+    expect(created.resolved_at).toBeNull();
+
+    const fetched = getResidencyRequest(created.id);
+    expect(fetched).toBeDefined();
+    expect(fetched!.requester_name).toBe('Alex Applicant');
+    expect(fetched!.request_type).toBe('resident');
+    expect(fetched!.requested_start_date).toBe('2026-05-01');
+    expect(fetched!.requested_end_date).toBeNull();
+    expect(fetched!.requester_contact).toBe('alex@example.com');
+    expect(fetched!.source_group).toBe('slack_main');
+    expect(fetched!.status).toBe('pending');
+  });
+
+  it('getResidencyRequest returns undefined for unknown id', () => {
+    expect(getResidencyRequest('rr-does-not-exist')).toBeUndefined();
+  });
+
+  it('listResidencyRequestsByStatus filters by status and orders newest first', () => {
+    storeChatMetadata('slack_main@organization', '2026-04-23T00:00:00.000Z');
+
+    const first = createResidencyRequest({
+      ...baseRequest,
+      requester_name: 'Older Pending',
+    });
+    const second = createResidencyRequest({
+      ...baseRequest,
+      requester_name: 'Newer Pending',
+    });
+    const third = createResidencyRequest({
+      ...baseRequest,
+      requester_name: 'Approved One',
+      request_type: 'guest',
+      requested_end_date: '2026-05-15',
+    });
+    updateResidencyRequestStatus(third.id, 'approved', 'slack_main', 'ok');
+
+    const pending = listResidencyRequestsByStatus('pending');
+    expect(pending).toHaveLength(2);
+    // DESC ordering: second was inserted after first, so appears first
+    expect(pending[0].id).toBe(second.id);
+    expect(pending[1].id).toBe(first.id);
+
+    const approved = listResidencyRequestsByStatus('approved');
+    expect(approved).toHaveLength(1);
+    expect(approved[0].requester_name).toBe('Approved One');
+
+    const all = listResidencyRequestsByStatus();
+    expect(all).toHaveLength(3);
+  });
+
+  it('updateResidencyRequestStatus sets status, resolver, timestamp, and notes', () => {
+    storeChatMetadata('slack_main@organization', '2026-04-23T00:00:00.000Z');
+
+    const created = createResidencyRequest(baseRequest);
+    updateResidencyRequestStatus(
+      created.id,
+      'rejected',
+      'slack_main',
+      'not a good fit right now',
+    );
+
+    const after = getResidencyRequest(created.id);
+    expect(after!.status).toBe('rejected');
+    expect(after!.resolved_by).toBe('slack_main');
+    expect(after!.resolution_notes).toBe('not a good fit right now');
+    expect(after!.resolved_at).toContain('T');
+  });
+});

@@ -1,0 +1,84 @@
+---
+name: kb-operations
+description: Reference skill for Knowledge Base operations — document format, task management, storage systems, and request logging. Use when creating, editing, or querying KB content.
+---
+
+# /kb-operations — Knowledge Base Reference
+
+Reference for how Breadbrich Engels manages the structured KB.
+
+## Directory Structure
+
+The canonical KB lives in `slack_main/context/`. Every container can read it via the `/workspace/shared-kb/` mount (read-only); main containers can additionally write through `/workspace/project/groups/slack_main/context/`.
+
+| Category | Read path (any container) | Write path (main only) | Default Visibility | Description |
+|----------|---------------------------|------------------------|--------------------|-------------|
+| People | `/workspace/shared-kb/people/` | `/workspace/project/groups/slack_main/context/people/` | private | One file per person |
+| Tasks | `/workspace/shared-kb/tasks/` | …/`tasks/` | open | Structured task tracking (TASK-NNN) |
+| Calendar | `/workspace/shared-kb/calendar/` | …/`calendar/` | open | Events, schedules, deadlines |
+| Artifacts | `/workspace/shared-kb/artifacts/` | …/`artifacts/` | open | Documents, creative works, equipment |
+| Spaces | `/workspace/shared-kb/spaces/` | …/`spaces/` | open | Physical rooms and facilities |
+| Financials | `/workspace/shared-kb/financials/` | …/`financials/` | restricted | Budget, expenses, invoices |
+| Dashboards | `/workspace/shared-kb/dashboards/` | …/`dashboards/` | restricted | Visual reports, HTML dashboards |
+
+**Non-main containers** (e.g. `telegram_<user>` DMs) cannot write to the shared KB. If you need to add a person card or task from a non-main context, route the request through the main group container.
+
+## Document Format
+
+Every KB document uses YAML frontmatter:
+
+```yaml
+---
+title: "Document Title"
+id: TASK-NNN          # tasks only
+status: open          # open, in-progress, completed, cancelled
+priority: high        # high, medium, low
+created_at: 2026-05-07
+last_edited: 2026-05-07
+owners: [Person Name]
+stakeholders: [Name1, Name2]
+visibility: open      # open, restricted, private
+tags: [tag1, tag2]
+---
+```
+
+## Task Management
+
+- IDs: Sequential `TASK-NNN`
+- One file per task: `context/tasks/TASK-NNN.md`
+- Track dependencies: `upstream` and `downstream` in frontmatter
+- Checklist items use `- [ ]` / `- [x]`
+- Comments table for history
+
+## Core Behaviors
+
+1. **When someone mentions a person/task/event**: Check if file exists → update or create
+2. **When looking something up**: Read KB files, never rely on session memory alone
+3. **After every interaction**: Log the request (see request logging rules)
+4. **Index maintenance**: Keep `context/index.md`, `context/tasks/active.md`, `context/calendar/upcoming.md` updated
+
+## Storage Systems
+
+| System | Used For | Access |
+|--------|----------|--------|
+| Markdown KB | People, tasks, calendar, artifacts, spaces | File read/write |
+| SQLite DB | Messages, chats, users, tours, rooms, expenses | MCP tools + SQL |
+| Attachments | Photos, business cards, uploads | File read |
+
+## Request Logging
+
+After every interaction, append to the request log:
+- Timestamp, requester, request summary, actions taken, files modified
+
+## Special Rules
+
+- **WTF List**: Always anonymous submissions
+- **Gotchas**: Log operational issues in `artifacts/gotchas.md`
+- **People cards**: Admin-only for edits; Coordinators can read (not personnel notes)
+- **Close the loop**: Every reply should write actionable info to KB, not just respond verbally
+
+## Related
+
+- Full rules: `/workspace/project/rules/knowledge-base/`
+- Document format: `/workspace/project/rules/knowledge-base/document-format.md`
+- Task management: `/workspace/project/rules/knowledge-base/tasks.md`
