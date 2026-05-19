@@ -167,8 +167,14 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
     if (fs.existsSync(templateFile)) {
       let content = fs.readFileSync(templateFile, 'utf-8');
       if (ASSISTANT_NAME !== 'Breadbrich Engels') {
-        content = content.replace(/^# Breadbrich Engels$/m, `# ${ASSISTANT_NAME}`);
-        content = content.replace(/You are Breadbrich Engels/g, `You are ${ASSISTANT_NAME}`);
+        content = content.replace(
+          /^# Breadbrich Engels$/m,
+          `# ${ASSISTANT_NAME}`,
+        );
+        content = content.replace(
+          /You are Breadbrich Engels/g,
+          `You are ${ASSISTANT_NAME}`,
+        );
       }
       fs.writeFileSync(groupMdFile, content);
       logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
