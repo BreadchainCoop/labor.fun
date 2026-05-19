@@ -22,10 +22,7 @@ import {
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
-  writeEventsSnapshot,
   writeTasksSnapshot,
-  writeToursSnapshot,
-  type TourSnapshot,
 } from './container-runner.js';
 import {
   cleanupOrphans,
@@ -46,11 +43,6 @@ import {
   setRegisteredGroup,
   setRouterState,
   setSession,
-  getAllEvents,
-  getAssignmentsForEvent,
-  getUpcomingTourSlots,
-  getPastTourSlots,
-  getEventsWithoutTourSlots,
   storeChatMetadata,
   storeMessage,
   startAgentRun,
@@ -434,12 +426,6 @@ async function runAgent(
     })),
   );
 
-  // Update events snapshot for container to read
-  writeEventsSnapshot(group.folder, buildEventsSnapshot());
-
-  // Update tours snapshot for container to read
-  writeToursSnapshot(group.folder, buildToursSnapshot());
-
   // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
@@ -639,80 +625,6 @@ function recoverPendingMessages(): void {
       queue.enqueueMessageCheck(chatJid);
     }
   }
-}
-
-function buildEventsSnapshot() {
-  const events = getAllEvents();
-  return events.map((e) => ({
-    id: e.id,
-    title: e.title,
-    description: e.description,
-    start_time: e.start_time,
-    end_time: e.end_time,
-    location: e.location,
-    tours_eligible: e.tours_eligible,
-    assignments: getAssignmentsForEvent(e.id).map((a) => ({
-      id: a.id,
-      user_id: a.user_id,
-      user_name: a.user_name || '',
-      role: a.role,
-      notes: a.notes,
-    })),
-  }));
-}
-
-function buildToursSnapshot(): TourSnapshot {
-  const eventsById = new Map(getAllEvents().map((e) => [e.id, e]));
-  const toSnapshotSlot = (
-    slot: ReturnType<typeof getUpcomingTourSlots>[number],
-  ) => {
-    const confirmed = slot.requests.filter((r) => r.status === 'confirmed');
-    const confirmedGuests = confirmed.reduce((sum, r) => sum + r.group_size, 0);
-    const linkedEvent = slot.event_id
-      ? eventsById.get(slot.event_id)
-      : undefined;
-    return {
-      id: slot.id,
-      event_id: slot.event_id,
-      event_title: linkedEvent?.title ?? null,
-      slot_date: slot.slot_date,
-      slot_time: slot.slot_time,
-      slot_type: slot.slot_type,
-      max_capacity: slot.max_capacity,
-      notes: slot.notes,
-      shifts: slot.shifts.map((s) => ({
-        id: s.id,
-        user_id: s.user_id,
-        user_name: s.user_name || '',
-        shift_type: s.shift_type,
-      })),
-      requests: slot.requests.map((r) => ({
-        id: r.id,
-        requester_name: r.requester_name,
-        requester_email: r.requester_email,
-        requester_phone: r.requester_phone,
-        group_size: r.group_size,
-        preferred_date: r.preferred_date,
-        notes: r.notes,
-        status: r.status,
-        created_at: r.created_at,
-      })),
-      confirmed_guests: confirmedGuests,
-    };
-  };
-
-  return {
-    upcoming: getUpcomingTourSlots().map(toSnapshotSlot),
-    past: getPastTourSlots(30).map(toSnapshotSlot),
-    potential: getEventsWithoutTourSlots().map((e) => ({
-      event_id: e.id,
-      title: e.title,
-      description: e.description,
-      start_time: e.start_time,
-      end_time: e.end_time,
-      location: e.location,
-    })),
-  };
 }
 
 function ensureContainerSystemRunning(): void {
@@ -955,18 +867,8 @@ async function main(): Promise<void> {
         status: t.status,
         next_run: t.next_run,
       }));
-      const toursSnapshot = buildToursSnapshot();
       for (const group of Object.values(registeredGroups)) {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
-        writeToursSnapshot(group.folder, toursSnapshot);
-      }
-    },
-    onEventsChanged: () => {
-      const snapshot = buildEventsSnapshot();
-      const toursSnapshot = buildToursSnapshot();
-      for (const group of Object.values(registeredGroups)) {
-        writeEventsSnapshot(group.folder, snapshot);
-        writeToursSnapshot(group.folder, toursSnapshot);
       }
     },
   });
