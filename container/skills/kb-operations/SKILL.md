@@ -62,7 +62,7 @@ tags: [tag1, tag2]
 | System | Used For | Access |
 |--------|----------|--------|
 | Markdown KB | People, tasks, calendar, artifacts, spaces | File read/write |
-| SQLite DB | Messages, chats, users, tours, rooms, expenses | MCP tools + SQL |
+| SQLite DB | Messages, chats, users, expenses | MCP tools + SQL |
 | Attachments | Photos, business cards, uploads | File read |
 
 ## Request Logging
