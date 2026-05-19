@@ -753,39 +753,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
-    // For tour operations
-    slot_date?: string;
-    slot_time?: string;
-    slot_type?: string;
-    // For residency
-    room_number?: number;
-    room_name?: string;
-    capacity?: number;
-    resident_name?: string;
-    guest_name?: string;
-    is_guest?: boolean;
-    start_date?: string;
-    end_date?: string | null;
+    // Shared optional fields used across task/expense operations
     date?: string;
-    // For event operations
     event_id?: string;
-    max_capacity?: number;
     notes?: string;
-    tour_slot_id?: string;
-    guide_name?: string;
-    shift_type?: string;
-    shift_id?: string;
-    request_id?: string;
     status?: string;
-    requester_name?: string;
-    requester_email?: string;
-    requester_phone?: string;
-    preferred_date?: string;
-    group_size?: number;
-    // For event operations
-    person_name?: string;
-    role?: string;
-    assignment_id?: string;
     // For meeting summaries
     summaryId?: string;
     title?: string;
@@ -831,47 +803,6 @@ export async function processTaskIpc(
     approver_notes?: string | null;
     receipt_path?: string | null;
     reimbursement_method?: string;
-    // For residency requests (request_id, status declared above with tours)
-    requested_start_date?: string;
-    requested_end_date?: string | null;
-    requester_contact?: string | null;
-    room_preference?: string | null;
-    resolution_notes?: string | null;
-    // For event intake / booking
-    booking_id?: string;
-    new_status?: string;
-    intake_owner?: string;
-    intake_date?: string;
-    contract_signed_date?: string;
-    deposit_paid_date?: string;
-    cancellation_reason?: string;
-    post_event_state?: string;
-    expected_headcount?: number;
-    preferred_space?: string;
-    event_name?: string;
-    event_type?: string;
-    event_date?: string;
-    start_time?: string;
-    end_time?: string;
-    answers?: Record<string, string>;
-    pricing?: {
-      base_venue_fee?: number;
-      portfolio_discount?: boolean;
-      av_line_item?: number;
-      cleaning_fee?: number;
-      catering_passthrough?: number;
-      damage_deposit?: number;
-      total_quote?: number;
-      deposit_pct?: number;
-      final_payment_due?: string;
-    };
-    staffing?: {
-      on_site_lead?: string;
-      greeter?: string;
-      bar_kitchen?: string;
-      cleaner?: string;
-      outside_vendors?: string;
-    };
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path

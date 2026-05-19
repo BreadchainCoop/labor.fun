@@ -110,6 +110,9 @@ function createSchema(database: Database.Database): void {
       justification TEXT,
       expected_date TEXT,
       incurred_date TEXT,
+      -- Free-form nullable tag, no referent. The events table was removed; the
+      -- prior FK to events(id) was dropped. Kept to avoid a destructive
+      -- migration on existing deployed SQLite DBs.
       event_id TEXT,
       approver_user_id TEXT,
       approved_amount_cents INTEGER,
@@ -1350,6 +1353,7 @@ export interface Expense {
   justification: string | null;
   expected_date: string | null;
   incurred_date: string | null;
+  // Free-form nullable tag, no referent (events table removed). See expenses DDL.
   event_id: string | null;
   approver_user_id: string | null;
   approved_amount_cents: number | null;

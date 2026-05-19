@@ -88,7 +88,7 @@ This vocabulary recurs throughout the codebase and the rest of this guide.
 | **Trigger** | The prefix that wakes the agent in a non-main group. Default is `@Breadbrich Engels` (case-insensitive), set by `ASSISTANT_NAME`. Main does not require a trigger. |
 | **JID** | Jabber ID, the channel-independent unique identifier for a chat (`tg:123456` for Telegram, `1234567890@s.whatsapp.net` for WhatsApp, slack channel id for Slack, etc.). |
 | **KB** | Knowledge Base. The markdown tree mounted at `groups/<name>/context/` containing people, tasks, events, artifacts, spaces, projects, calendar entries, and so on. The KB is the canonical organizational memory; the SQLite database is the canonical system memory. |
-| **kb-ui** | The Express web app at `kb-ui/server.mjs`, served on port 8080 and tunneled through Cloudflare to `kb.example.com`. Renders the KB and exposes dashboards (Projects, Events, Tours, Residency, Map, Admin). |
+| **kb-ui** | The Express web app at `kb-ui/server.mjs`, served on port 8080 and tunneled through Cloudflare to `kb.example.com`. Renders the KB and exposes dashboards (Projects, Admin). |
 | **Container skill** | A directory under `container/skills/` mounted into every agent container at runtime. Examples: `agent-browser`, `slack-formatting`, `capabilities`. These shape *agent* behavior. |
 | **Skill** | One of four extension types. Feature skills are merged git branches; utility skills ship code; operational skills ship only instructions; container skills ship runtime behaviors. See §11. |
 | **Rule** | A markdown file in `rules/<category>/` describing behavior the system enforces. Rules are authoritative; code enforces rules, never the other way around. |
@@ -123,12 +123,10 @@ Top-level source layout:
 | `src/container-runtime.ts` | Lifecycle: spawn, watch, time out, GC orphans. |
 | `src/group-queue.ts` | Per-group serial queue plus a global concurrency cap. |
 | `src/task-scheduler.ts` | Polls `scheduled_tasks` every 60 seconds, spawns one container per due task. |
-| `src/ipc.ts` | Watches the IPC fifo/dir, dispatches container requests to handlers (create_task, send_message, event_create, expense_create, maintenance_report, etc.). |
+| `src/ipc.ts` | Watches the IPC fifo/dir, dispatches container requests to handlers (create_task, send_message, expense_create, maintenance_report, etc.). |
 | `src/credential-proxy.ts` | Bridges OneCLI Agent Vault into agent traffic. |
 | `src/mount-security.ts` | Validates mount paths against the external allowlist. |
-| `kb-ui/server.mjs` | Express app serving the dashboards (separate `breadbrich-kb` service). |
-| `kb-ui/apps.mjs`, `apps-db.mjs` | Events, Tours, Residency app routes + DB ops. |
-| `kb-ui/sync-calendar.mjs` | Pulls events from Google Calendar's public iCal feed. |
+| `kb-ui/server.mjs` | Express app serving the KB and the Projects/Admin dashboards (separate `breadbrich-kb` service). |
 | `setup/` | First-run installer (deps, channel auth, group registration, service install). |
 | `container/agent-runner/` | Code that runs *inside* the agent container (entry, IPC client). |
 | `container/skills/` | Runtime skills mounted into every container. |
@@ -168,7 +166,7 @@ Containers die when the agent emits a non-tool turn end, when `CONTAINER_TIMEOUT
 
 ## 5. How a single message flows, end to end
 
-Take a concrete case: a member of `slack_main` types `@Breadbrich Engels please add Dave to tomorrow's event as host`.
+Take a concrete case: a member of `slack_main` types `@Breadbrich Engels please file a $40 expense for team snacks`.
 
 1. **Slack listener** (`src/channels/slack.ts`) receives the message via Socket Mode and writes a row to the `messages` table with `chat_jid`, `sender`, `content`, `timestamp`, `thread_id`.
 2. **Message loop** (`src/index.ts`) polls every 2 seconds for messages newer than the `router_state` cursor for `slack_main`.
@@ -176,14 +174,14 @@ Take a concrete case: a member of `slack_main` types `@Breadbrich Engels please 
 4. **Group queue** (`src/group-queue.ts`) serializes per-group invocations and applies the global concurrency cap (default 5).
 5. **Identity resolution** (`src/permissions.ts`) — the sender's Slack user id is looked up in `user_identities` and mapped to a KB person name (e.g. `bob`). If the sender is unknown, they are treated as a guest.
 6. **Container spawn** (`src/container-runner.ts`) — builds the `docker run` (or `container run`) command, mounting `groups/slack_main/`, `groups/global/`, `store/` (main only), and the container skills. Resumes the SDK session for `slack_main` from `data/sessions/slack_main/.claude/`.
-7. **Agent loop** — the Claude Agent SDK starts. The agent reads the group's `CLAUDE.md`, any relevant KB documents, the available tools (including the IPC tool for `event_assign`), and the user's message.
-8. **Classifier (when present)** — a Haiku pre-pass classifies the request type (`event_logging` here) and confidence. Per `routing-rules.yaml`, casual requests can be short-circuited to emoji reactions; substantive requests proceed.
-9. **Tool call** — the agent calls `event_assign(event_id, user_id="dave", role="host")` via MCP, which the IPC stdio bridge serializes to a JSON file in the watched IPC directory.
-10. **IPC dispatch** (`src/ipc.ts`) — host process reads the JSON, validates that the sender is authorized to assign roles (admin or coordinator), looks up the event id, writes the row into `event_assignments`, and emits a result.
-11. **Post-hooks** (per routing rule) — e.g. `notify_owner_if_assigned` sends a DM to Dave; `update_memory_pointer_index` lets the Reflector know the KB has changed.
+7. **Agent loop** — the Claude Agent SDK starts. The agent reads the group's `CLAUDE.md`, any relevant KB documents, the available tools (including the IPC tool for `request_expense`), and the user's message.
+8. **Classifier (when present)** — a Haiku pre-pass classifies the request type (`expense_request` here) and confidence. Per `routing-rules.yaml`, casual requests can be short-circuited to emoji reactions; substantive requests proceed.
+9. **Tool call** — the agent calls `request_expense(amount_cents=4000, description="team snacks", category="food")` via MCP, which the IPC stdio bridge serializes to a JSON file in the watched IPC directory.
+10. **IPC dispatch** (`src/ipc.ts`) — host process reads the JSON, validates that the sender is authorized to file expenses, resolves them to a KB user, writes the row into `expenses`, and emits a result.
+11. **Post-hooks** (per routing rule) — e.g. an approval-needed DM is sent to a finance approver; `update_memory_pointer_index` lets the Reflector know the KB has changed.
 12. **Reply** — the agent formats a confirmation. `src/router.ts` converts Markdown to Slack mrkdwn (via the `channel-formatting` container skill / host helper). The Slack channel handler posts the reply.
 13. **Turn end** — the agent emits a non-tool turn end. The container exits. The orchestrator advances the message cursor in `router_state` (after success — per the deploy memory, advancing before confirmation has caused message loss; the current fix is to advance only on acknowledgement).
-14. **Dreaming loop** — eventually, the Observer extracts the assignment as a fact, the Reflector compresses overlapping observations, and the Curator archives the fact into `groups/slack_main/context/calendar/<event>.md`.
+14. **Dreaming loop** — eventually, the Observer extracts the expense as a fact, the Reflector compresses overlapping observations, and the Curator archives the fact into `groups/slack_main/context/`.
 
 That sequence is invariant across channels. The only thing that changes between Slack and Telegram and Gmail is the channel handler at step 1 and the outbound formatting at step 12.
 
@@ -220,7 +218,7 @@ Why markdown?
 
 ### 6.2 The SQLite database
 
-Located at `store/messages.db`. Around fourteen tables (see §7). Contains channel-level state: messages, chats, registered groups, sessions, scheduled tasks, run logs, identity mappings, tag hierarchy, router cursors, and the application data for the kb-ui apps (events, tours, residency, expenses, meeting summaries).
+Located at `store/messages.db`. Around a dozen tables (see §7). Contains channel-level state: messages, chats, registered groups, sessions, scheduled tasks, run logs, identity mappings, tag hierarchy, router cursors, and application data (expenses, meeting summaries).
 
 Why SQLite?
 
@@ -269,19 +267,11 @@ This section gives you a one-screen summary of what's in `store/messages.db`. Th
 | `user_identities` | `(platform_id, platform) → kb_person` | One row per (slack id, telegram id, etc.) for each person |
 | `tag_hierarchy` | Parent → child role tags | E.g. `admin → leadership, engineering, operations, …`; used for RBAC inheritance |
 
-### 7.4 Apps (events, tours, residency)
+### 7.4 Application support
 
 | Table | What it stores |
 |---|---|
 | `app_users` | People-as-app-users (a row per assignable person) |
-| `events` | Calendar events synced from Google Calendar iCal |
-| `event_assignments` | Role per person per event (host / setup / cleanup / catering / security / other) |
-| `tour_slots` | Time slots for visitor tours |
-| `tour_shifts` | Guide assignments to tour slots |
-| `tour_requests` | Incoming visitor requests |
-| `rooms` | Physical rooms at the organization |
-| `room_occupancy` | Residents and guests with date ranges |
-| `residency_requests` | Applications for residency or guest stays |
 
 ### 7.5 Finance
 
@@ -334,11 +324,7 @@ There is **no `projects` table in SQLite**. The relational structure (project �
 
 ### 8.3 Events
 
-An event is a row in the `events` table, deduplicated against Google Calendar by `google_calendar_id`. Events get role assignments via the `event_assignments` table.
-
-The source of truth for which events exist is Google Calendar; `sync-calendar.mjs` pulls the iCal feed every five minutes and upserts. Events can also be created via IPC; those still get a `google_calendar_id` if pushed back to the calendar by a post-hook.
-
-Events are referenced by markdown documents at `context/calendar/<date>-<slug>.md` for narrative context (program, location, prep notes).
+An event is a markdown document at `context/calendar/<date>-<slug>.md` with an `EVT-NNN` id, used for narrative context (program, location, prep notes) and for `linked_tasks` / `linked_events` cross-references. There is **no `events` table in SQLite** and no Google Calendar sync — events are purely KB markdown, canonical and resolved at read time.
 
 ### 8.4 Processes
 
@@ -382,14 +368,11 @@ Open `rules/INDEX.md` for the canonical index. The directory structure is:
 rules/
 ├── INDEX.md
 ├── access-control/      # who can see and do what
-├── events/              # event lifecycle + role assignments
 ├── finance/             # expense approval, reimbursement, budget tags
 ├── identity/            # user resolution, tag hierarchy, platform mapping
 ├── knowledge-base/      # KB structure, document format, task management
 ├── messaging/           # channel formatting, cross-channel send authority
-├── residency/           # rooms, occupancy, residency-request lifecycle
 ├── scheduling/          # cron tasks, API credit conservation, scripts
-├── tours/               # tour slots, guide shifts, visitor requests
 └── transcripts/         # meeting transcript processing, action item extraction
 ```
 
@@ -626,11 +609,9 @@ Full lifecycle and retrospective variant: `docs/expense-flows.md`.
 
 The agent:
 
-1. Adds an `events` row.
-2. Optionally pushes the event back to Google Calendar (a post-hook).
-3. Adds an `event_assignments` row for nina as host.
-4. Writes `groups/slack_main/context/calendar/2026-05-21-ai-safety-reading.md` for narrative context.
-5. Replies with the event id and a confirmation.
+1. Writes `groups/slack_main/context/calendar/2026-05-21-ai-safety-reading.md` with an `EVT-NNN` id and frontmatter (date, location, host: nina).
+2. Cross-links any related tasks via `linked_tasks` / `linked_events` frontmatter.
+3. Replies with the event id and a confirmation.
 
 ### 13.6 "I want to schedule a daily report"
 

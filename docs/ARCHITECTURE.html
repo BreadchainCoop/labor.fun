@@ -315,7 +315,7 @@ CLI ---------&gt; direct stdin --&gt; |   IPC Watcher         |
 <h2 id="database">7. Database Schema</h2>
 <!-- ============================================ -->
 <div class="section">
-<p>SQLite at <code>/opt/breadbrich/store/messages.db</code>. Also <code>apps-db.mjs</code> for events/tours/rooms (dashboard-specific).</p>
+<p>SQLite at <code>/opt/breadbrich/store/messages.db</code>.</p>
 
 <h3>Core Tables</h3>
 <table>
@@ -333,17 +333,12 @@ CLI ---------&gt; direct stdin --&gt; |   IPC Watcher         |
 <tr><td><code>digest_watermarks</code></td><td>group_folder, last_digest_ts</td><td>Daily digest tracking</td></tr>
 </table>
 
-<h3>Apps DB (Events/Tours/Rooms)</h3>
+<h3>Application Tables</h3>
 <table>
 <tr><th>Table</th><th>Purpose</th></tr>
-<tr><td><code>app_users</code></td><td>Shared user registry for events/tours/residency</td></tr>
-<tr><td><code>events</code></td><td>Calendar events (Google Calendar sync support)</td></tr>
-<tr><td><code>event_assignments</code></td><td>Role assignments per event</td></tr>
-<tr><td><code>tour_slots</code></td><td>Tour scheduling windows</td></tr>
-<tr><td><code>tour_shifts</code></td><td>Guide assignments to tour slots</td></tr>
-<tr><td><code>tour_requests</code></td><td>Visitor tour booking requests</td></tr>
-<tr><td><code>rooms</code></td><td>Physical room inventory</td></tr>
-<tr><td><code>room_occupancy</code></td><td>Resident/guest room assignments</td></tr>
+<tr><td><code>app_users</code></td><td>Shared user registry (a row per assignable person)</td></tr>
+<tr><td><code>expenses</code></td><td>Expense request lifecycle (approval, receipt, reimbursement)</td></tr>
+<tr><td><code>meeting_summaries</code></td><td>Processed transcripts + extracted entities</td></tr>
 </table>
 </div>
 
@@ -432,8 +427,7 @@ CLI ---------&gt; direct stdin --&gt; |   IPC Watcher         |
   projects/          # PROJECT-NNN.md files (group tasks + events)
   artifacts/         # Documents, meeting notes, creative works
   calendar/          # EVT-NNN event files
-  spaces/            # Physical room/facility descriptions
-  tours/             # Tour-related context</code></pre>
+  spaces/            # Physical room/facility descriptions</code></pre>
 
 <h3>Task File Format</h3>
 <pre><code>---
@@ -481,9 +475,6 @@ TASK-001, TASK-002, TASK-016, TASK-017, TASK-020, TASK-026, TASK-033, TASK-034
 <tr><td><code>knowledge-base/request-logging.md</code></td><td>How to log requests</td></tr>
 <tr><td><code>messaging/cross-channel.md</code></td><td>Cross-channel send rules</td></tr>
 <tr><td><code>messaging/channel-formatting.md</code></td><td>Output formatting per channel</td></tr>
-<tr><td><code>tours/tours.md</code></td><td>Tour slot management rules</td></tr>
-<tr><td><code>residency/residency.md</code></td><td>Room/occupancy management rules</td></tr>
-<tr><td><code>events/events.md</code></td><td>Event management rules</td></tr>
 <tr><td><code>transcripts/transcripts.md</code></td><td>Meeting transcript processing workflow</td></tr>
 </table>
 </div>
@@ -499,16 +490,11 @@ TASK-001, TASK-002, TASK-016, TASK-017, TASK-020, TASK-026, TASK-033, TASK-034
 <tr><td><code>/projects</code></td><td>server.mjs</td><td>All</td><td>Notion-style expandable projects + List/Board/Graph views</td></tr>
 <tr><td><code>/category/:name</code></td><td>server.mjs</td><td>All</td><td>Raw data browser per KB directory</td></tr>
 <tr><td><code>/doc/:cat/:file</code></td><td>server.mjs</td><td>Per visibility</td><td>Individual document viewer (markdown rendered)</td></tr>
-<tr><td><code>/events</code></td><td>apps.mjs</td><td>All</td><td>Event management (Google Calendar sync)</td></tr>
-<tr><td><code>/tours</code></td><td>apps.mjs</td><td>All</td><td>Tour slot scheduling</td></tr>
-<tr><td><code>/residency</code></td><td>apps.mjs</td><td>All</td><td>Room management &amp; occupancy</td></tr>
-<tr><td><code>/map</code></td><td>server.mjs</td><td>All</td><td>3D Three.js building floor plan with task pins</td></tr>
 <tr><td><code>/linkages</code></td><td>server.mjs</td><td>All</td><td>Task &harr; Event relationship graph</td></tr>
 <tr><td><code>/logs</code></td><td>server.mjs</td><td>Admin</td><td>Request log search &amp; analytics</td></tr>
 <tr><td><code>/architecture</code></td><td>server.mjs</td><td>Admin</td><td>System architecture diagram</td></tr>
 <tr><td><code>/admin</code></td><td>server.mjs</td><td>Superadmin</td><td>Users, credentials, identities, tags, permissions</td></tr>
 <tr><td><code>PATCH /api/tasks/:file</code></td><td>server.mjs</td><td>Admin/Coordinator</td><td>Update task status/priority (drag-and-drop)</td></tr>
-<tr><td><code>POST /api/tasks</code></td><td>server.mjs</td><td>Admin/Coordinator</td><td>Create task from 3D map pin</td></tr>
 </table>
 
 <h3>Auth</h3>

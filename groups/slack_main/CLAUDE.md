@@ -14,8 +14,6 @@ Your operational rules are in `rules/`. Read the relevant rule set based on what
 - **After every interaction**: Follow `rules/knowledge-base/request-logging.md`
 - **Checking permissions**: Read `rules/access-control/role-matrix.md`
 - **Identifying who is asking**: Read `rules/identity/README.md`
-- **Tour operations**: Read `rules/tours/tours.md`
-- **Event intake / booking workflow**: Read `rules/events/intake.md`
 - **Expense operations**: Read `rules/finance/expenses.md`
 
 Full index: `rules/INDEX.md`
@@ -172,83 +170,9 @@ People are tagged with groups. Groups determine access scope and organizational 
 
 A person can belong to multiple groups.
 
-## Events
-
-Events at the organization are synced from Google Calendar. You cannot create or delete events.
-
-When someone asks about events or assignments:
-1. Use `list_events` to see upcoming (and optionally past) events
-2. To assign someone to an event role, use `assign_event_role` with the event ID, person's name, and role (host/setup/cleanup/catering/security/other)
-3. To check who's assigned, use `get_event_assignments` with the event ID
-4. To remove an assignment, use `remove_event_assignment` with the assignment ID
-5. If someone mentions a new person, just use their name -- the system creates them automatically
-
-Valid roles: host, setup, cleanup, catering, security, other.
-
-See `rules/events/events.md` for full rules.
-
-## Event Intake & Booking
-
-Separate from calendar-sync events above. This is the workflow for booking the venue (host inquiries, pricing, contracts). Full rules: `rules/events/intake.md`.
-
-When a host asks about hosting or booking an event:
-1. Walk them through the public intake conversationally. Required-to-submit: host name + contact, event name, type, date, headcount, preferred space. Optional fields are fine to skip.
-2. Call `submit_event_intake` once required fields are collected. Pass any extra answers as the `answers` map (slugged keys → text).
-3. Confirm the EVT-ID back to the host and tell them to expect a response within 2 business days.
-
-When ops or a coordinator records internal intake (in this main group):
-1. They'll say something like "log internal intake for EVT-014" or "set pricing on EVT-014".
-2. Use `record_internal_intake` with `pricing` and/or `staffing` blocks. Partial updates are fine — call again later for missing fields.
-
-For lifecycle moves (this main group only):
-1. **Send proposal**: First call `request_proposal_approval(EVT-014)`. An admin must reply "approved EVT-014" or "rejected EVT-014" — when they do, call `decide_proposal_approval(EVT-014, approved|rejected)`. Only after an `approved` decision is on file can ops call `transition_event_booking(EVT-014, proposal_sent)`.
-2. **Contract out**: `transition_event_booking(EVT-014, contract_out)` once the contract is sent.
-3. **Confirmed**: `transition_event_booking(EVT-014, confirmed, contract_signed_date=..., deposit_paid_date=...)`. After this, ops manually creates the GCal entry and links it.
-4. **Complete**: `transition_event_booking(EVT-014, complete, post_event_state="...")`.
-5. **Cancel**: `transition_event_booking(EVT-014, cancelled, cancellation_reason="...")` from any state.
-
-For browsing: `list_event_bookings` with optional status/date filters.
-
-Do NOT:
-- Skip lifecycle states.
-- Promise pricing or availability without checking with ops.
-- Quote a number outside what's in the booking record.
-- Create a calendar entry yourself — ops handles that manually for now.
-
-If the host process rejects a transition (e.g. missing pricing or no admin approval on file), surface the error verbatim to the user.
-
 ## Web Browsing
 
 For web research, use the `web-search` skill first (cheaper). If that fails or needs JS rendering, escalate to `web-browse` (full Chromium).
-
-## Residency
-
-When someone asks about rooms, residency, occupants, or guests:
-1. Use `check_room_availability` to see what rooms exist and who is in them
-2. Use `add_room` to create new rooms (requires room number and optionally a name/capacity)
-3. Use `add_resident` to assign a community member to a room (auto-creates user if new)
-4. Use `add_guest` to add a visitor/guest to a room (free-text name, not linked to users)
-5. Use `edit_occupancy` to change dates or notes on an existing assignment
-6. Use `remove_occupancy` when someone moves out or a guest departs
-
-Key behaviors:
-- Always check room availability before assigning someone to confirm the room exists and has capacity
-- Omit end_date for permanent/ongoing residents; set end_date for guests and temporary stays
-- Warn the user if an assignment would exceed room capacity
-- Refer to the dashboard at kb.example.com for the visual Gantt timeline
-- See `rules/residency/residency.md` for full rules
-
-### Residency Requests (Applications)
-
-When someone asks to stay at the organization -- either as a resident or a guest -- log the application instead of creating an occupancy directly:
-
-1. Use `submit_residency_request` with `request_type` ("resident" or "guest"), `requester_name`, `requested_start_date`, and (if known) `requested_end_date`, `requester_contact`, `room_preference`, and `notes`. This works from any group; the main group will be notified.
-2. Requests start in `pending`. Do NOT approve or reject on your own -- wait for a reviewer (admin / operations / house tag) to say so in the main group.
-3. When a reviewer tells you to approve or reject a request, use `review_residency_request` with the `request_id` and `decision`. Pass `resolution_notes` if the reviewer gave a reason; it's included in the message sent back to the applicant's chat.
-4. Approval does NOT auto-create an occupancy. After approval, coordinate with the reviewer to pick a room and then use `add_resident` / `add_guest` to record the actual stay.
-5. Use `list_residency_requests` (main group only) to show pending or historical applications; pass `status` to filter.
-
-See `rules/residency/requests.md` for the full workflow (lifecycle, approval chain, notifications).
 
 ## Cross-Channel Messaging
 
@@ -266,31 +190,6 @@ mcp__nanoclaw__send_message(text="Hey, check Slack when you get a chance", targe
 The `target_jid` parameter is the key — without it, the message goes to this Slack channel. With it, the message goes to that Telegram chat.
 
 **When to use:** When someone asks you to message/ping/notify someone on Telegram, or when it clearly makes sense (e.g., "tell Alice on TG that..."). Do NOT say you can't do this — you can.
-
-## Tours
-
-The tour feature supports the full dashboard UX through chat. Always read before mutating.
-
-1. **Visitor wants a tour**: Collect name, group size, email, phone, preferred date. Use `list_tour_slots` to pick the matching upcoming slot, then `request_tour`. If no slot matches, use `create_tour_slot` first. Confirm to the user that the request is logged.
-
-2. **Guide volunteers**: Use `list_tour_slots` to resolve the slot, then `claim_tour_shift` with the guide's name. The system creates the user if new.
-
-3. **Guide steps down**: Use `get_tour_slot` on the relevant slot to find the `shift_id`, then `release_tour_shift`. Main group is notified.
-
-4. **Coordinator confirms or cancels a request**: Use `get_tour_slot` to find the `request_id`, then `update_tour_request_status` with `confirmed` or `cancelled`. On `confirmed`, if the requester's email is on the Breadbrich Engels email whitelist, the requester is emailed automatically.
-
-5. **Schedule management**:
-   - Standard Fri/Mon schedule: `generate_weekly_tour_slots`
-   - One-off tour: `create_tour_slot` (pass `event_id` if tying it to an event)
-   - Events that could become tours: `list_potential_tour_dates`
-
-6. **Checking availability / listing**: `list_tour_slots` (filter: upcoming, past, all) — returns capacity, guides, request counts.
-
-7. **Reply style**: refer to slots by weekday + date + time, not UUIDs, unless the user asks for IDs.
-
-8. **Do NOT** delete slots or delete request records via chat — those are dashboard-only. Status changes (`cancelled`) are the chat-side equivalent of removing a request.
-
-See `rules/tours/tours.md` for lifecycle, notifications, and constraints.
 
 ## Expenses
 
