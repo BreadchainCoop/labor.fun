@@ -5,7 +5,12 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import nodemailer from 'nodemailer';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  DATA_DIR,
+  FLAT_ACCESS,
+  IPC_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import { readEnvFile } from './env.js';
 import { AvailableGroup } from './container-runner.js';
 import {
@@ -186,7 +191,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
     }
 
     for (const sourceGroup of groupFolders) {
-      const isMain = folderIsMain.get(sourceGroup) === true;
+      // Flat-access (cooperative) mode: every group authorizes IPC ops as
+      // main. Restore the sandbox with FLAT_ACCESS=false.
+      const isMain = folderIsMain.get(sourceGroup) === true || FLAT_ACCESS;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
