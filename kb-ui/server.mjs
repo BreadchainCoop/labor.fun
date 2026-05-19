@@ -12,7 +12,6 @@ try { Database = (await import('better-sqlite3')).default; } catch {
     try { const r = createRequire('/opt/breadbrich/package.json'); Database = r('better-sqlite3'); } catch { Database = null; }
   }
 }
-import { createAppsRouter } from './apps.mjs';
 const require = createRequire(import.meta.url);
 
 const app = express();
@@ -259,10 +258,6 @@ app.get('/', (req, res) => {
   // --- Dashboards section ---
   let dashboardCards = '';
   dashboardCards += `<a href="/projects" class="nav-card" style="border-color:#1a2a1a"><div class="icon">\u{1F4CA}</div><div class="label">Projects</div><div class="count">Project tracker</div></a>`;
-  dashboardCards += `<a href="/events" class="nav-card" style="border-color:#2a1a2a"><div class="icon">\u{1F389}</div><div class="label">Events</div><div class="count">Manage events</div></a>`;
-  dashboardCards += `<a href="/tours" class="nav-card" style="border-color:#1a2a1a"><div class="icon">\u{1F6B6}</div><div class="label">Tours</div><div class="count">Tour scheduling</div></a>`;
-  dashboardCards += `<a href="/residency" class="nav-card" style="border-color:#2a2a1a"><div class="icon">\u{1F3E0}</div><div class="label">Residency</div><div class="count">Room management</div></a>`;
-  dashboardCards += `<a href="/map" class="nav-card" style="border-color:#2a1a2a"><div class="icon">\u{1F3D7}\u{FE0F}</div><div class="label">Building Map</div><div class="count">3D floor plans + tasks</div></a>`;
 
   // --- Raw Data section ---
   let rawDataCards = '';
@@ -4254,9 +4249,6 @@ app.get('/projects', (req, res) => {
 
   res.send(layout('Projects', body, username));
 });
-
-// --- Apps (Events, Tours, Residency) ---
-app.use(createAppsRouter(layout));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Knowledge Base UI running at http://0.0.0.0:${PORT}`);
