@@ -2002,4 +2002,3 @@ function findChatJidForGroup(
     ([, g]) => g.folder === groupFolder,
   )?.[0];
 }
-

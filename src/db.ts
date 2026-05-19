@@ -953,11 +953,9 @@ export function getAllUsers(): AppUser[] {
 export function createUser(name: string): AppUser {
   const id = generateId();
   const now = new Date().toISOString();
-  db.prepare('INSERT INTO app_users (id, name, created_at) VALUES (?, ?, ?)').run(
-    id,
-    name,
-    now,
-  );
+  db.prepare(
+    'INSERT INTO app_users (id, name, created_at) VALUES (?, ?, ?)',
+  ).run(id, name, now);
   return { id, name, created_at: now };
 }
 
