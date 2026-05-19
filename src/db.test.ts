@@ -323,11 +323,19 @@ describe('getMessagesSince', () => {
     });
 
     // Recover cursor from the last bot message (m3 from beforeEach)
-    const recovered = getLastBotMessageTimestamp('group@g.us', 'Breadbrich Engels');
+    const recovered = getLastBotMessageTimestamp(
+      'group@g.us',
+      'Breadbrich Engels',
+    );
     expect(recovered).toBe('2024-01-01T00:00:03.000Z');
 
     // Using recovered cursor: only gets messages after the bot reply
-    const msgs = getMessagesSince('group@g.us', recovered!, 'Breadbrich Engels', 10);
+    const msgs = getMessagesSince(
+      'group@g.us',
+      recovered!,
+      'Breadbrich Engels',
+      10,
+    );
     // m4 (third, 00:00:04) + new-1 — skips all 50 old messages and m1/m2
     expect(msgs).toHaveLength(2);
     expect(msgs[0].content).toBe('third');
@@ -347,11 +355,19 @@ describe('getMessagesSince', () => {
       });
     }
 
-    const recovered = getLastBotMessageTimestamp('group@g.us', 'Breadbrich Engels');
+    const recovered = getLastBotMessageTimestamp(
+      'group@g.us',
+      'Breadbrich Engels',
+    );
     expect(recovered).toBe('2024-01-01T00:00:03.000Z');
 
     // With limit=10, only the 10 most recent are returned
-    const msgs = getMessagesSince('group@g.us', recovered!, 'Breadbrich Engels', 10);
+    const msgs = getMessagesSince(
+      'group@g.us',
+      recovered!,
+      'Breadbrich Engels',
+      10,
+    );
     expect(msgs).toHaveLength(10);
     // Most recent 10: pending-21 through pending-30
     expect(msgs[0].content).toBe('pending message 21');
@@ -372,7 +388,10 @@ describe('getMessagesSince', () => {
       });
     }
 
-    const recovered = getLastBotMessageTimestamp('fresh@g.us', 'Breadbrich Engels');
+    const recovered = getLastBotMessageTimestamp(
+      'fresh@g.us',
+      'Breadbrich Engels',
+    );
     expect(recovered).toBeUndefined();
 
     // No cursor → sinceTimestamp = '' but limit caps the result
@@ -468,7 +487,11 @@ describe('getNewMessages', () => {
   });
 
   it('returns empty for no registered groups', () => {
-    const { messages, newTimestamp } = getNewMessages([], '', 'Breadbrich Engels');
+    const { messages, newTimestamp } = getNewMessages(
+      [],
+      '',
+      'Breadbrich Engels',
+    );
     expect(messages).toHaveLength(0);
     expect(newTimestamp).toBe('');
   });
