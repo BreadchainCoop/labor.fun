@@ -11,7 +11,7 @@ Chat and group metadata. No message content stored here.
 |---|---|---|
 | **jid** | TEXT PK | Chat/group JID |
 | name | TEXT | Display name |
-| last_message_time | INTEGER | Unix timestamp |
+| last_message_time | TEXT | ISO-8601 string, e.g. `2026-05-19T18:17:36.528Z` |
 | channel | TEXT | slack, telegram, cli, etc. |
 | is_group | INTEGER | 0=DM, 1=group |
 
@@ -25,7 +25,7 @@ Full message history with reply threading context.
 | sender | TEXT | Sender platform ID |
 | sender_name | TEXT | Display name |
 | content | TEXT | Message body |
-| timestamp | INTEGER | Unix timestamp (indexed) |
+| timestamp | TEXT | ISO-8601 string, e.g. `2026-05-19T18:17:36.528Z` (indexed; sorts chronologically as text) |
 | is_from_me | INTEGER | 1 if bot sent it |
 | is_bot_message | INTEGER | 1 if from any bot |
 | reply_to_message_id | TEXT | Threading |
