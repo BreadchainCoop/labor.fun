@@ -500,6 +500,90 @@ describe('DiscordChannel', () => {
       );
     });
 
+    it('treats role mention as bot mention when bot holds that role', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const botRoleId = 'role-bot-1506321455636549675';
+      // Build a message where the user @-mentions a role the bot holds.
+      const msg = {
+        channelId: '1234567890123456',
+        id: 'msg_role_001',
+        content: `<@&${botRoleId}> review this PR`,
+        createdAt: new Date('2024-01-01T00:00:00.000Z'),
+        author: {
+          id: '55512345',
+          username: 'ron',
+          displayName: 'Ron',
+          bot: false,
+        },
+        member: { displayName: 'Ron' },
+        guild: {
+          name: 'Server',
+          members: {
+            me: { roles: { cache: new Map([[botRoleId, { id: botRoleId }]]) } },
+          },
+        },
+        channel: { name: 'general', messages: { fetch: vi.fn() } },
+        mentions: {
+          users: new Map(),
+          roles: new Map([[botRoleId, { id: botRoleId }]]),
+        },
+        attachments: new Map(),
+        reference: null,
+      } as any;
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content: '@Andy review this PR',
+        }),
+      );
+    });
+
+    it('does NOT treat role mention as bot mention when bot lacks that role', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const otherRoleId = 'role-not-bot';
+      const msg = {
+        channelId: '1234567890123456',
+        id: 'msg_role_002',
+        content: `<@&${otherRoleId}> hello team`,
+        createdAt: new Date('2024-01-01T00:00:00.000Z'),
+        author: {
+          id: '55512345',
+          username: 'ron',
+          displayName: 'Ron',
+          bot: false,
+        },
+        member: { displayName: 'Ron' },
+        guild: {
+          name: 'Server',
+          members: { me: { roles: { cache: new Map() } } },
+        },
+        channel: { name: 'general', messages: { fetch: vi.fn() } },
+        mentions: {
+          users: new Map(),
+          roles: new Map([[otherRoleId, { id: otherRoleId }]]),
+        },
+        attachments: new Map(),
+        reference: null,
+      } as any;
+      await triggerMessage(msg);
+
+      // Content is stored as-is; no @Andy prepend
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content: `<@&${otherRoleId}> hello team`,
+        }),
+      );
+    });
+
     it('handles <@!botId> (nickname mention format)', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
