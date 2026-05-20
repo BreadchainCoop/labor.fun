@@ -514,12 +514,12 @@ async function runQuery(
           ? {
               github: {
                 command: 'github-mcp-server',
-                // read+write; toolsets scoped to code/issues/PRs/CI.
+                // read+write; toolsets scoped to code/issues/PRs/CI/Projects V2.
                 // Repo scope is enforced by the PAT, not the server.
                 args: [
                   'stdio',
                   '--toolsets',
-                  'context,repos,issues,pull_requests,actions',
+                  'context,repos,issues,pull_requests,actions,projects',
                 ],
                 env: {
                   GITHUB_PERSONAL_ACCESS_TOKEN:
