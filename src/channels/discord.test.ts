@@ -12,6 +12,9 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  DISCORD_DM_ALLOWED_ROLE_IDS: [] as string[],
+  DISCORD_DM_ALLOWED_GUILD_IDS: [] as string[],
+  DISCORD_DM_ROLE_REFRESH_INTERVAL: 0,
 }));
 
 // Mock logger
@@ -100,7 +103,11 @@ vi.mock('discord.js', () => {
   };
 });
 
-import { DiscordChannel, DiscordChannelOpts } from './discord.js';
+import {
+  DiscordChannel,
+  DiscordChannelOpts,
+  userHasAllowedRole,
+} from './discord.js';
 
 // --- Test helpers ---
 
@@ -118,8 +125,37 @@ function createTestOpts(
         added_at: '2024-01-01T00:00:00.000Z',
       },
     })),
+    registerGroup: vi.fn(),
+    deregisterGroup: vi.fn(),
     ...overrides,
   };
+}
+
+// Build a fake discord.js client that exposes one guild with one member
+// holding the given role IDs. Used for userHasAllowedRole unit tests.
+function fakeClientWithMember(
+  guildId: string,
+  userId: string,
+  roleIds: string[],
+) {
+  const member = {
+    roles: {
+      cache: new Map(roleIds.map((id) => [id, { id }])),
+    },
+  };
+  const guild = {
+    id: guildId,
+    members: { fetch: vi.fn().mockResolvedValue(member) },
+  };
+  const guilds = new Map([[guildId, guild]]);
+  return {
+    guilds: {
+      cache: {
+        values: () => guilds.values(),
+        get: (id: string) => guilds.get(id),
+      },
+    },
+  } as any;
 }
 
 function createMessage(overrides: {
@@ -772,6 +808,55 @@ describe('DiscordChannel', () => {
     it('has name "discord"', () => {
       const channel = new DiscordChannel('test-token', createTestOpts());
       expect(channel.name).toBe('discord');
+    });
+  });
+
+  // --- DM role-based allowlist ---
+
+  describe('userHasAllowedRole', () => {
+    it('returns false when no allowed role IDs are configured', async () => {
+      const client = fakeClientWithMember('g1', 'u1', ['r1']);
+      const result = await userHasAllowedRole(client, 'u1', [], []);
+      expect(result).toBe(false);
+    });
+
+    it('returns true when the user holds an allowed role in any guild', async () => {
+      const client = fakeClientWithMember('g1', 'u1', ['r-allowed']);
+      const result = await userHasAllowedRole(client, 'u1', ['r-allowed'], []);
+      expect(result).toBe(true);
+    });
+
+    it('returns false when the user holds no allowed roles', async () => {
+      const client = fakeClientWithMember('g1', 'u1', ['r-other']);
+      const result = await userHasAllowedRole(client, 'u1', ['r-allowed'], []);
+      expect(result).toBe(false);
+    });
+
+    it('returns false when the user is not in any visible guild', async () => {
+      const client = fakeClientWithMember('g1', 'u1', ['r-allowed']);
+      // Simulate user not in this guild — members.fetch rejects
+      client.guilds.cache
+        .get('g1')
+        .members.fetch.mockRejectedValueOnce(new Error('Unknown Member'));
+      const result = await userHasAllowedRole(
+        client,
+        'u-other',
+        ['r-allowed'],
+        [],
+      );
+      expect(result).toBe(false);
+    });
+
+    it('respects DISCORD_DM_ALLOWED_GUILD_IDS scoping', async () => {
+      const client = fakeClientWithMember('g1', 'u1', ['r-allowed']);
+      // Scope to a different guild — bot has g1 cached but not g-other.
+      const result = await userHasAllowedRole(
+        client,
+        'u1',
+        ['r-allowed'],
+        ['g-other'],
+      );
+      expect(result).toBe(false);
     });
   });
 });
