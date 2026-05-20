@@ -158,7 +158,10 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle reply context — include who the user is replying to
+      // Handle reply context — annotate at the END so any @-mention trigger
+      // at the start of the user's message is still detected by the
+      // anchored trigger regex (`^@Breadbrich Engels`). Prepending here
+      // would silently block any reply that also @-mentions the bot.
       if (message.reference?.messageId) {
         try {
           const repliedTo = await message.channel.messages.fetch(
@@ -168,7 +171,7 @@ export class DiscordChannel implements Channel {
             repliedTo.member?.displayName ||
             repliedTo.author.displayName ||
             repliedTo.author.username;
-          content = `[Reply to ${replyAuthor}] ${content}`;
+          content = `${content}\n[In reply to ${replyAuthor}]`;
         } catch {
           // Referenced message may have been deleted
         }

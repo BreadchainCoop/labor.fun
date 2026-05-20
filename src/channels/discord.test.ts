@@ -659,7 +659,7 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[Reply to Bob] I agree with that',
+          content: 'I agree with that\n[In reply to Bob]',
         }),
       );
     });

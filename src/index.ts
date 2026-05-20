@@ -42,6 +42,7 @@ import {
   getRouterState,
   initDatabase,
   deleteRegisteredGroup,
+  markOrphanedRunsAsInterrupted,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -388,7 +389,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'error',
       outputText.length,
       runDuration,
-      'Agent returned error',
+      outputSentToUser
+        ? 'Agent returned error (partial output sent to user)'
+        : 'Agent returned error (no output sent)',
     );
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
@@ -652,6 +655,13 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+  const orphaned = markOrphanedRunsAsInterrupted();
+  if (orphaned > 0) {
+    logger.info(
+      { count: orphaned },
+      'Marked orphaned agent_runs as interrupted (from previous process)',
+    );
+  }
 
   // Load KB people for permissions enforcement
   // Try each registered group's context dir; the primary KB is usually in slack_main
