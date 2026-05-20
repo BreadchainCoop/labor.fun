@@ -117,6 +117,27 @@ export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
 export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
   process.env.DISCORD_DM_ALLOWED_GUILD_IDS,
 );
+// --- GitHub Projects V2 → KB sync ---
+// Comma-separated org slugs whose ProjectsV2 boards should be mirrored into
+// the KB. Empty = feature off. Synced items land as
+// `context/tasks/GH-<org>-<repo>-<issue#>.md` and synced projects land as
+// `context/projects/GHP-<org>-<projectNumber>.md`, sharing the frontmatter
+// shape the existing `/projects` page already reads (Option A — single
+// unified namespace).
+export const GITHUB_PROJECT_SYNC_ORGS = (
+  process.env.GITHUB_PROJECT_SYNC_ORGS || ''
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+// How often the sync loop fires. Default 15 minutes. Set to 0 to disable
+// even when GITHUB_PROJECT_SYNC_ORGS is non-empty.
+export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
+  0,
+  parseInt(process.env.GITHUB_PROJECT_SYNC_INTERVAL_MS || '900000', 10) ||
+    900000,
+);
+
 // How often to re-verify role membership for already-registered DM groups.
 // Default 10 min. Set to 0 to disable refresh (allowlist stays sticky).
 export const DISCORD_DM_ROLE_REFRESH_INTERVAL = Math.max(

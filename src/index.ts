@@ -69,6 +69,7 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startGroupDigestLoop } from './group-digest.js';
+import { startGitHubProjectSyncLoop } from './integrations/github-project-sync.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import {
@@ -846,6 +847,7 @@ async function main(): Promise<void> {
     },
   });
   startGroupDigestLoop();
+  startGitHubProjectSyncLoop();
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
