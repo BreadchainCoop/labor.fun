@@ -2427,6 +2427,7 @@ app.get('/projects', (req, res) => {
         created_at: fm.created_at || '',
         start_date: fm.start_date || '',
         end_date: fm.end_date || '',
+        gh_url: fm.gh_url || '',
         file: f.name,
       });
     } catch {}
@@ -2762,7 +2763,8 @@ app.get('/projects', (req, res) => {
           var projLabel = t.project ? (projects.find(p => p.id === t.project) || {}).title || t.project : '';
           var dragAttr = canEdit ? ' draggable="true"' : '';
           var h = '<div class="kanban-card"' + dragAttr + ' data-file="' + t.file + '" data-status="' + (t.status||'') + '" data-priority="' + (t.priority||'') + '">';
-          h += '<div style="display:flex;justify-content:space-between;align-items:center"><span class="task-id">' + t.id + '</span><span class="priority-dot" style="background:' + pc + '" title="' + t.priority + '"></span></div>';
+          var ghHeader = t.gh_url ? '<a href="' + t.gh_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open on GitHub" style="color:#7eb8da;text-decoration:none;margin-left:6px">↗</a>' : '';
+          h += '<div style="display:flex;justify-content:space-between;align-items:center"><span><span class="task-id">' + t.id + '</span>' + ghHeader + '</span><span class="priority-dot" style="background:' + pc + '" title="' + t.priority + '"></span></div>';
           h += '<a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="text-decoration:none" onclick="event.stopPropagation()"><div class="task-title">' + t.title + '</div></a>';
           h += '<div class="task-meta">';
           if (t.owner) h += '<span>' + t.owner + '</span>';
@@ -2840,7 +2842,8 @@ app.get('/projects', (req, res) => {
           const projLabel = t.project ? (projects.find(p => p.id === t.project)?.title || t.project) : '';
           html += '<tr>';
           html += '<td><a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="color:#7eb8da;font-weight:600">' + t.id + '</a></td>';
-          html += '<td>' + t.title + '</td>';
+          var ghLink = t.gh_url ? ' <a href="' + t.gh_url + '" target="_blank" rel="noopener" title="Open on GitHub" style="color:#7eb8da;text-decoration:none">↗</a>' : '';
+          html += '<td>' + t.title + ghLink + '</td>';
           html += '<td><span style="display:inline-flex;align-items:center;gap:6px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + sc + '"></span>' + t.status + '</span></td>';
           html += '<td><span style="display:inline-flex;align-items:center;gap:6px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + pc + '"></span>' + t.priority + '</span></td>';
           html += '<td style="color:#999">' + t.owner + '</td>';
