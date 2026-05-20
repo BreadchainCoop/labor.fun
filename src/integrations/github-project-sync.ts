@@ -19,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  GITHUB_PROJECT_HIDE_TITLE_PATTERNS,
   GITHUB_PROJECT_SYNC_INTERVAL_MS,
   GITHUB_PROJECT_SYNC_ORGS,
   GROUPS_DIR,
@@ -35,6 +36,19 @@ import {
 
 const ITEM_ID_PREFIXES = ['GH-', 'GHD-'];
 const PROJECT_ID_PREFIX = 'GHP-';
+
+/**
+ * Skip projects (and their items) whose title is empty/missing or contains
+ * any configured hide-list pattern (case-insensitive substring match).
+ */
+export function shouldHideProject(
+  title: string | undefined | null,
+  patterns: string[] = GITHUB_PROJECT_HIDE_TITLE_PATTERNS,
+): boolean {
+  if (!title || !title.trim()) return true;
+  const t = title.toLowerCase();
+  return patterns.some((p) => t.includes(p));
+}
 
 export interface SyncStats {
   org: string;
@@ -180,25 +194,65 @@ function resolveKbDirs(): { tasksDir: string; projectsDir: string } {
   };
 }
 
+/**
+ * Prepend a clickable GitHub link to the markdown body so /doc/tasks/<file>
+ * (and any agent reading the file) gets a direct way to open the source.
+ */
+function bodyWithGhLink(
+  url: string | null | undefined,
+  body: string,
+  label: string,
+): string {
+  const trimmed = (body || '').trim();
+  if (!url) return trimmed ? `${trimmed}\n` : '';
+  const header = `[${label}](${url})\n\n`;
+  return trimmed ? `${header}${trimmed}\n` : header;
+}
+
 /** Write one normalized sync result to disk and report counts. */
 export function applySyncResult(
   result: OrgSyncResult,
   syncedAt: string,
   dirs: { tasksDir: string; projectsDir: string } = resolveKbDirs(),
-): { projectsWritten: number; itemsWritten: number } {
+): {
+  projectsWritten: number;
+  itemsWritten: number;
+  projectsHidden: number;
+  itemsHidden: number;
+} {
   let projectsWritten = 0;
   let itemsWritten = 0;
+  let projectsHidden = 0;
+  let itemsHidden = 0;
+  const hiddenProjectTitles = new Set<string>();
   for (const proj of result.projects) {
+    if (shouldHideProject(proj.title)) {
+      hiddenProjectTitles.add(proj.title);
+      projectsHidden++;
+      continue;
+    }
     const file = path.join(dirs.projectsDir, `${proj.id}.md`);
-    writeMarkdown(file, projectFrontmatter(proj, syncedAt), proj.readme || '');
+    writeMarkdown(
+      file,
+      projectFrontmatter(proj, syncedAt),
+      bodyWithGhLink(proj.url, proj.readme, 'View board on GitHub'),
+    );
     projectsWritten++;
   }
   for (const item of result.items) {
+    if (hiddenProjectTitles.has(item.projectTitle)) {
+      itemsHidden++;
+      continue;
+    }
     const file = path.join(dirs.tasksDir, `${item.id}.md`);
-    writeMarkdown(file, itemFrontmatter(item, syncedAt), item.body || '');
+    writeMarkdown(
+      file,
+      itemFrontmatter(item, syncedAt),
+      bodyWithGhLink(item.url, item.body, 'View on GitHub'),
+    );
     itemsWritten++;
   }
-  return { projectsWritten, itemsWritten };
+  return { projectsWritten, itemsWritten, projectsHidden, itemsHidden };
 }
 
 export async function runGitHubProjectSync(
@@ -228,15 +282,18 @@ export async function runGitHubProjectSync(
     };
     try {
       const result = await fetchOrgProjects(org, token, fetchImpl);
-      const { projectsWritten, itemsWritten } = applySyncResult(
-        result,
-        syncStart,
-        dirs,
-      );
+      const { projectsWritten, itemsWritten, projectsHidden, itemsHidden } =
+        applySyncResult(result, syncStart, dirs);
       orgStat.projectsWritten = projectsWritten;
       orgStat.itemsWritten = itemsWritten;
       logger.info(
-        { org, projects: projectsWritten, items: itemsWritten },
+        {
+          org,
+          projects: projectsWritten,
+          items: itemsWritten,
+          projectsHidden,
+          itemsHidden,
+        },
         'GH sync: org synced',
       );
     } catch (err) {

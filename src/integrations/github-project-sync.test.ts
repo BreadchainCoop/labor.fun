@@ -17,6 +17,7 @@ vi.mock('../logger.js', () => ({
 const configMock = vi.hoisted(() => ({
   GITHUB_PROJECT_SYNC_ORGS: [] as string[],
   GITHUB_PROJECT_SYNC_INTERVAL_MS: 0,
+  GITHUB_PROJECT_HIDE_TITLE_PATTERNS: [] as string[],
   GROUPS_DIR: '',
   SHARED_KB_GROUP: 'slack_main',
 }));
@@ -32,6 +33,7 @@ import {
   itemFrontmatter,
   projectFrontmatter,
   runGitHubProjectSync,
+  shouldHideProject,
 } from './github-project-sync.js';
 
 // --- Helpers ---
@@ -252,6 +254,115 @@ describe('applySyncResult', () => {
       'gh_url: https://github.com/Org/repo/issues/42',
     );
     expect(itemContent).toContain('Detailed body');
+  });
+});
+
+// --- Hide-list filtering ---
+
+describe('shouldHideProject', () => {
+  it('skips empty / missing titles', () => {
+    expect(shouldHideProject(undefined, ['untitled'])).toBe(true);
+    expect(shouldHideProject('', ['untitled'])).toBe(true);
+    expect(shouldHideProject('   ', ['untitled'])).toBe(true);
+  });
+
+  it("matches case-insensitive substring (covers @user's untitled project)", () => {
+    expect(
+      shouldHideProject("@RonTuretzky's untitled project", ['untitled']),
+    ).toBe(true);
+    expect(
+      shouldHideProject("@subject026's untitled template", ['untitled']),
+    ).toBe(true);
+    expect(shouldHideProject('UNTITLED', ['untitled'])).toBe(true);
+  });
+
+  it('matches Breadchain Micro / Breadchain Macro', () => {
+    expect(shouldHideProject('Breadchain Micro', ['micro', 'macro'])).toBe(
+      true,
+    );
+    expect(shouldHideProject('Breadchain Macro', ['micro', 'macro'])).toBe(
+      true,
+    );
+  });
+
+  it('does not hide unrelated titles', () => {
+    const patterns = ['untitled', 'micro', 'macro'];
+    expect(shouldHideProject('Gas Killer', patterns)).toBe(false);
+    expect(shouldHideProject('Crowdstake.fun', patterns)).toBe(false);
+    expect(shouldHideProject('Stacks', patterns)).toBe(false);
+  });
+
+  it('empty patterns list keeps everything (except empty titles)', () => {
+    expect(shouldHideProject('Anything', [])).toBe(false);
+    expect(shouldHideProject('', [])).toBe(true);
+  });
+});
+
+describe('applySyncResult hide + body link', () => {
+  let tmpRoot: string;
+  let tasksDir: string;
+  let projectsDir: string;
+
+  beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gh-sync-test-'));
+    tasksDir = path.join(tmpRoot, 'tasks');
+    projectsDir = path.join(tmpRoot, 'projects');
+    configMock.GITHUB_PROJECT_HIDE_TITLE_PATTERNS = ['untitled', 'micro'];
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    configMock.GITHUB_PROJECT_HIDE_TITLE_PATTERNS = [];
+  });
+
+  it('skips hidden projects AND their items; keeps untouched ones', () => {
+    const keepRaw = makeRawProject({ number: 1, title: 'Gas Killer' });
+    const hideRaw = makeRawProject({
+      number: 2,
+      title: "@user's untitled project",
+    });
+    const keepItem = normalizeItem('Org', keepRaw, makeIssueItem())!;
+    const hiddenItem = {
+      ...normalizeItem('Org', keepRaw, makeIssueItem({ id: 'I_other' }))!,
+      id: 'GH-Org-other-99',
+      projectTitle: "@user's untitled project",
+    };
+    const result = {
+      org: 'Org',
+      projects: [
+        normalizeProject('Org', keepRaw),
+        normalizeProject('Org', hideRaw),
+      ],
+      items: [keepItem, hiddenItem],
+    };
+    const stats = applySyncResult(result, '2026-05-20T10:00:00Z', {
+      tasksDir,
+      projectsDir,
+    });
+    expect(stats.projectsWritten).toBe(1);
+    expect(stats.projectsHidden).toBe(1);
+    expect(stats.itemsWritten).toBe(1);
+    expect(stats.itemsHidden).toBe(1);
+    expect(fs.existsSync(path.join(projectsDir, 'GHP-Org-1.md'))).toBe(true);
+    expect(fs.existsSync(path.join(projectsDir, 'GHP-Org-2.md'))).toBe(false);
+  });
+
+  it("prepends a 'View on GitHub' link to the item body", () => {
+    configMock.GITHUB_PROJECT_HIDE_TITLE_PATTERNS = [];
+    const result = {
+      org: 'Org',
+      projects: [],
+      items: [normalizeItem('Org', makeRawProject(), makeIssueItem())!],
+    };
+    applySyncResult(result, '2026-05-20T10:00:00Z', { tasksDir, projectsDir });
+    const body = fs.readFileSync(
+      path.join(tasksDir, 'GH-Org-repo-42.md'),
+      'utf-8',
+    );
+    expect(body).toContain(
+      '[View on GitHub](https://github.com/Org/repo/issues/42)',
+    );
+    expect(body).toContain('Detailed body');
   });
 });
 
