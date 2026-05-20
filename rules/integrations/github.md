@@ -23,7 +23,7 @@ bundled in the agent container.
 | Account | Breadbrich's own GitHub account |
 | Repositories | All BreadchainCoop repos (enforced by the PAT, not the server) |
 | Access | Read **and** write |
-| Toolsets enabled | `context`, `repos`, `issues`, `pull_requests`, `actions` |
+| Toolsets enabled | `context`, `repos`, `issues`, `pull_requests`, `actions`, `projects` |
 
 Disabled by design (not in the enabled toolsets): org/team admin, user
 management, security/Dependabot/secret-scanning, gists, notifications,
@@ -34,6 +34,12 @@ Repo scope is enforced by the **fine-grained PAT**, not by the MCP server.
 The PAT must be a fine-grained token authorized for the BreadchainCoop
 organization with: Contents (RW), Issues (RW), Pull requests (RW),
 Actions (read), Metadata (read).
+
+For the `projects` toolset (GitHub Projects V2 — add issues/PRs to a
+project, update project item field values), the PAT additionally needs
+**organization-level** `Projects (RW)` permission. Without it the
+`projects_*` tools will return GraphQL permission errors even though
+the toolset is loaded.
 
 ## Operating discipline
 
