@@ -22,6 +22,7 @@ import {
   GITHUB_PROJECT_SYNC_INTERVAL_MS,
   GITHUB_PROJECT_SYNC_ORGS,
   GROUPS_DIR,
+  SHARED_KB_GROUP,
 } from '../config.js';
 import { logger } from '../logger.js';
 import {
@@ -34,8 +35,6 @@ import {
 
 const ITEM_ID_PREFIXES = ['GH-', 'GHD-'];
 const PROJECT_ID_PREFIX = 'GHP-';
-/** Source group whose `context/` directory acts as the shared KB. */
-const SHARED_KB_GROUP = process.env.SHARED_KB_GROUP || 'slack_main';
 
 export interface SyncStats {
   org: string;

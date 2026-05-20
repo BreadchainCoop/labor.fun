@@ -16,6 +16,7 @@ import {
   IDLE_TIMEOUT,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
+  SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -143,9 +144,8 @@ function buildVolumeMounts(
   // read-only at /workspace/shared-kb so every group container can
   // resolve "who is X" / "what's on the calendar" lookups without
   // needing the files duplicated under their own group folder.
-  // Set SHARED_KB_GROUP to override the source group (default: slack_main).
-  const sharedKbGroup = process.env.SHARED_KB_GROUP || 'slack_main';
-  const sharedKbDir = path.join(GROUPS_DIR, sharedKbGroup, 'context');
+  // Set SHARED_KB_GROUP in .env to override the source group (default: slack_main).
+  const sharedKbDir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context');
   if (fs.existsSync(sharedKbDir)) {
     mounts.push({
       hostPath: sharedKbDir,
