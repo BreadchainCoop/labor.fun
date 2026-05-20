@@ -17,6 +17,7 @@ vi.mock('./config.js', () => ({
   IDLE_TIMEOUT: 1800000, // 30min
   NANOCLAW_MODEL: undefined,
   NANOCLAW_SUBAGENT_MODEL: undefined,
+  SHARED_KB_GROUP: 'slack_main',
   TIMEZONE: 'America/Los_Angeles',
 }));
 

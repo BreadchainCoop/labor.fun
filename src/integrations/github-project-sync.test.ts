@@ -18,6 +18,7 @@ const configMock = vi.hoisted(() => ({
   GITHUB_PROJECT_SYNC_ORGS: [] as string[],
   GITHUB_PROJECT_SYNC_INTERVAL_MS: 0,
   GROUPS_DIR: '',
+  SHARED_KB_GROUP: 'slack_main',
 }));
 
 vi.mock('../config.js', () => configMock);
