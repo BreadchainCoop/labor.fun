@@ -137,10 +137,15 @@ export class SlackChannel implements Channel {
           }
         }
 
-        // Track thread context for edited messages too
+        // Track thread context for edited messages too.
+        // Always reply in-thread: use existing thread_ts if present,
+        // otherwise use the message's own ts to start a new thread.
         const threadTs = inner.thread_ts;
         if (threadTs && threadTs !== inner.ts) {
           this.lastThreadTs.set(jid, threadTs);
+        } else if (!threadTs) {
+          // Top-level message — use its ts to start a new thread on reply
+          this.lastThreadTs.set(jid, inner.ts);
         }
 
         this.opts.onMessage(jid, {
@@ -286,11 +291,15 @@ export class SlackChannel implements Channel {
         }
       }
 
-      // Track thread context so replies go back to the thread.
-      // thread_ts === ts means this IS the parent; only track actual replies.
+      // Track thread context so replies always go in-thread.
+      // If the message is already in a thread, continue it; otherwise start a new thread.
       const threadTs = (msg as GenericMessageEvent).thread_ts;
       if (threadTs && threadTs !== msg.ts) {
+        // Message is a reply — continue the existing thread
         this.lastThreadTs.set(jid, threadTs);
+      } else if (!threadTs) {
+        // Top-level message — use its ts to start a new thread on reply
+        this.lastThreadTs.set(jid, msg.ts);
       }
 
       this.opts.onMessage(jid, {
@@ -490,7 +499,7 @@ export class SlackChannel implements Channel {
     messageId: string,
     emoji: string,
   ): Promise<void> {
-    const channelId = jid.replace(/^slack:/, '');
+    const channelId = jid.replace(/^slack:`, '');
     try {
       await this.app.client.reactions.add({
         channel: channelId,
