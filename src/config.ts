@@ -23,6 +23,7 @@ const envConfig = readEnvFile([
   'DISCORD_DM_ROLE_REFRESH_INTERVAL',
   'GITHUB_PROJECT_SYNC_ORGS',
   'GITHUB_PROJECT_SYNC_INTERVAL_MS',
+  'SHARED_KB_GROUP',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -148,6 +149,14 @@ export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
   0,
   parseInt(envVal('GITHUB_PROJECT_SYNC_INTERVAL_MS') || '900000', 10) || 900000,
 );
+
+// Source group whose `context/` directory holds the canonical shared KB
+// (people, tasks, calendar, projects, …). Mounted into every container at
+// `/workspace/shared-kb` (read-only) by container-runner.ts, and used by
+// the GitHub Projects V2 sync as the write target for synced files.
+// Must match the systemd unit's CONTEXT_DIR for the kb-ui dashboard or
+// the page won't see synced data. Default: slack_main.
+export const SHARED_KB_GROUP = envVal('SHARED_KB_GROUP') || 'slack_main';
 
 // How often to re-verify role membership for already-registered DM groups.
 // Default 10 min. Set to 0 to disable refresh (allowlist stays sticky).
