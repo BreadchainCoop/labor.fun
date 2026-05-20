@@ -1,0 +1,22 @@
+[Unit]
+Description=Breadbrich Engels orchestrator
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=breadbrich
+Group=breadbrich
+WorkingDirectory=/opt/breadbrich
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CREDENTIAL_PROXY_HOST=172.17.0.1
+ExecStart=/usr/bin/node /opt/breadbrich/dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/breadbrich/logs/breadbrich.log
+StandardError=append:/opt/breadbrich/logs/breadbrich.error.log
+
+[Install]
+WantedBy=multi-user.target
