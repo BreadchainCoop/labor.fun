@@ -23,6 +23,7 @@ const envConfig = readEnvFile([
   'DISCORD_DM_ROLE_REFRESH_INTERVAL',
   'GITHUB_PROJECT_SYNC_ORGS',
   'GITHUB_PROJECT_SYNC_INTERVAL_MS',
+  'GITHUB_PROJECT_HIDE_TITLE_PATTERNS',
   'SHARED_KB_GROUP',
 ]);
 
@@ -143,6 +144,18 @@ export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
 export const GITHUB_PROJECT_SYNC_ORGS = splitIds(
   envVal('GITHUB_PROJECT_SYNC_ORGS'),
 );
+// Case-insensitive **substring** patterns: any project whose title contains
+// one of these strings is skipped at sync time (and so are its items). Empty
+// titles are always skipped. Default catches GitHub's auto-named
+// "@<user>'s untitled project" boards plus the Micro/Macro categorization
+// boards. Override with a comma-separated list; set to a single comma to
+// disable filtering.
+export const GITHUB_PROJECT_HIDE_TITLE_PATTERNS = (
+  envVal('GITHUB_PROJECT_HIDE_TITLE_PATTERNS') ?? 'untitled,micro,macro'
+)
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 // How often the sync loop fires. Default 15 minutes. Set to 0 to disable
 // even when GITHUB_PROJECT_SYNC_ORGS is non-empty.
 export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
