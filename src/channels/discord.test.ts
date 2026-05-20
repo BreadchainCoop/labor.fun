@@ -109,6 +109,7 @@ vi.mock('discord.js', () => {
 import {
   DiscordChannel,
   DiscordChannelOpts,
+  threadNameFromMessage,
   userHasAllowedRole,
 } from './discord.js';
 
@@ -1057,6 +1058,285 @@ describe('DiscordChannel', () => {
         ['g-other'],
       );
       expect(result).toBe(false);
+    });
+  });
+
+  // --- Always reply in-thread ---
+
+  describe('always-reply-in-thread', () => {
+    // Build an inbound message that exposes the thread/startThread surface
+    // our resolver duck-types against.
+    function threadableMessage(opts: {
+      channelId?: string;
+      content?: string;
+      messageId?: string;
+      channelIsThread?: boolean;
+      channelParentId?: string;
+      startThread?: ReturnType<typeof vi.fn>;
+      inGuild?: boolean;
+    }) {
+      const channelId = opts.channelId ?? '1234567890123456';
+      return {
+        channelId,
+        id: opts.messageId ?? 'msg_anchor',
+        content: opts.content ?? '<@999888777> please help',
+        createdAt: new Date('2024-01-01T00:00:00.000Z'),
+        author: {
+          id: '55512345',
+          username: 'alice',
+          displayName: 'Alice',
+          bot: false,
+        },
+        member: { displayName: 'Alice' },
+        guild: opts.inGuild === false ? null : { name: 'Test Server' },
+        channel: {
+          id: channelId,
+          name: 'general',
+          isThread: () => opts.channelIsThread ?? false,
+          parentId: opts.channelParentId ?? null,
+          messages: { fetch: vi.fn() },
+        },
+        mentions: { users: new Map([['999888777', { id: '999888777' }]]) },
+        attachments: new Map(),
+        reference: null,
+        startThread: opts.startThread,
+      } as any;
+    }
+
+    it('starts a thread on the inbound message for top-level replies', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const threadChannel = { send: vi.fn().mockResolvedValue(undefined) };
+      const startThread = vi
+        .fn()
+        .mockResolvedValue({ id: 'thread-abc', send: threadChannel.send });
+      const inbound = threadableMessage({ startThread });
+      await triggerMessage(inbound);
+
+      await channel.sendMessage('dc:1234567890123456', 'Hello');
+
+      expect(startThread).toHaveBeenCalledTimes(1);
+      expect(startThread.mock.calls[0][0]).toMatchObject({
+        autoArchiveDuration: 1440,
+      });
+      expect(threadChannel.send).toHaveBeenCalledWith('Hello');
+      // The bare channel fetch should NOT be used — we went through the thread
+      expect(currentClient().channels.fetch).not.toHaveBeenCalledWith(
+        '1234567890123456',
+      );
+    });
+
+    it('sends to the existing thread when the inbound message is in one', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:parent-channel': {
+            name: 'Test Server #general',
+            folder: 'test-server',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      // Capture the channel object so we can assert send was called on it.
+      const inboundChannelSend = vi.fn().mockResolvedValue(undefined);
+      const inbound = threadableMessage({
+        channelId: 'thread-xyz',
+        channelIsThread: true,
+        channelParentId: 'parent-channel',
+        // startThread should NOT be called when message is already in a thread
+        startThread: vi.fn(),
+      });
+      inbound.channel.send = inboundChannelSend;
+      await triggerMessage(inbound);
+
+      // Effective chatJid should be the parent (registered group)
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:parent-channel',
+        expect.objectContaining({ chat_jid: 'dc:parent-channel' }),
+      );
+
+      await channel.sendMessage('dc:parent-channel', 'In-thread reply');
+
+      expect(inbound.startThread).not.toHaveBeenCalled();
+      expect(inboundChannelSend).toHaveBeenCalledWith('In-thread reply');
+    });
+
+    it('falls back to the channel when there is no recent inbound (proactive send)', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const mockChannel = { send: vi.fn().mockResolvedValue(undefined) };
+      currentClient().channels.fetch.mockResolvedValue(mockChannel);
+
+      await channel.sendMessage('dc:1234567890123456', 'Scheduled ping');
+
+      expect(currentClient().channels.fetch).toHaveBeenCalledWith(
+        '1234567890123456',
+      );
+      expect(mockChannel.send).toHaveBeenCalledWith('Scheduled ping');
+    });
+
+    it('clears thread context after sending so the next proactive call uses the channel', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const threadSend = vi.fn().mockResolvedValue(undefined);
+      const startThread = vi
+        .fn()
+        .mockResolvedValue({ id: 'thread-abc', send: threadSend });
+      const inbound = threadableMessage({ startThread });
+      await triggerMessage(inbound);
+
+      await channel.sendMessage('dc:1234567890123456', 'First reply');
+      expect(threadSend).toHaveBeenCalledWith('First reply');
+
+      // Second send with no fresh inbound — must fall through to the channel
+      const channelSend = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValue({ send: channelSend });
+      await channel.sendMessage('dc:1234567890123456', 'Stale proactive');
+
+      expect(channelSend).toHaveBeenCalledWith('Stale proactive');
+      expect(startThread).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not try to start a thread for DM messages (no guild)', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:1234567890123456': {
+            name: 'DM',
+            folder: 'dm',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const startThread = vi.fn();
+      const inbound = threadableMessage({ inGuild: false, startThread });
+      await triggerMessage(inbound);
+
+      const channelSend = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValue({ send: channelSend });
+      await channel.sendMessage('dc:1234567890123456', 'DM reply');
+
+      expect(startThread).not.toHaveBeenCalled();
+      expect(channelSend).toHaveBeenCalledWith('DM reply');
+    });
+
+    it('falls back to the channel when startThread fails', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const startThread = vi
+        .fn()
+        .mockRejectedValue(new Error('Missing permissions'));
+      const inbound = threadableMessage({ startThread });
+      await triggerMessage(inbound);
+
+      const channelSend = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValue({ send: channelSend });
+      await channel.sendMessage('dc:1234567890123456', 'Reply');
+
+      expect(startThread).toHaveBeenCalled();
+      expect(channelSend).toHaveBeenCalledWith('Reply');
+    });
+
+    it('routes a thread message under its registered parent jid', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:parent-channel': {
+            name: 'Test Server #general',
+            folder: 'test-server',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const inbound = threadableMessage({
+        channelId: 'thread-xyz',
+        channelIsThread: true,
+        channelParentId: 'parent-channel',
+        content: 'thread-only message',
+      });
+      await triggerMessage(inbound);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:parent-channel',
+        expect.objectContaining({ chat_jid: 'dc:parent-channel' }),
+      );
+    });
+
+    it('keeps the original chatJid when the thread parent is not registered', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:thread-xyz': {
+            name: 'Thread Group',
+            folder: 'thread-group',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const inbound = threadableMessage({
+        channelId: 'thread-xyz',
+        channelIsThread: true,
+        channelParentId: 'unregistered-parent',
+      });
+      await triggerMessage(inbound);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:thread-xyz',
+        expect.objectContaining({ chat_jid: 'dc:thread-xyz' }),
+      );
+    });
+  });
+
+  // --- Thread name helper ---
+
+  describe('threadNameFromMessage', () => {
+    it('strips bot @-mentions and trims', () => {
+      const name = threadNameFromMessage({
+        content: '<@999888777> what is the status?',
+        author: { username: 'alice', displayName: 'Alice' },
+        member: { displayName: 'Alice' },
+      } as any);
+      expect(name).toBe('what is the status?');
+    });
+
+    it('truncates long content with an ellipsis', () => {
+      const long = 'a'.repeat(200);
+      const name = threadNameFromMessage({
+        content: long,
+        author: { username: 'alice' },
+        member: null,
+      } as any);
+      expect(name.length).toBeLessThanOrEqual(80);
+      expect(name.endsWith('...')).toBe(true);
+    });
+
+    it('falls back to author name when content is empty', () => {
+      const name = threadNameFromMessage({
+        content: '',
+        author: { username: 'alice', displayName: 'Alice' },
+        member: { displayName: 'Alice in Server' },
+      } as any);
+      expect(name).toBe('Reply to Alice in Server');
     });
   });
 });

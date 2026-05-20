@@ -5,6 +5,7 @@ import {
   Message,
   Partials,
   TextChannel,
+  ThreadChannel,
 } from 'discord.js';
 
 import {
@@ -49,6 +50,25 @@ const EMOJI_MAP: Record<string, string> = {
 };
 
 /**
+ * Build a concise Discord thread name from an inbound message: strip
+ * @-mentions, collapse whitespace, cap at 80 chars. Falls back to the
+ * author's username when the message is empty (e.g. attachment only).
+ */
+export function threadNameFromMessage(msg: Message): string {
+  const raw = (msg.content || '')
+    .replace(/<@[!&]?\d+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (raw) return raw.length > 80 ? `${raw.slice(0, 77)}...` : raw;
+  const who =
+    msg.member?.displayName ||
+    msg.author?.displayName ||
+    msg.author?.username ||
+    'message';
+  return `Reply to ${who}`;
+}
+
+/**
  * Check whether a Discord user holds any of the configured allowlist role IDs
  * in any of the configured (or all) guilds the bot can see. Returns true on
  * the first matching role/guild combination.
@@ -87,6 +107,9 @@ export class DiscordChannel implements Channel {
   private opts: DiscordChannelOpts;
   private botToken: string;
   private dmRefreshTimer: NodeJS.Timeout | null = null;
+  // Latest inbound message per chatJid — used to anchor a thread on the
+  // next outbound reply, so every bot response goes into a thread.
+  private lastReplyAnchor = new Map<string, Message>();
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -113,7 +136,24 @@ export class DiscordChannel implements Channel {
       if (message.author.bot) return;
 
       const channelId = message.channelId;
-      const chatJid = `dc:${channelId}`;
+      // If the message is in a Discord thread whose parent channel is a
+      // registered group, route it through the parent's jid so the agent
+      // sees a stable chat identity across the thread and its parent.
+      let effectiveChannelId = channelId;
+      const inboundChannel = message.channel as {
+        isThread?: () => boolean;
+        parentId?: string | null;
+      };
+      const inboundIsThread =
+        typeof inboundChannel.isThread === 'function' &&
+        inboundChannel.isThread();
+      if (inboundIsThread && inboundChannel.parentId) {
+        const parentJid = `dc:${inboundChannel.parentId}`;
+        if (this.opts.registeredGroups()[parentJid]) {
+          effectiveChannelId = inboundChannel.parentId;
+        }
+      }
+      const chatJid = `dc:${effectiveChannelId}`;
       let content = message.content;
       const timestamp = message.createdAt.toISOString();
       const senderName =
@@ -261,6 +301,10 @@ export class DiscordChannel implements Channel {
         }
       }
 
+      // Remember this message so the next outbound reply lands in a thread:
+      // either the thread it already lives in, or a new thread started on it.
+      this.lastReplyAnchor.set(chatJid, message);
+
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
         id: msgId,
@@ -363,15 +407,12 @@ export class DiscordChannel implements Channel {
     }
 
     try {
-      const channelId = jid.replace(/^dc:/, '');
-      const channel = await this.client.channels.fetch(channelId);
-
-      if (!channel || !('send' in channel)) {
+      const target = await this.resolveReplyTarget(jid);
+      if (!target || typeof target !== 'object' || !('send' in target)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
         return;
       }
-
-      const textChannel = channel as TextChannel;
+      const textChannel = target as TextChannel | ThreadChannel;
 
       // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
@@ -382,10 +423,50 @@ export class DiscordChannel implements Channel {
           await textChannel.send(text.slice(i, i + MAX_LENGTH));
         }
       }
+      // Clear the anchor so scheduled/proactive messages with no fresh
+      // inbound trigger fall back to the channel rather than reviving a
+      // stale thread the user has since moved on from.
+      this.lastReplyAnchor.delete(jid);
       logger.info({ jid, length: text.length }, 'Discord message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
     }
+  }
+
+  /**
+   * Pick where an outbound message should go so every bot reply lands in a
+   * thread when possible:
+   *   1. If the last inbound message is already in a thread, send to that
+   *      thread channel directly.
+   *   2. Otherwise, start a new thread on that message (guild text only).
+   *   3. Fall back to the parent channel for DMs or when (2) fails.
+   */
+  private async resolveReplyTarget(jid: string): Promise<unknown> {
+    const anchor = this.lastReplyAnchor.get(jid);
+    if (anchor) {
+      const anchorChannel = anchor.channel as { isThread?: () => boolean };
+      const anchorIsThread =
+        typeof anchorChannel.isThread === 'function' &&
+        anchorChannel.isThread();
+      if (anchorIsThread) {
+        return anchor.channel;
+      }
+      if (anchor.guild && typeof anchor.startThread === 'function') {
+        try {
+          return await anchor.startThread({
+            name: threadNameFromMessage(anchor),
+            autoArchiveDuration: 1440,
+          });
+        } catch (err) {
+          logger.warn(
+            { jid, err },
+            'Failed to start Discord thread — replying in channel',
+          );
+        }
+      }
+    }
+    const channelId = jid.replace(/^dc:/, '');
+    return await this.client!.channels.fetch(channelId);
   }
 
   isConnected(): boolean {
