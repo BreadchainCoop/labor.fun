@@ -895,6 +895,119 @@ describe('DiscordChannel', () => {
     });
   });
 
+  // --- Emoji reactions ---
+
+  describe('addReaction', () => {
+    it('maps eyes → 👀 and calls message.react', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const reactMock = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValueOnce({
+        messages: { fetch: vi.fn().mockResolvedValue({ react: reactMock }) },
+      });
+
+      await channel.addReaction('dc:1234567890123456', 'msg_001', 'eyes');
+
+      expect(reactMock).toHaveBeenCalledWith('👀');
+    });
+
+    it('passes raw Unicode through unchanged', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const reactMock = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValueOnce({
+        messages: { fetch: vi.fn().mockResolvedValue({ react: reactMock }) },
+      });
+
+      await channel.addReaction('dc:1234567890123456', 'msg_001', '🚀');
+
+      expect(reactMock).toHaveBeenCalledWith('🚀');
+    });
+
+    it('swallows fetch failures (deleted message, missing permission)', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      currentClient().channels.fetch.mockRejectedValueOnce(
+        new Error('Unknown Message'),
+      );
+
+      await expect(
+        channel.addReaction('dc:1234567890123456', 'msg_001', 'eyes'),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('removeReaction', () => {
+    it("removes the bot user's reaction for the mapped emoji", async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const usersRemove = vi.fn().mockResolvedValue(undefined);
+      const reactionsCache = new Map([
+        ['🤔', { users: { remove: usersRemove } }],
+      ]);
+      currentClient().channels.fetch.mockResolvedValueOnce({
+        messages: {
+          fetch: vi.fn().mockResolvedValue({
+            reactions: { cache: reactionsCache },
+          }),
+        },
+      });
+
+      await channel.removeReaction(
+        'dc:1234567890123456',
+        'msg_001',
+        'thinking_face',
+      );
+
+      expect(usersRemove).toHaveBeenCalledWith('999888777'); // mock bot id
+    });
+
+    it('is a no-op when the reaction is not present', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const usersRemove = vi.fn();
+      currentClient().channels.fetch.mockResolvedValueOnce({
+        messages: {
+          fetch: vi.fn().mockResolvedValue({
+            reactions: { cache: new Map() },
+          }),
+        },
+      });
+
+      await channel.removeReaction(
+        'dc:1234567890123456',
+        'msg_001',
+        'thinking_face',
+      );
+
+      expect(usersRemove).not.toHaveBeenCalled();
+    });
+
+    it('swallows fetch failures', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      currentClient().channels.fetch.mockRejectedValueOnce(
+        new Error('Unknown Message'),
+      );
+
+      await expect(
+        channel.removeReaction('dc:1234567890123456', 'msg_001', 'eyes'),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   // --- DM role-based allowlist ---
 
   describe('userHasAllowedRole', () => {
