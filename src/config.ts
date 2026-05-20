@@ -13,7 +13,22 @@ const envConfig = readEnvFile([
   'TZ',
   'NANOCLAW_MODEL',
   'NANOCLAW_SUBAGENT_MODEL',
+  // Feature-flag / integration env vars defined further down in this file.
+  // systemd doesn't load /opt/breadbrich/.env globally, so anything that
+  // should be operator-configurable must be listed here for readEnvFile to
+  // pick it up at process start.
+  'FLAT_ACCESS',
+  'DISCORD_DM_ALLOWED_ROLE_IDS',
+  'DISCORD_DM_ALLOWED_GUILD_IDS',
+  'DISCORD_DM_ROLE_REFRESH_INTERVAL',
+  'GITHUB_PROJECT_SYNC_ORGS',
+  'GITHUB_PROJECT_SYNC_INTERVAL_MS',
 ]);
+
+/** Look up an env value, preferring process.env, falling back to .env. */
+function envVal(key: string): string | undefined {
+  return process.env[key] ?? envConfig[key];
+}
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Breadbrich Engels';
@@ -79,7 +94,7 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(
 // Default ON (this install is a cooperative with equal access for all
 // members). Set FLAT_ACCESS=false to restore the sandboxed main/non-main
 // model. See docs/COOPERATIVE-MODE.md.
-export const FLAT_ACCESS = process.env.FLAT_ACCESS !== 'false';
+export const FLAT_ACCESS = envVal('FLAT_ACCESS') !== 'false';
 
 /**
  * Whether a group runs with elevated (main-equivalent) privileges for the
@@ -110,12 +125,12 @@ function splitIds(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
-  process.env.DISCORD_DM_ALLOWED_ROLE_IDS,
+  envVal('DISCORD_DM_ALLOWED_ROLE_IDS'),
 );
 // Optional: scope role lookup to specific guild IDs. Empty = check every
 // guild the bot is in.
 export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
-  process.env.DISCORD_DM_ALLOWED_GUILD_IDS,
+  envVal('DISCORD_DM_ALLOWED_GUILD_IDS'),
 );
 // --- GitHub Projects V2 → KB sync ---
 // Comma-separated org slugs whose ProjectsV2 boards should be mirrored into
@@ -124,25 +139,21 @@ export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
 // `context/projects/GHP-<org>-<projectNumber>.md`, sharing the frontmatter
 // shape the existing `/projects` page already reads (Option A — single
 // unified namespace).
-export const GITHUB_PROJECT_SYNC_ORGS = (
-  process.env.GITHUB_PROJECT_SYNC_ORGS || ''
-)
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+export const GITHUB_PROJECT_SYNC_ORGS = splitIds(
+  envVal('GITHUB_PROJECT_SYNC_ORGS'),
+);
 // How often the sync loop fires. Default 15 minutes. Set to 0 to disable
 // even when GITHUB_PROJECT_SYNC_ORGS is non-empty.
 export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
   0,
-  parseInt(process.env.GITHUB_PROJECT_SYNC_INTERVAL_MS || '900000', 10) ||
-    900000,
+  parseInt(envVal('GITHUB_PROJECT_SYNC_INTERVAL_MS') || '900000', 10) || 900000,
 );
 
 // How often to re-verify role membership for already-registered DM groups.
 // Default 10 min. Set to 0 to disable refresh (allowlist stays sticky).
 export const DISCORD_DM_ROLE_REFRESH_INTERVAL = Math.max(
   0,
-  parseInt(process.env.DISCORD_DM_ROLE_REFRESH_INTERVAL || '600000', 10) ||
+  parseInt(envVal('DISCORD_DM_ROLE_REFRESH_INTERVAL') || '600000', 10) ||
     600000,
 );
 
