@@ -696,6 +696,25 @@ export function startAgentRun(opts: {
 /**
  * Complete an agent run log entry.
  */
+/**
+ * On orchestrator startup, mark any `agent_runs` still flagged `running`
+ * (because the previous process exited mid-run) as `interrupted` so they
+ * don't sit forever as zombie rows and skew duration/stats. Returns the
+ * number of rows touched.
+ */
+export function markOrphanedRunsAsInterrupted(): number {
+  const result = db
+    .prepare(
+      `UPDATE agent_runs
+       SET status = 'interrupted',
+           error = COALESCE(error, 'Orchestrator restarted before run completed'),
+           completed_at = ?
+       WHERE status = 'running' AND completed_at IS NULL`,
+    )
+    .run(new Date().toISOString());
+  return result.changes;
+}
+
 export function completeAgentRun(
   runId: number,
   status: 'success' | 'error' | 'timeout',

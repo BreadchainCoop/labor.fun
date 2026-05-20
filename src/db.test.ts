@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  completeAgentRun,
   createMeetingSummary,
   createTask,
   deleteTask,
@@ -13,7 +14,9 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  markOrphanedRunsAsInterrupted,
   setRegisteredGroup,
+  startAgentRun,
   storeChatMetadata,
   storeMessage,
   updateMeetingSummary,
@@ -774,5 +777,42 @@ describe('meeting summary CRUD', () => {
     updateMeetingSummary('mtg-123', {});
     const summary = getMeetingSummaryById('mtg-123');
     expect(summary!.title).toBe('Weekly Standup');
+  });
+});
+
+// --- markOrphanedRunsAsInterrupted ---
+
+describe('markOrphanedRunsAsInterrupted', () => {
+  function startRun() {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+    return startAgentRun({
+      chatJid: 'group@g.us',
+      channel: 'cli',
+      groupName: 'TestGroup',
+      groupFolder: 'test-group',
+      messageCount: 1,
+    });
+  }
+
+  it('marks running rows with no completed_at as interrupted', () => {
+    startRun();
+    startRun();
+    const completed = startRun();
+    completeAgentRun(completed, 'success', 42, 100);
+
+    const changed = markOrphanedRunsAsInterrupted();
+    expect(changed).toBe(2);
+  });
+
+  it('is idempotent — second call after cleanup affects nothing', () => {
+    startRun();
+    expect(markOrphanedRunsAsInterrupted()).toBe(1);
+    expect(markOrphanedRunsAsInterrupted()).toBe(0);
+  });
+
+  it('does not touch already-completed runs', () => {
+    const id = startRun();
+    completeAgentRun(id, 'success', 10, 50);
+    expect(markOrphanedRunsAsInterrupted()).toBe(0);
   });
 });
