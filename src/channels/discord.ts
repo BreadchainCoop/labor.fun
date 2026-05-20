@@ -113,21 +113,39 @@ export class DiscordChannel implements Channel {
       }
 
       // Translate Discord @bot mentions into TRIGGER_PATTERN format.
-      // Discord mentions look like <@botUserId> — these won't match
-      // TRIGGER_PATTERN (e.g., ^@Andy\b), so we prepend the trigger
-      // when the bot is @mentioned.
+      // Discord encodes mentions as <@userId> (user), <@!userId> (nick
+      // variant) and <@&roleId> (role). We treat any of these as a bot
+      // mention when they resolve to the bot's user OR to a role the bot
+      // itself holds — Discord's autocomplete will frequently pick a
+      // role mention when a role shares the bot's display name.
       if (this.client?.user) {
         const botId = this.client.user.id;
+        const botRoleIds = new Set<string>();
+        const me = message.guild?.members?.me;
+        if (me) {
+          for (const roleId of me.roles.cache.keys()) {
+            botRoleIds.add(roleId);
+          }
+        }
+        const roleKeys = message.mentions.roles?.keys
+          ? [...message.mentions.roles.keys()]
+          : [];
+        const mentionedBotRoleIds = roleKeys.filter((roleId) =>
+          botRoleIds.has(roleId),
+        );
         const isBotMentioned =
           message.mentions.users.has(botId) ||
           content.includes(`<@${botId}>`) ||
-          content.includes(`<@!${botId}>`);
+          content.includes(`<@!${botId}>`) ||
+          mentionedBotRoleIds.length > 0;
 
         if (isBotMentioned) {
-          // Strip the <@botId> mention to avoid visual clutter
-          content = content
-            .replace(new RegExp(`<@!?${botId}>`, 'g'), '')
-            .trim();
+          // Strip both user and bot-role mention tokens to avoid clutter.
+          content = content.replace(new RegExp(`<@!?${botId}>`, 'g'), '');
+          for (const roleId of mentionedBotRoleIds) {
+            content = content.replace(new RegExp(`<@&${roleId}>`, 'g'), '');
+          }
+          content = content.trim();
           // Prepend trigger if not already present
           if (!TRIGGER_PATTERN.test(content)) {
             content = `@${ASSISTANT_NAME} ${content}`;
