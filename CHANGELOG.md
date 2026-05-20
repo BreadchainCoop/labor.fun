@@ -7,6 +7,7 @@ For detailed release notes, see the [full changelog on the documentation site](h
 ## [Unreleased]
 
 - Added **cooperative mode** (`FLAT_ACCESS`, default on): every registered group is treated as main-equivalent for data access — read-write SQLite store mount, KB writes, and full IPC authorization in every container, with no main/non-main split. Intentionally removes the prompt-injection trust boundary; only safe when every channel is trusted-internal. Set `FLAT_ACCESS=false` to restore the sandboxed model. See `docs/COOPERATIVE-MODE.md`.
+- Added **Discord DM role-based allowlist** (`DISCORD_DM_ALLOWED_ROLE_IDS`, optional `DISCORD_DM_ALLOWED_GUILD_IDS`, `DISCORD_DM_ROLE_REFRESH_INTERVAL`): when set, the bot auto-registers a DM as its own group (no `@` trigger needed) the first time a user holding any of the listed Discord role IDs in a shared guild DMs the bot. A background refresh re-checks roles on the configured interval (default 10 min) and deregisters DM groups whose owner has lost the required role (folder + data preserved). Outbound DM sends already worked via the existing `sendMessage` path. Feature is off unless `DISCORD_DM_ALLOWED_ROLE_IDS` is non-empty. Channel `ChannelOpts` extended with `registerGroup` / `deregisterGroup` callbacks; new `deleteRegisteredGroup` db helper.
 
 ## [1.2.36] - 2026-03-26
 

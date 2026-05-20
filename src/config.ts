@@ -95,6 +95,36 @@ export function isPrivilegedGroup(group: { isMain?: boolean }): boolean {
   return group.isMain === true || FLAT_ACCESS;
 }
 
+// --- Discord DM role-based allowlist ---
+// When DISCORD_DM_ALLOWED_ROLE_IDS is set, the bot will auto-register a DM
+// as a group (requires_trigger=0) the first time it receives a message from
+// a user who holds any of the listed Discord role IDs in a shared guild.
+// Allowlisting is re-checked periodically; if the role is later revoked the
+// DM group is auto-deregistered (folder/data preserved).
+//
+// Default: empty (feature off — DMs from unregistered users are dropped).
+function splitIds(raw: string | undefined): string[] {
+  return (raw || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
+  process.env.DISCORD_DM_ALLOWED_ROLE_IDS,
+);
+// Optional: scope role lookup to specific guild IDs. Empty = check every
+// guild the bot is in.
+export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
+  process.env.DISCORD_DM_ALLOWED_GUILD_IDS,
+);
+// How often to re-verify role membership for already-registered DM groups.
+// Default 10 min. Set to 0 to disable refresh (allowlist stays sticky).
+export const DISCORD_DM_ROLE_REFRESH_INTERVAL = Math.max(
+  0,
+  parseInt(process.env.DISCORD_DM_ROLE_REFRESH_INTERVAL || '600000', 10) ||
+    600000,
+);
+
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

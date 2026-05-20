@@ -6,7 +6,13 @@ import {
   TextChannel,
 } from 'discord.js';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  DISCORD_DM_ALLOWED_GUILD_IDS,
+  DISCORD_DM_ALLOWED_ROLE_IDS,
+  DISCORD_DM_ROLE_REFRESH_INTERVAL,
+  TRIGGER_PATTERN,
+} from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -21,6 +27,42 @@ export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  registerGroup: (jid: string, group: RegisteredGroup) => void;
+  deregisterGroup: (jid: string) => void;
+}
+
+const DM_FOLDER_PREFIX = 'discord_dm_';
+
+/**
+ * Check whether a Discord user holds any of the configured allowlist role IDs
+ * in any of the configured (or all) guilds the bot can see. Returns true on
+ * the first matching role/guild combination.
+ */
+export async function userHasAllowedRole(
+  client: Client,
+  userId: string,
+  allowedRoleIds: string[] = DISCORD_DM_ALLOWED_ROLE_IDS,
+  allowedGuildIds: string[] = DISCORD_DM_ALLOWED_GUILD_IDS,
+): Promise<boolean> {
+  if (allowedRoleIds.length === 0) return false;
+  const roleSet = new Set(allowedRoleIds);
+  const guilds =
+    allowedGuildIds.length > 0
+      ? allowedGuildIds
+          .map((id) => client.guilds.cache.get(id))
+          .filter((g): g is NonNullable<typeof g> => Boolean(g))
+      : [...client.guilds.cache.values()];
+  for (const guild of guilds) {
+    try {
+      const member = await guild.members.fetch(userId);
+      for (const roleId of member.roles.cache.keys()) {
+        if (roleSet.has(roleId)) return true;
+      }
+    } catch {
+      // User isn't a member of this guild — try the next one.
+    }
+  }
+  return false;
 }
 
 export class DiscordChannel implements Channel {
@@ -29,6 +71,7 @@ export class DiscordChannel implements Channel {
   private client: Client | null = null;
   private opts: DiscordChannelOpts;
   private botToken: string;
+  private dmRefreshTimer: NodeJS.Timeout | null = null;
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -141,14 +184,40 @@ export class DiscordChannel implements Channel {
         isGroup,
       );
 
-      // Only deliver full message for registered groups
-      const group = this.opts.registeredGroups()[chatJid];
+      // Only deliver full message for registered groups. If this is a DM
+      // from an as-yet-unregistered chat AND the sender holds an allowlisted
+      // Discord role in a shared guild, auto-register the DM and continue.
+      let group = this.opts.registeredGroups()[chatJid];
       if (!group) {
-        logger.debug(
-          { chatJid, chatName },
-          'Message from unregistered Discord channel',
-        );
-        return;
+        const isDm = message.guild === null;
+        if (
+          isDm &&
+          this.client &&
+          DISCORD_DM_ALLOWED_ROLE_IDS.length > 0 &&
+          (await userHasAllowedRole(this.client, sender))
+        ) {
+          const folder = `${DM_FOLDER_PREFIX}${channelId}`;
+          const newGroup: RegisteredGroup = {
+            name: `DM @${senderName}`,
+            folder,
+            trigger: `@${ASSISTANT_NAME}`,
+            added_at: new Date().toISOString(),
+            requiresTrigger: false,
+          };
+          this.opts.registerGroup(chatJid, newGroup);
+          group = this.opts.registeredGroups()[chatJid];
+          logger.info(
+            { chatJid, senderName, sender, folder },
+            'Auto-allowlisted DM via Discord role',
+          );
+        }
+        if (!group) {
+          logger.debug(
+            { chatJid, chatName },
+            'Message from unregistered Discord channel',
+          );
+          return;
+        }
       }
 
       // Deliver message — startMessageLoop() will pick it up
@@ -183,11 +252,67 @@ export class DiscordChannel implements Channel {
         console.log(
           `  Use /chatid command or check channel IDs in Discord settings\n`,
         );
+        // Start the DM-role refresh loop (deregisters allowlisted DMs whose
+        // owner has since lost the required Discord role).
+        if (
+          DISCORD_DM_ALLOWED_ROLE_IDS.length > 0 &&
+          DISCORD_DM_ROLE_REFRESH_INTERVAL > 0
+        ) {
+          this.dmRefreshTimer = setInterval(
+            () => this.refreshDmAllowlist(),
+            DISCORD_DM_ROLE_REFRESH_INTERVAL,
+          );
+          // Don't keep the process alive purely for this timer.
+          this.dmRefreshTimer.unref?.();
+        }
         resolve();
       });
 
       this.client!.login(this.botToken);
     });
+  }
+
+  /**
+   * Re-verify every auto-allowlisted DM group. If the owning user no longer
+   * holds an allowlisted role in any shared guild, deregister the group.
+   * Folder + persisted state is preserved so re-allowlisting later picks up
+   * where things left off.
+   */
+  private async refreshDmAllowlist(): Promise<void> {
+    if (!this.client) return;
+    const groups = this.opts.registeredGroups();
+    for (const [jid, group] of Object.entries(groups)) {
+      if (!jid.startsWith('dc:')) continue;
+      if (!group.folder.startsWith(DM_FOLDER_PREFIX)) continue;
+      const channelId = jid.slice(3);
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        const ownerId =
+          channel && 'recipientId' in channel
+            ? (channel as { recipientId: string | null }).recipientId
+            : null;
+        if (!ownerId) {
+          logger.warn(
+            { jid, folder: group.folder },
+            'DM refresh: could not resolve channel owner, leaving group as-is',
+          );
+          continue;
+        }
+        const stillAllowed = await userHasAllowedRole(this.client, ownerId);
+        if (!stillAllowed) {
+          logger.info(
+            { jid, folder: group.folder, ownerId },
+            'DM refresh: owner no longer holds allowlisted role — deregistering',
+          );
+          this.opts.deregisterGroup(jid);
+        }
+      } catch (err) {
+        logger.debug(
+          { jid, folder: group.folder, err },
+          'DM refresh: channel fetch failed, skipping this tick',
+        );
+      }
+    }
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
@@ -231,6 +356,10 @@ export class DiscordChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    if (this.dmRefreshTimer) {
+      clearInterval(this.dmRefreshTimer);
+      this.dmRefreshTimer = null;
+    }
     if (this.client) {
       this.client.destroy();
       this.client = null;

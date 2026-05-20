@@ -41,6 +41,7 @@ import {
   getNewMessages,
   getRouterState,
   initDatabase,
+  deleteRegisteredGroup,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -177,6 +178,17 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   logger.info(
     { jid, name: group.name, folder: group.folder },
     'Group registered',
+  );
+}
+
+function deregisterGroup(jid: string): void {
+  const group = registeredGroups[jid];
+  if (!group) return;
+  delete registeredGroups[jid];
+  deleteRegisteredGroup(jid);
+  logger.info(
+    { jid, name: group.name, folder: group.folder },
+    'Group deregistered (folder + data preserved)',
   );
 }
 
@@ -780,6 +792,8 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    registerGroup,
+    deregisterGroup,
   };
 
   // Create and connect all registered channels.

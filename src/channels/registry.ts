@@ -9,6 +9,11 @@ export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Channels may auto-register a new group (e.g. allowlisting a DM by role).
+  registerGroup: (jid: string, group: RegisteredGroup) => void;
+  // Symmetric removal — used when an allowlist condition stops holding.
+  // Persistent state (folder, CLAUDE.md, accumulated context) is preserved.
+  deregisterGroup: (jid: string) => void;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
