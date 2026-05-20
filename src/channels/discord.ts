@@ -3,6 +3,7 @@ import {
   Events,
   GatewayIntentBits,
   Message,
+  Partials,
   TextChannel,
 } from 'discord.js';
 
@@ -100,6 +101,11 @@ export class DiscordChannel implements Channel {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
+      // discord.js v14 silently discards DM messageCreate events unless
+      // the Channel partial is enabled — DM channels aren't part of the
+      // standard guild-channel cache. Message + Reaction partials cover
+      // the same gap for replies and reactions on uncached DM messages.
+      partials: [Partials.Channel, Partials.Message, Partials.Reaction],
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
