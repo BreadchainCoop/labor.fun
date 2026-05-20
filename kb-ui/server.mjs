@@ -19,6 +19,16 @@ app.use(express.json());
 const PORT = process.env.KB_PORT || 8080;
 const CONTEXT_DIR = process.env.CONTEXT_DIR || '/opt/breadbrich/groups/slack_main/context';
 
+// File-prefix allow lists for the /projects + /tasks views. TASK-* /
+// PROJECT-* are hand-authored KB files; GH-* / GHD-* / GHP-* are written
+// by the GitHub Projects V2 sync (src/integrations/github-project-sync.ts).
+const TASK_FILE_PREFIXES = ['TASK-', 'GH-', 'GHD-'];
+const PROJECT_FILE_PREFIXES = ['PROJECT-', 'GHP-'];
+const isTaskFile = (name) =>
+  name.endsWith('.md') && TASK_FILE_PREFIXES.some((p) => name.startsWith(p));
+const isProjectFile = (name) =>
+  name.endsWith('.md') && PROJECT_FILE_PREFIXES.some((p) => name.startsWith(p));
+
 // --- Auth & Users ---
 // Role membership is driven by env vars (comma-separated lowercase usernames).
 // All four are required for full functionality; unset = empty role.
@@ -377,7 +387,7 @@ app.get('/category/:name', (req, res) => {
     const projectMap = {};
     const projDir = path.join(CONTEXT_DIR, 'projects');
     if (fs.existsSync(projDir)) {
-      for (const pf of fs.readdirSync(projDir).filter(n => n.startsWith('PROJECT-') && n.endsWith('.md'))) {
+      for (const pf of fs.readdirSync(projDir).filter(isProjectFile)) {
         try {
           const { frontmatter: pfm } = readDoc(path.join(projDir, pf));
           const pid = pfm.id || pf.replace('.md', '');
@@ -1247,7 +1257,7 @@ app.get('/linkages', (req, res) => {
 
   // Load all tasks
   const tasksDir = path.join(CONTEXT_DIR, 'tasks');
-  const taskFiles = walkDir(tasksDir).filter(f => f.name.startsWith('TASK-') && f.name.endsWith('.md'));
+  const taskFiles = walkDir(tasksDir).filter(f => isTaskFile(f.name));
   const tasks = [];
   for (const f of taskFiles) {
     try {
@@ -2400,7 +2410,7 @@ app.get('/projects', (req, res) => {
   const projectsDir = path.join(CONTEXT_DIR, 'projects');
 
   // Load tasks
-  const taskFiles = walkDir(tasksDir).filter(f => f.name.startsWith('TASK-') && f.name.endsWith('.md'));
+  const taskFiles = walkDir(tasksDir).filter(f => isTaskFile(f.name));
   const tasks = [];
   for (const f of taskFiles) {
     try {
@@ -2424,7 +2434,7 @@ app.get('/projects', (req, res) => {
 
   // Load projects
   const projFiles = fs.existsSync(projectsDir)
-    ? fs.readdirSync(projectsDir).filter(f => f.startsWith('PROJECT-') && f.endsWith('.md'))
+    ? fs.readdirSync(projectsDir).filter(isProjectFile)
     : [];
   const projects = [];
   for (const pf of projFiles) {
@@ -2452,7 +2462,13 @@ app.get('/projects', (req, res) => {
   for (const p of sortedProjects) {
     const color = statusColors[p.status] || '#888';
     const opacity = p.status === 'completed' ? '0.6' : '1';
-    const taskCount = tasks.filter(t => t.project === p.id).length;
+    // Match by project id (hand-authored KB convention) OR title — GH-synced
+    // tasks store the project title in `project:`, while hand-authored ones
+    // store the PROJECT-NNN id. Accept both so the count is meaningful for
+    // both sources.
+    const taskCount = tasks.filter(
+      (t) => t.project === p.id || t.project === p.title,
+    ).length;
     projectCards += `<div class="nav-card" style="opacity:${opacity}">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>
