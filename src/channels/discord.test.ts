@@ -92,8 +92,11 @@ vi.mock('discord.js', () => {
     }
   }
 
-  // Mock TextChannel type
+  // Mock TextChannel and ThreadChannel types — discord.ts imports both
+  // as runtime named imports; missing exports cause Vitest ESM to throw
+  // before any test runs.
   class TextChannel {}
+  class ThreadChannel {}
 
   const Partials = { Channel: 1, Message: 2, Reaction: 3 };
 
@@ -103,6 +106,7 @@ vi.mock('discord.js', () => {
     GatewayIntentBits,
     Partials,
     TextChannel,
+    ThreadChannel,
   };
 });
 
@@ -1070,12 +1074,17 @@ describe('DiscordChannel', () => {
       channelId?: string;
       content?: string;
       messageId?: string;
+      channelName?: string;
       channelIsThread?: boolean;
       channelParentId?: string;
+      channelParentName?: string;
       startThread?: ReturnType<typeof vi.fn>;
       inGuild?: boolean;
     }) {
       const channelId = opts.channelId ?? '1234567890123456';
+      const parent = opts.channelParentId
+        ? { id: opts.channelParentId, name: opts.channelParentName ?? 'general' }
+        : null;
       return {
         channelId,
         id: opts.messageId ?? 'msg_anchor',
@@ -1091,9 +1100,10 @@ describe('DiscordChannel', () => {
         guild: opts.inGuild === false ? null : { name: 'Test Server' },
         channel: {
           id: channelId,
-          name: 'general',
+          name: opts.channelName ?? 'thread-topic',
           isThread: () => opts.channelIsThread ?? false,
           parentId: opts.channelParentId ?? null,
+          parent,
           messages: { fetch: vi.fn() },
         },
         mentions: { users: new Map([['999888777', { id: '999888777' }]]) },
@@ -1267,8 +1277,10 @@ describe('DiscordChannel', () => {
 
       const inbound = threadableMessage({
         channelId: 'thread-xyz',
+        channelName: 'thread-topic',
         channelIsThread: true,
         channelParentId: 'parent-channel',
+        channelParentName: 'general',
         content: 'thread-only message',
       });
       await triggerMessage(inbound);
@@ -1276,6 +1288,16 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:parent-channel',
         expect.objectContaining({ chat_jid: 'dc:parent-channel' }),
+      );
+      // chatName must use the parent channel's name, not the thread title —
+      // otherwise the parent group's stored name would get overwritten on
+      // every thread message.
+      expect(opts.onChatMetadata).toHaveBeenCalledWith(
+        'dc:parent-channel',
+        expect.any(String),
+        'Test Server #general',
+        'discord',
+        true,
       );
     });
 
@@ -1304,6 +1326,123 @@ describe('DiscordChannel', () => {
         'dc:thread-xyz',
         expect.objectContaining({ chat_jid: 'dc:thread-xyz' }),
       );
+    });
+
+    it('addReaction targets the thread channel for thread-routed messages', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:parent-channel': {
+            name: 'Test Server #general',
+            folder: 'test-server',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const inbound = threadableMessage({
+        messageId: 'thread-msg-1',
+        channelId: 'thread-xyz',
+        channelIsThread: true,
+        channelParentId: 'parent-channel',
+        channelParentName: 'general',
+      });
+      await triggerMessage(inbound);
+
+      const reactMock = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValueOnce({
+        messages: { fetch: vi.fn().mockResolvedValue({ react: reactMock }) },
+      });
+
+      await channel.addReaction('dc:parent-channel', 'thread-msg-1', 'eyes');
+
+      // Must hit the thread channel, not the parent
+      expect(currentClient().channels.fetch).toHaveBeenLastCalledWith(
+        'thread-xyz',
+      );
+      expect(reactMock).toHaveBeenCalledWith('👀');
+    });
+
+    it('removeReaction targets the thread channel for thread-routed messages', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:parent-channel': {
+            name: 'Test Server #general',
+            folder: 'test-server',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const inbound = threadableMessage({
+        messageId: 'thread-msg-2',
+        channelId: 'thread-xyz',
+        channelIsThread: true,
+        channelParentId: 'parent-channel',
+        channelParentName: 'general',
+      });
+      await triggerMessage(inbound);
+
+      const usersRemove = vi.fn().mockResolvedValue(undefined);
+      const reactionsCache = new Map([
+        ['🤔', { users: { remove: usersRemove } }],
+      ]);
+      currentClient().channels.fetch.mockResolvedValueOnce({
+        messages: {
+          fetch: vi
+            .fn()
+            .mockResolvedValue({ reactions: { cache: reactionsCache } }),
+        },
+      });
+
+      await channel.removeReaction(
+        'dc:parent-channel',
+        'thread-msg-2',
+        'thinking_face',
+      );
+
+      expect(currentClient().channels.fetch).toHaveBeenLastCalledWith(
+        'thread-xyz',
+      );
+      expect(usersRemove).toHaveBeenCalledWith('999888777');
+    });
+
+    it('setTyping targets the thread channel via the latest anchor', async () => {
+      const opts = createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          'dc:parent-channel': {
+            name: 'Test Server #general',
+            folder: 'test-server',
+            trigger: '@Andy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+      });
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const inbound = threadableMessage({
+        channelId: 'thread-xyz',
+        channelIsThread: true,
+        channelParentId: 'parent-channel',
+        channelParentName: 'general',
+      });
+      await triggerMessage(inbound);
+
+      const sendTyping = vi.fn().mockResolvedValue(undefined);
+      currentClient().channels.fetch.mockResolvedValueOnce({ sendTyping });
+
+      await channel.setTyping('dc:parent-channel', true);
+
+      expect(currentClient().channels.fetch).toHaveBeenLastCalledWith(
+        'thread-xyz',
+      );
+      expect(sendTyping).toHaveBeenCalled();
     });
   });
 

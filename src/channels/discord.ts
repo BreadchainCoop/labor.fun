@@ -110,6 +110,12 @@ export class DiscordChannel implements Channel {
   // Latest inbound message per chatJid — used to anchor a thread on the
   // next outbound reply, so every bot response goes into a thread.
   private lastReplyAnchor = new Map<string, Message>();
+  // messageId → actual Discord channel id, populated when we route a
+  // thread-originated inbound under its parent's jid. Reactions and other
+  // per-message operations need the real channel that owns the message,
+  // not the parent the agent sees. Capped to avoid unbounded growth.
+  private messageChannelOverride = new Map<string, string>();
+  private static readonly MESSAGE_CHANNEL_OVERRIDE_MAX = 500;
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -163,11 +169,22 @@ export class DiscordChannel implements Channel {
       const sender = message.author.id;
       const msgId = message.id;
 
-      // Determine chat name
+      // Determine chat name. When the inbound message is in a thread but
+      // we're routing it under the parent's jid, use the parent's name so
+      // onChatMetadata's name upsert doesn't overwrite the parent group's
+      // stored name with the thread's transient title.
       let chatName: string;
       if (message.guild) {
-        const textChannel = message.channel as TextChannel;
-        chatName = `${message.guild.name} #${textChannel.name}`;
+        if (inboundIsThread && effectiveChannelId !== channelId) {
+          const parent = (
+            inboundChannel as { parent?: { name?: string } | null }
+          ).parent;
+          const parentName = parent?.name ?? 'unknown';
+          chatName = `${message.guild.name} #${parentName}`;
+        } else {
+          const textChannel = message.channel as TextChannel;
+          chatName = `${message.guild.name} #${textChannel.name}`;
+        }
       } else {
         chatName = senderName;
       }
@@ -304,6 +321,22 @@ export class DiscordChannel implements Channel {
       // Remember this message so the next outbound reply lands in a thread:
       // either the thread it already lives in, or a new thread started on it.
       this.lastReplyAnchor.set(chatJid, message);
+      // If we re-routed this thread message under its parent's jid, record
+      // the message's real channel so reactions/typing target the thread,
+      // not the parent. (Map.set re-inserts to the end, giving us oldest-
+      // first iteration for the simple LRU eviction below.)
+      if (inboundIsThread && effectiveChannelId !== channelId) {
+        this.messageChannelOverride.set(msgId, channelId);
+        if (
+          this.messageChannelOverride.size >
+          DiscordChannel.MESSAGE_CHANNEL_OVERRIDE_MAX
+        ) {
+          const oldestKey = this.messageChannelOverride.keys().next().value;
+          if (oldestKey !== undefined) {
+            this.messageChannelOverride.delete(oldestKey);
+          }
+        }
+      }
 
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
@@ -502,7 +535,7 @@ export class DiscordChannel implements Channel {
     if (!this.client) return;
     const resolved = EMOJI_MAP[emoji] || emoji;
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      const channelId = this.resolveMessageChannelId(jid, messageId);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !('messages' in channel)) return;
       const message = await (channel as TextChannel).messages.fetch(messageId);
@@ -528,7 +561,7 @@ export class DiscordChannel implements Channel {
     const resolved = EMOJI_MAP[emoji] || emoji;
     const botId = this.client.user.id;
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      const channelId = this.resolveMessageChannelId(jid, messageId);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !('messages' in channel)) return;
       const message = await (channel as TextChannel).messages.fetch(messageId);
@@ -545,7 +578,11 @@ export class DiscordChannel implements Channel {
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.client || !isTyping) return;
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      // Prefer the channel the most recent inbound message arrived in —
+      // for thread-routed messages that's the thread itself, where the
+      // user is actually watching for the typing indicator.
+      const anchorChannelId = this.lastReplyAnchor.get(jid)?.channelId;
+      const channelId = anchorChannelId ?? jid.replace(/^dc:/, '');
       const channel = await this.client.channels.fetch(channelId);
       if (channel && 'sendTyping' in channel) {
         await (channel as TextChannel).sendTyping();
@@ -553,6 +590,17 @@ export class DiscordChannel implements Channel {
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Discord typing indicator');
     }
+  }
+
+  /**
+   * Discord channel id where a given message actually lives. Returns the
+   * recorded thread channel id when the message was routed under a parent
+   * jid, otherwise strips the prefix off the jid.
+   */
+  private resolveMessageChannelId(jid: string, messageId: string): string {
+    return (
+      this.messageChannelOverride.get(messageId) ?? jid.replace(/^dc:/, '')
+    );
   }
 }
 
