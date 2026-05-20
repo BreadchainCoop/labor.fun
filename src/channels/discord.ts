@@ -34,6 +34,20 @@ export interface DiscordChannelOpts {
 const DM_FOLDER_PREFIX = 'discord_dm_';
 
 /**
+ * Map Slack-style emoji names (which the orchestrator uses for the
+ * seen/working ACK pattern) to Unicode codepoints Discord.js accepts.
+ */
+const EMOJI_MAP: Record<string, string> = {
+  eyes: '👀',
+  thinking_face: '🤔',
+  white_check_mark: '✅',
+  thumbsup: '👍',
+  heart: '❤️',
+  fire: '🔥',
+  pray: '🙏',
+};
+
+/**
  * Check whether a Discord user holds any of the configured allowlist role IDs
  * in any of the configured (or all) guilds the bot can see. Returns true on
  * the first matching role/guild combination.
@@ -385,6 +399,59 @@ export class DiscordChannel implements Channel {
       this.client.destroy();
       this.client = null;
       logger.info('Discord bot stopped');
+    }
+  }
+
+  /**
+   * Add an emoji reaction to a message. Used by the orchestrator's ACK
+   * pattern: 👀 on receipt, 🤔 while working. Slack-style names are mapped
+   * to Unicode; raw Unicode emojis pass through.
+   */
+  async addReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    if (!this.client) return;
+    const resolved = EMOJI_MAP[emoji] || emoji;
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) return;
+      const message = await (channel as TextChannel).messages.fetch(messageId);
+      await message.react(resolved);
+    } catch (err) {
+      logger.warn(
+        { jid, messageId, emoji, err },
+        'Failed to add Discord reaction',
+      );
+    }
+  }
+
+  /**
+   * Remove the bot's own reaction with the given emoji from a message.
+   * No-op if the reaction isn't present.
+   */
+  async removeReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    if (!this.client || !this.client.user) return;
+    const resolved = EMOJI_MAP[emoji] || emoji;
+    const botId = this.client.user.id;
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) return;
+      const message = await (channel as TextChannel).messages.fetch(messageId);
+      const reaction = message.reactions.cache.get(resolved);
+      if (reaction) await reaction.users.remove(botId);
+    } catch (err) {
+      logger.warn(
+        { jid, messageId, emoji, err },
+        'Failed to remove Discord reaction',
+      );
     }
   }
 

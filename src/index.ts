@@ -373,10 +373,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
-  // Swap thinking reaction to checkmark on completion
+  // Remove the thinking reaction on completion. Intentionally no follow-up
+  // reaction (e.g. ✅) — the agent's response itself is the completion
+  // signal and a trailing reaction adds visual noise.
   if (supportsReactions && triggerMessageId) {
     await channel.removeReaction!(chatJid, triggerMessageId, 'thinking_face');
-    await channel.addReaction!(chatJid, triggerMessageId, 'white_check_mark');
   }
 
   // Calculate output length for logging
