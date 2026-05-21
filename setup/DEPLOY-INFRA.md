@@ -14,6 +14,9 @@ edit setup/... → push → merge → safe-deploy.sh
 | `setup/systemd/breadbrich.service` | `/etc/systemd/system/breadbrich.service` | root:root, 644 |
 | `setup/systemd/breadbrich-kb.service` | `/etc/systemd/system/breadbrich-kb.service` | root:root, 644 |
 | `setup/safe-deploy.sh` | `/opt/breadbrich-backups/safe-deploy.sh` | root:root, 755 |
+| `setup/auto-deploy.sh` | `/opt/breadbrich-backups/auto-deploy.sh` | root:root, 755 |
+| `setup/systemd/breadbrich-auto-deploy.service` | `/etc/systemd/system/breadbrich-auto-deploy.service` | root:root, 644 |
+| `setup/systemd/breadbrich-auto-deploy.timer` | `/etc/systemd/system/breadbrich-auto-deploy.timer` | root:root, 644 |
 | `setup/breadbrich-deploy.env` | `/opt/breadbrich/setup/breadbrich-deploy.env` *(via rsync)* | breadbrich:breadbrich, 644 |
 
 ## How updates propagate (steady state)
@@ -78,3 +81,29 @@ install -m 755 -o root -g root \
 From here on, just merge changes to `main` and run
 `/opt/breadbrich-backups/safe-deploy.sh` — it will keep itself and the
 units up-to-date.
+
+## Auto-deploy on merge
+
+`breadbrich-auto-deploy.timer` polls `origin/main` every 2 minutes via
+`git ls-remote` (refs only, no object fetch) and runs `safe-deploy.sh`
+when the mirror is behind. Auth piggybacks on the credential helper
+`safe-deploy.sh` already configured (PAT in
+`/home/breadbrich/.git-credentials`) — no GitHub Secrets, no inbound
+ports.
+
+Manual + auto deploys are serialized through a `flock` on
+`/run/breadbrich-deploy.lock` taken at the top of `safe-deploy.sh`. If
+one is already running, the other exits fast (exit 0, so the timer
+doesn't record a failure).
+
+Logs land in `/opt/breadbrich/logs/auto-deploy.log` and `…/auto-deploy.error.log`.
+Status:
+
+```bash
+systemctl status breadbrich-auto-deploy.timer
+journalctl -u breadbrich-auto-deploy.service -n 20
+tail -f /opt/breadbrich/logs/auto-deploy.log
+```
+
+To stop polling temporarily: `systemctl stop breadbrich-auto-deploy.timer`.
+To stop forever: `systemctl disable --now breadbrich-auto-deploy.timer`.

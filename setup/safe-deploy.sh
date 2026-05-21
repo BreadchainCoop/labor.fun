@@ -14,9 +14,19 @@ PRE="$BK_DIR/pre-deploy"
 TS="$(date -u +%Y%m%d-%H%M%S)"
 SNAP="$PRE/breadbrich-pre-deploy-$TS.tar.gz"
 APP_USER=breadbrich
+LOCK_FILE=/run/breadbrich-deploy.lock
 
 log() { echo "[safe-deploy $(date -u +%H:%M:%S)] $*"; }
 as_app() { su - "$APP_USER" -c "$*"; }
+
+# Serialize deploys — manual + auto-deploy.sh share this lock. If another
+# deploy is in flight, exit fast (exit 0 so an auto-deploy timer tick
+# isn't recorded as a failure in systemd).
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "another deploy in progress (flock $LOCK_FILE held) — skipping this run"
+  exit 0
+fi
 
 mkdir -p "$PRE"
 
@@ -89,24 +99,48 @@ else
   log "container/ unchanged -> skip image rebuild"
 fi
 
-# --- 7a. Install systemd unit changes from the repo, if any ---
+# --- 7a. Install systemd unit changes from the repo (services + timers).
+# Newly-installed *.timer units are also `enable --now`-d so a fresh
+# bootstrap doesn't need a manual systemctl invocation.
 UNITS_DIR="$GIT_DIR/setup/systemd"
 units_changed=0
+declare -a new_timers=()
 if [ -d "$UNITS_DIR" ]; then
-  for unit_src in "$UNITS_DIR"/*.service; do
-    [ -e "$unit_src" ] || continue
+  shopt -s nullglob
+  for unit_src in "$UNITS_DIR"/*.service "$UNITS_DIR"/*.timer; do
     unit_name="$(basename "$unit_src")"
     unit_dst="/etc/systemd/system/$unit_name"
+    was_present=0
+    [ -e "$unit_dst" ] && was_present=1
     if ! cmp -s "$unit_src" "$unit_dst" 2>/dev/null; then
       log "Unit changed: $unit_name -> installing"
       install -m 644 -o root -g root "$unit_src" "$unit_dst"
       units_changed=1
+      # New timer that wasn't installed before — enable + start it after
+      # the upcoming daemon-reload.
+      if [ "$was_present" -eq 0 ] && [[ "$unit_name" == *.timer ]]; then
+        new_timers+=("$unit_name")
+      fi
     fi
   done
+  shopt -u nullglob
   if [ "$units_changed" -eq 1 ]; then
     log "systemctl daemon-reload"
     systemctl daemon-reload
   fi
+  for t in "${new_timers[@]:-}"; do
+    [ -n "$t" ] || continue
+    log "Enable + start new timer: $t"
+    systemctl enable --now "$t" || log "Failed to enable $t"
+  done
+fi
+
+# --- 7a-bis. Install / refresh the auto-deploy.sh helper if shipped. ---
+AD_SRC="$GIT_DIR/setup/auto-deploy.sh"
+AD_DST="$BK_DIR/auto-deploy.sh"
+if [ -f "$AD_SRC" ] && ! cmp -s "$AD_SRC" "$AD_DST" 2>/dev/null; then
+  install -m 755 -o root -g root "$AD_SRC" "$AD_DST"
+  log "auto-deploy.sh installed/updated"
 fi
 
 # --- 7b. Restart services ---
