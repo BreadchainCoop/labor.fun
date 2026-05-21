@@ -5,6 +5,7 @@ import {
   Message,
   Partials,
   TextChannel,
+  ThreadChannel,
 } from 'discord.js';
 
 import {
@@ -49,6 +50,25 @@ const EMOJI_MAP: Record<string, string> = {
 };
 
 /**
+ * Build a concise Discord thread name from an inbound message: strip
+ * @-mentions, collapse whitespace, cap at 80 chars. Falls back to the
+ * author's username when the message is empty (e.g. attachment only).
+ */
+export function threadNameFromMessage(msg: Message): string {
+  const raw = (msg.content || '')
+    .replace(/<@[!&]?\d+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (raw) return raw.length > 80 ? `${raw.slice(0, 77)}...` : raw;
+  const who =
+    msg.member?.displayName ||
+    msg.author?.displayName ||
+    msg.author?.username ||
+    'message';
+  return `Reply to ${who}`;
+}
+
+/**
  * Check whether a Discord user holds any of the configured allowlist role IDs
  * in any of the configured (or all) guilds the bot can see. Returns true on
  * the first matching role/guild combination.
@@ -87,6 +107,15 @@ export class DiscordChannel implements Channel {
   private opts: DiscordChannelOpts;
   private botToken: string;
   private dmRefreshTimer: NodeJS.Timeout | null = null;
+  // Latest inbound message per chatJid — used to anchor a thread on the
+  // next outbound reply, so every bot response goes into a thread.
+  private lastReplyAnchor = new Map<string, Message>();
+  // messageId → actual Discord channel id, populated when we route a
+  // thread-originated inbound under its parent's jid. Reactions and other
+  // per-message operations need the real channel that owns the message,
+  // not the parent the agent sees. Capped to avoid unbounded growth.
+  private messageChannelOverride = new Map<string, string>();
+  private static readonly MESSAGE_CHANNEL_OVERRIDE_MAX = 500;
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -113,7 +142,24 @@ export class DiscordChannel implements Channel {
       if (message.author.bot) return;
 
       const channelId = message.channelId;
-      const chatJid = `dc:${channelId}`;
+      // If the message is in a Discord thread whose parent channel is a
+      // registered group, route it through the parent's jid so the agent
+      // sees a stable chat identity across the thread and its parent.
+      let effectiveChannelId = channelId;
+      const inboundChannel = message.channel as {
+        isThread?: () => boolean;
+        parentId?: string | null;
+      };
+      const inboundIsThread =
+        typeof inboundChannel.isThread === 'function' &&
+        inboundChannel.isThread();
+      if (inboundIsThread && inboundChannel.parentId) {
+        const parentJid = `dc:${inboundChannel.parentId}`;
+        if (this.opts.registeredGroups()[parentJid]) {
+          effectiveChannelId = inboundChannel.parentId;
+        }
+      }
+      const chatJid = `dc:${effectiveChannelId}`;
       let content = message.content;
       const timestamp = message.createdAt.toISOString();
       const senderName =
@@ -123,11 +169,22 @@ export class DiscordChannel implements Channel {
       const sender = message.author.id;
       const msgId = message.id;
 
-      // Determine chat name
+      // Determine chat name. When the inbound message is in a thread but
+      // we're routing it under the parent's jid, use the parent's name so
+      // onChatMetadata's name upsert doesn't overwrite the parent group's
+      // stored name with the thread's transient title.
       let chatName: string;
       if (message.guild) {
-        const textChannel = message.channel as TextChannel;
-        chatName = `${message.guild.name} #${textChannel.name}`;
+        if (inboundIsThread && effectiveChannelId !== channelId) {
+          const parent = (
+            inboundChannel as { parent?: { name?: string } | null }
+          ).parent;
+          const parentName = parent?.name ?? 'unknown';
+          chatName = `${message.guild.name} #${parentName}`;
+        } else {
+          const textChannel = message.channel as TextChannel;
+          chatName = `${message.guild.name} #${textChannel.name}`;
+        }
       } else {
         chatName = senderName;
       }
@@ -261,6 +318,26 @@ export class DiscordChannel implements Channel {
         }
       }
 
+      // Remember this message so the next outbound reply lands in a thread:
+      // either the thread it already lives in, or a new thread started on it.
+      this.lastReplyAnchor.set(chatJid, message);
+      // If we re-routed this thread message under its parent's jid, record
+      // the message's real channel so reactions/typing target the thread,
+      // not the parent. (Map.set re-inserts to the end, giving us oldest-
+      // first iteration for the simple LRU eviction below.)
+      if (inboundIsThread && effectiveChannelId !== channelId) {
+        this.messageChannelOverride.set(msgId, channelId);
+        if (
+          this.messageChannelOverride.size >
+          DiscordChannel.MESSAGE_CHANNEL_OVERRIDE_MAX
+        ) {
+          const oldestKey = this.messageChannelOverride.keys().next().value;
+          if (oldestKey !== undefined) {
+            this.messageChannelOverride.delete(oldestKey);
+          }
+        }
+      }
+
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
         id: msgId,
@@ -363,15 +440,12 @@ export class DiscordChannel implements Channel {
     }
 
     try {
-      const channelId = jid.replace(/^dc:/, '');
-      const channel = await this.client.channels.fetch(channelId);
-
-      if (!channel || !('send' in channel)) {
+      const target = await this.resolveReplyTarget(jid);
+      if (!target || typeof target !== 'object' || !('send' in target)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
         return;
       }
-
-      const textChannel = channel as TextChannel;
+      const textChannel = target as TextChannel | ThreadChannel;
 
       // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
@@ -382,10 +456,50 @@ export class DiscordChannel implements Channel {
           await textChannel.send(text.slice(i, i + MAX_LENGTH));
         }
       }
+      // Clear the anchor so scheduled/proactive messages with no fresh
+      // inbound trigger fall back to the channel rather than reviving a
+      // stale thread the user has since moved on from.
+      this.lastReplyAnchor.delete(jid);
       logger.info({ jid, length: text.length }, 'Discord message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
     }
+  }
+
+  /**
+   * Pick where an outbound message should go so every bot reply lands in a
+   * thread when possible:
+   *   1. If the last inbound message is already in a thread, send to that
+   *      thread channel directly.
+   *   2. Otherwise, start a new thread on that message (guild text only).
+   *   3. Fall back to the parent channel for DMs or when (2) fails.
+   */
+  private async resolveReplyTarget(jid: string): Promise<unknown> {
+    const anchor = this.lastReplyAnchor.get(jid);
+    if (anchor) {
+      const anchorChannel = anchor.channel as { isThread?: () => boolean };
+      const anchorIsThread =
+        typeof anchorChannel.isThread === 'function' &&
+        anchorChannel.isThread();
+      if (anchorIsThread) {
+        return anchor.channel;
+      }
+      if (anchor.guild && typeof anchor.startThread === 'function') {
+        try {
+          return await anchor.startThread({
+            name: threadNameFromMessage(anchor),
+            autoArchiveDuration: 1440,
+          });
+        } catch (err) {
+          logger.warn(
+            { jid, err },
+            'Failed to start Discord thread — replying in channel',
+          );
+        }
+      }
+    }
+    const channelId = jid.replace(/^dc:/, '');
+    return await this.client!.channels.fetch(channelId);
   }
 
   isConnected(): boolean {
@@ -421,7 +535,7 @@ export class DiscordChannel implements Channel {
     if (!this.client) return;
     const resolved = EMOJI_MAP[emoji] || emoji;
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      const channelId = this.resolveMessageChannelId(jid, messageId);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !('messages' in channel)) return;
       const message = await (channel as TextChannel).messages.fetch(messageId);
@@ -447,7 +561,7 @@ export class DiscordChannel implements Channel {
     const resolved = EMOJI_MAP[emoji] || emoji;
     const botId = this.client.user.id;
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      const channelId = this.resolveMessageChannelId(jid, messageId);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !('messages' in channel)) return;
       const message = await (channel as TextChannel).messages.fetch(messageId);
@@ -464,7 +578,11 @@ export class DiscordChannel implements Channel {
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
     if (!this.client || !isTyping) return;
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      // Prefer the channel the most recent inbound message arrived in —
+      // for thread-routed messages that's the thread itself, where the
+      // user is actually watching for the typing indicator.
+      const anchorChannelId = this.lastReplyAnchor.get(jid)?.channelId;
+      const channelId = anchorChannelId ?? jid.replace(/^dc:/, '');
       const channel = await this.client.channels.fetch(channelId);
       if (channel && 'sendTyping' in channel) {
         await (channel as TextChannel).sendTyping();
@@ -472,6 +590,17 @@ export class DiscordChannel implements Channel {
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Discord typing indicator');
     }
+  }
+
+  /**
+   * Discord channel id where a given message actually lives. Returns the
+   * recorded thread channel id when the message was routed under a parent
+   * jid, otherwise strips the prefix off the jid.
+   */
+  private resolveMessageChannelId(jid: string, messageId: string): string {
+    return (
+      this.messageChannelOverride.get(messageId) ?? jid.replace(/^dc:/, '')
+    );
   }
 }
 
