@@ -666,6 +666,37 @@ export function logKbAudit(entry: {
 /**
  * Start an agent run log entry. Returns the row ID for later completion.
  */
+/**
+ * Upsert a (platform, platform_id) → kb_person mapping. Used by the
+ * Discord-members sync (and any future identity-discovery flow) to bind a
+ * platform-specific user id to their KB people-file slug. Replaces any
+ * existing mapping for the same (platform_id, platform) pair.
+ */
+export function upsertIdentity(
+  platformId: string,
+  platform: string,
+  kbPerson: string,
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO user_identities (platform_id, platform, kb_person)
+     VALUES (?, ?, ?)`,
+  ).run(platformId, platform, kbPerson);
+}
+
+/** Look up the KB person slug bound to a given platform-specific id. */
+export function getKbPersonByPlatformId(
+  platformId: string,
+  platform: string,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT kb_person FROM user_identities
+       WHERE platform_id = ? AND platform = ?`,
+    )
+    .get(platformId, platform) as { kb_person: string } | undefined;
+  return row?.kb_person ?? null;
+}
+
 export function startAgentRun(opts: {
   chatJid: string;
   channel: string;
