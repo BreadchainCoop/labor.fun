@@ -14,6 +14,7 @@ edit setup/... → push → merge → safe-deploy.sh
 | `setup/systemd/breadbrich.service` | `/etc/systemd/system/breadbrich.service` | root:root, 644 |
 | `setup/systemd/breadbrich-kb.service` | `/etc/systemd/system/breadbrich-kb.service` | root:root, 644 |
 | `setup/safe-deploy.sh` | `/opt/breadbrich-backups/safe-deploy.sh` | root:root, 755 |
+| `setup/breadbrich-deploy.env` | `/opt/breadbrich/setup/breadbrich-deploy.env` *(via rsync)* | breadbrich:breadbrich, 644 |
 
 ## How updates propagate (steady state)
 
@@ -33,11 +34,16 @@ deploy-infra changes. Edit the file in the repo, merge, deploy.
 
 ## Per-deployment customization
 
-The values that differ per install — `CONTEXT_DIR`, `KB_PORT`,
-`USERS_FILE`, etc. — currently live as `Environment=…` lines inside each
-unit file. They are committed as the **current production state**. If your
-install needs different paths (e.g. a different shared-KB group folder), edit
-the unit file in `setup/systemd/` and ship through the normal deploy.
+Non-secret deployment values (`KB_PORT`, `CONTEXT_DIR`, `USERS_FILE`,
+`KB_ADMINS`, `KB_SUPERADMINS`, `DB_PATH`, `CREDENTIAL_PROXY_HOST`,
+`NODE_ENV`) live in `setup/breadbrich-deploy.env` and are loaded by both
+units via `EnvironmentFile=-/opt/breadbrich/setup/breadbrich-deploy.env`.
+The leading `-` tolerates a missing file (Node server-side defaults still
+apply).
+
+To change one of these: edit `setup/breadbrich-deploy.env`, merge, run
+`safe-deploy.sh`. The rsync step writes the new file before unit-install
++ restart, so the service starts with the new values on the same deploy.
 
 Operator-level secrets (`DISCORD_BOT_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
 `GITHUB_PERSONAL_ACCESS_TOKEN`, …) are **not** in the units and **not** in

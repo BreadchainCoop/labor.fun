@@ -8,14 +8,13 @@ Type=simple
 User=breadbrich
 Group=breadbrich
 WorkingDirectory=/opt/breadbrich
-Environment=NODE_ENV=production
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=KB_PORT=8080
-Environment=CONTEXT_DIR=/opt/breadbrich/groups/discord_1367176706783445193/context
-Environment=USERS_FILE=/opt/breadbrich/kb-ui/users.json
-Environment=KB_ADMINS=admin
-Environment=KB_SUPERADMINS=admin
-Environment=DB_PATH=/opt/breadbrich/store/messages.db
+# All non-secret deployment config (NODE_ENV, KB_PORT, CONTEXT_DIR,
+# USERS_FILE, KB_ADMINS, KB_SUPERADMINS, DB_PATH, ...) is in
+# /opt/breadbrich/setup/breadbrich-deploy.env (rsynced from setup/ in the
+# repo). The Node process additionally loads secrets from
+# /opt/breadbrich/.env via readEnvFile.
+EnvironmentFile=-/opt/breadbrich/setup/breadbrich-deploy.env
 ExecStart=/usr/bin/node /opt/breadbrich/kb-ui/server.mjs
 Restart=always
 RestartSec=5
