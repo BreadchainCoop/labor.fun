@@ -1083,7 +1083,10 @@ describe('DiscordChannel', () => {
     }) {
       const channelId = opts.channelId ?? '1234567890123456';
       const parent = opts.channelParentId
-        ? { id: opts.channelParentId, name: opts.channelParentName ?? 'general' }
+        ? {
+            id: opts.channelParentId,
+            name: opts.channelParentName ?? 'general',
+          }
         : null;
       return {
         channelId,
