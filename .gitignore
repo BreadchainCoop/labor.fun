@@ -42,3 +42,6 @@ staging-data/
 # add new entries via the live system (or scp) rather than via PR.
 # See project_breadbrich_kb_mount_gap.md memory for the full rationale.
 groups/*/context/
+
+# Runtime lock file written by the schedule skill — never commit
+.claude/scheduled_tasks.lock
