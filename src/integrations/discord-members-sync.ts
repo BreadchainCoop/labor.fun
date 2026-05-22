@@ -32,6 +32,7 @@ import { Client, GatewayIntentBits, GuildMember, Partials } from 'discord.js';
 import {
   DISCORD_DM_ALLOWED_GUILD_IDS,
   DISCORD_DM_ALLOWED_ROLE_IDS,
+  DISCORD_MEMBERS_SYNC_INTERVAL_MS,
   GROUPS_DIR,
   SHARED_KB_GROUP,
 } from '../config.js';
@@ -351,4 +352,72 @@ export async function runDiscordMembersSync(): Promise<SyncOutcome> {
 
   client.destroy();
   return outcome;
+}
+
+let memberLoopRunning = false;
+let memberLoopTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Start the periodic Discord-members re-sync so KB people files stay
+ * fresh as members change names / roles / leave / join. Each tick spins
+ * up a short-lived Discord client (with the `GuildMembers` intent that
+ * the main orchestrator does NOT carry), runs one sync, and exits — so
+ * the orchestrator's persistent intent footprint is unchanged.
+ *
+ * No-op when DISCORD_DM_ALLOWED_ROLE_IDS is empty or the interval is 0.
+ */
+export function startDiscordMembersSyncLoop(opts?: {
+  intervalMs?: number;
+}): void {
+  if (memberLoopRunning) {
+    logger.debug('discord-members-sync loop already running');
+    return;
+  }
+  const interval = opts?.intervalMs ?? DISCORD_MEMBERS_SYNC_INTERVAL_MS;
+  if (interval <= 0) {
+    logger.info('discord-members-sync loop disabled (interval=0)');
+    return;
+  }
+  if (DISCORD_DM_ALLOWED_ROLE_IDS.length === 0) {
+    logger.info(
+      'discord-members-sync loop disabled (DISCORD_DM_ALLOWED_ROLE_IDS empty)',
+    );
+    return;
+  }
+  memberLoopRunning = true;
+
+  const tick = async () => {
+    try {
+      const outcome = await runDiscordMembersSync();
+      logger.info(
+        {
+          added: outcome.added,
+          updated: outcome.updated,
+          skipped: outcome.skipped,
+          errors: outcome.errors,
+        },
+        'discord-members-sync: periodic tick complete',
+      );
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : err },
+        'discord-members-sync: periodic tick failed',
+      );
+    }
+  };
+
+  logger.info({ intervalMs: interval }, 'discord-members-sync loop started');
+  memberLoopTimer = setInterval(tick, interval);
+  memberLoopTimer.unref?.();
+  // No immediate tick on startup — the one-shot npm script handles
+  // bootstrap, and we don't want every orchestrator restart to spin up
+  // a second Discord client unnecessarily.
+}
+
+export function stopDiscordMembersSyncLoop(): void {
+  if (memberLoopTimer) {
+    clearInterval(memberLoopTimer);
+    memberLoopTimer = null;
+  }
+  memberLoopRunning = false;
 }

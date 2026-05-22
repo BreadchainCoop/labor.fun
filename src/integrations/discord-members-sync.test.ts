@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../config.js', () => ({
   DISCORD_DM_ALLOWED_GUILD_IDS: [] as string[],
   DISCORD_DM_ALLOWED_ROLE_IDS: [] as string[],
+  DISCORD_MEMBERS_SYNC_INTERVAL_MS: 0,
   GROUPS_DIR: '/tmp/discord-members-test',
   SHARED_KB_GROUP: 'discord_main',
 }));
