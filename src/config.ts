@@ -24,6 +24,7 @@ const envConfig = readEnvFile([
   'GITHUB_PROJECT_SYNC_ORGS',
   'GITHUB_PROJECT_SYNC_INTERVAL_MS',
   'GITHUB_PROJECT_HIDE_TITLE_PATTERNS',
+  'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
 ]);
 
@@ -170,6 +171,16 @@ export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
 // Must match the systemd unit's CONTEXT_DIR for the kb-ui dashboard or
 // the page won't see synced data. Default: slack_main.
 export const SHARED_KB_GROUP = envVal('SHARED_KB_GROUP') || 'slack_main';
+
+// How often the Discord-members → KB people sync re-runs in the background
+// (alongside the DM-allowlist refresh, but on its own cadence). Default 1
+// hour. Set to 0 to disable the periodic loop; the one-shot
+// `npm run sync-discord-members` still works.
+export const DISCORD_MEMBERS_SYNC_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('DISCORD_MEMBERS_SYNC_INTERVAL_MS') || '3600000', 10) ||
+    3600000,
+);
 
 // How often to re-verify role membership for already-registered DM groups.
 // Default 10 min. Set to 0 to disable refresh (allowlist stays sticky).

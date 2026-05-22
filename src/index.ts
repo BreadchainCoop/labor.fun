@@ -69,6 +69,7 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startGroupDigestLoop } from './group-digest.js';
+import { startDiscordMembersSyncLoop } from './integrations/discord-members-sync.js';
 import { startGitHubProjectSyncLoop } from './integrations/github-project-sync.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -848,6 +849,7 @@ async function main(): Promise<void> {
   });
   startGroupDigestLoop();
   startGitHubProjectSyncLoop();
+  startDiscordMembersSyncLoop();
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
