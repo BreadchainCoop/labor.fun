@@ -13,9 +13,12 @@ vi.mock('../config.js', () => ({
 }));
 
 vi.mock('../db.js', () => ({
-  getKbPersonByPlatformId: vi.fn(),
   initDatabase: vi.fn(),
-  upsertIdentity: vi.fn(),
+}));
+
+vi.mock('../permissions.js', () => ({
+  addIdentity: vi.fn(),
+  resolveUser: vi.fn(),
 }));
 
 vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));

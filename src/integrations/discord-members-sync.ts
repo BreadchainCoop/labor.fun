@@ -35,13 +35,10 @@ import {
   GROUPS_DIR,
   SHARED_KB_GROUP,
 } from '../config.js';
-import {
-  getKbPersonByPlatformId,
-  initDatabase,
-  upsertIdentity,
-} from '../db.js';
+import { initDatabase } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { addIdentity, resolveUser } from '../permissions.js';
 
 /** Lowercase, hyphenate, strip ascii control + non-alnum. Stable & idempotent. */
 export function slugify(name: string): string {
@@ -248,15 +245,45 @@ export async function runDiscordMembersSync(): Promise<SyncOutcome> {
 
   const outcome: SyncOutcome = { added: 0, updated: 0, skipped: 0, errors: 0 };
   const allowedRoleSet = new Set(DISCORD_DM_ALLOWED_ROLE_IDS);
-  const guildsToScan =
-    DISCORD_DM_ALLOWED_GUILD_IDS.length > 0
-      ? DISCORD_DM_ALLOWED_GUILD_IDS.map((id) =>
-          client.guilds.cache.get(id),
-        ).filter((g): g is NonNullable<typeof g> => Boolean(g))
-      : [...client.guilds.cache.values()];
+  type GuildEntry = NonNullable<ReturnType<typeof client.guilds.cache.get>>;
+  let guildsToScan: GuildEntry[];
+  if (DISCORD_DM_ALLOWED_GUILD_IDS.length > 0) {
+    const found: GuildEntry[] = [];
+    const missing: string[] = [];
+    for (const id of DISCORD_DM_ALLOWED_GUILD_IDS) {
+      const g = client.guilds.cache.get(id);
+      if (g) found.push(g);
+      else missing.push(id);
+    }
+    if (missing.length > 0) {
+      logger.warn(
+        {
+          missing,
+          configured: DISCORD_DM_ALLOWED_GUILD_IDS,
+          found: found.length,
+        },
+        'discord-members-sync: configured guild IDs not visible to the bot — check invites + intent',
+      );
+    }
+    if (found.length === 0) {
+      client.destroy();
+      throw new Error(
+        `DISCORD_DM_ALLOWED_GUILD_IDS resolved to zero guilds. ` +
+          `Configured: [${DISCORD_DM_ALLOWED_GUILD_IDS.join(', ')}]. ` +
+          `Bot must be invited to at least one of these.`,
+      );
+    }
+    guildsToScan = found;
+  } else {
+    guildsToScan = [...client.guilds.cache.values()];
+  }
 
   const syncedAt = new Date().toISOString();
-  const seenSlugs = new Set<string>();
+  // Dedupe on Discord ID — the source of truth. A member visible in
+  // multiple guilds the bot shares would otherwise be written twice.
+  // (chooseSlug's deconflict makes same-slug-different-id impossible, so
+  // this is the right key.)
+  const seenDiscordIds = new Set<string>();
 
   for (const guild of guildsToScan) {
     let members;
@@ -277,6 +304,13 @@ export async function runDiscordMembersSync(): Promise<SyncOutcome> {
     );
 
     for (const member of matches) {
+      if (seenDiscordIds.has(member.id)) {
+        // Same person reachable through multiple guilds the bot shares.
+        // Already written this run — skip the redundant write.
+        outcome.skipped++;
+        continue;
+      }
+      seenDiscordIds.add(member.id);
       try {
         const displayName =
           member.displayName || member.user.displayName || member.user.username;
@@ -289,7 +323,7 @@ export async function runDiscordMembersSync(): Promise<SyncOutcome> {
             .map((r) => r.name),
           last_synced_at: syncedAt,
         };
-        const existingKbPerson = getKbPersonByPlatformId(member.id, 'discord');
+        const existingKbPerson = resolveUser(member.id, 'discord') ?? null;
         const slug = chooseSlug({
           discordId: member.id,
           displayName,
@@ -298,15 +332,8 @@ export async function runDiscordMembersSync(): Promise<SyncOutcome> {
           fileExists: fileExistsAtSlug,
           readDiscordId: readDiscordIdFromFile,
         });
-        if (seenSlugs.has(slug)) {
-          // Two members in different guilds resolved to the same slug —
-          // means we already processed this Discord id this run. Skip.
-          outcome.skipped++;
-          continue;
-        }
-        seenSlugs.add(slug);
         const result = writePersonFile(slug, fields, displayName);
-        upsertIdentity(member.id, 'discord', slug);
+        addIdentity(member.id, 'discord', slug);
         if (result === 'added') outcome.added++;
         else outcome.updated++;
       } catch (err) {

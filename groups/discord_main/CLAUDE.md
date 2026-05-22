@@ -24,12 +24,11 @@ of every rule.
 ## Discord-specific notes
 
 - People files in `context/people/<slug>.md` are kept in sync from
-  Discord by `scripts/sync-discord-members.ts`. Anyone on the allowlist
-  role(s) in `DISCORD_DM_ALLOWED_GUILD_IDS` gets a person file
-  (idempotent — re-runs only refresh Discord ID / username / display
-  fields and never clobber human-edited content).
-- Use `getKbPersonByPlatformId(<discordId>, 'discord')` to resolve a
-  message sender's KB slug; that mapping is populated by the same sync.
-- The Discord channel auto-DM-allowlist (`DISCORD_DM_ALLOWED_ROLE_IDS`)
-  is the source of truth for "who is a member" — keep this people
-  directory in sync with that list.
+  Discord by `scripts/sync-discord-members.ts`. The allowlist roles in
+  `DISCORD_DM_ALLOWED_ROLE_IDS` decide who gets a person file;
+  `DISCORD_DM_ALLOWED_GUILD_IDS` (optional) just scopes which guilds
+  the sync looks at. Idempotent — re-runs only refresh Discord ID /
+  username / display fields and never clobber human-edited content.
+- Use `resolveUser(<discordId>, 'discord')` (from `src/permissions.ts`)
+  to resolve a message sender's KB slug; that mapping is populated by
+  the same sync via `addIdentity()`.
