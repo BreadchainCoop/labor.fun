@@ -88,6 +88,47 @@ server.tool(
 );
 
 server.tool(
+  'dm_user',
+  "Send a direct message to an allowlisted Discord member without needing their numeric ID. " +
+    "Accepts any of: KB slug ('josh-tbs'), Discord ID ('511575159929438224'), " +
+    "Discord username ('theblockchainsocialist'), display name ('Josh | TBS'), " +
+    "or the title from their KB people file ('Josh'). " +
+    "Resolution is restricted to people already in the KB / user_identities — " +
+    "the bot will refuse to DM users it doesn't already know. " +
+    "On failure (ambiguous match, not found, recipient has DMs disabled, etc.) " +
+    "an error is posted back in the current chat. " +
+    "Long messages are auto-split at the Discord 2000-char limit.",
+  {
+    target: z
+      .string()
+      .describe(
+        "Recipient — slug, Discord ID, username, display name, or title. " +
+          "Use a slug or ID when the display name is ambiguous.",
+      ),
+    text: z.string().describe('Message body to send.'),
+  },
+  async (args) => {
+    const data = {
+      type: 'dm_user',
+      target: args.target,
+      text: args.text,
+      sourceJid: chatJid,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `DM to "${args.target}" queued. If it fails (ambiguous, unknown, blocked), you'll see an error message in this chat.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   'send_message',
   "Send a message to the current chat, OR to a different channel using target_jid. To send cross-channel (e.g. Slack→Telegram), set target_jid to the recipient's JID like 'tg:1234567890'. Without target_jid, the message goes to the current chat. You can call this multiple times.",
   {
