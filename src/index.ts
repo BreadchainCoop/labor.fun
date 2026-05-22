@@ -878,6 +878,23 @@ async function main(): Promise<void> {
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
+    dmDiscordUser: async (userId: string, text: string): Promise<string> => {
+      // Find the Discord channel by name. Other channels (slack, telegram)
+      // would need their own platform-specific DM primitive — out of scope
+      // for this tool; the IPC handler only calls dmDiscordUser when the
+      // target resolved to a Discord identity anyway.
+      const discord = channels.find(
+        (c) =>
+          c.name === 'discord' &&
+          (c as unknown as { dmUser?: unknown }).dmUser !== undefined,
+      ) as unknown as
+        | { dmUser: (userId: string, text: string) => Promise<string> }
+        | undefined;
+      if (!discord) {
+        throw new Error('Discord channel not connected or lacks dmUser');
+      }
+      return discord.dmUser(userId, text);
+    },
     syncGroups: async (force: boolean) => {
       await Promise.all(
         channels

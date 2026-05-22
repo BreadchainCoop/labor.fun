@@ -3,14 +3,18 @@ import fs from 'fs';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
+import matter from 'gray-matter';
 import nodemailer from 'nodemailer';
 
 import {
   DATA_DIR,
   FLAT_ACCESS,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
+  SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
+import { PersonCandidate, resolveDmTarget } from './integrations/dm-resolve.js';
 import { readEnvFile } from './env.js';
 import { AvailableGroup } from './container-runner.js';
 import {
@@ -141,6 +145,13 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  /**
+   * Open / fetch a DM channel with a Discord user and send a message.
+   * Used by the `dm_user` IPC op. Returns the DM channel id so the
+   * orchestrator can log it. Throws on permission/visibility errors so
+   * the handler can surface a clear failure back to the source chat.
+   */
+  dmDiscordUser?: (userId: string, text: string) => Promise<string>;
   onTasksChanged: () => void;
 }
 
@@ -741,6 +752,43 @@ export function handleModifyGroupClaudeMd(
   return { status: 'ok', bytesBefore, bytesAfter };
 }
 
+/**
+ * Build the allowlisted-member candidate list for `dm_user` from the
+ * Discord-members sync's output: every `<sharedKb>/context/people/*.md`
+ * whose frontmatter has a `discord_id`. Cheap to call on demand (~25
+ * files, sub-ms with gray-matter). No caching — the periodic members
+ * sync rewrites files in place and we want a fresh view each call.
+ */
+function loadDiscordCandidates(): PersonCandidate[] {
+  const dir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context', 'people');
+  if (!fs.existsSync(dir)) return [];
+  const out: PersonCandidate[] = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith('.md')) continue;
+    if (f.startsWith('.')) continue;
+    try {
+      const parsed = matter(fs.readFileSync(path.join(dir, f), 'utf-8'));
+      const fm = parsed.data as Record<string, unknown>;
+      const id = typeof fm.discord_id === 'string' ? fm.discord_id : null;
+      if (!id) continue;
+      out.push({
+        slug: f.replace(/\.md$/, ''),
+        discordId: id,
+        title: typeof fm.title === 'string' ? fm.title : '',
+        discordUsername:
+          typeof fm.discord_username === 'string' ? fm.discord_username : '',
+        discordDisplayName:
+          typeof fm.discord_display_name === 'string'
+            ? fm.discord_display_name
+            : '',
+      });
+    } catch {
+      // Skip unparseable files — they're not the source of truth here.
+    }
+  }
+  return out;
+}
+
 export async function processTaskIpc(
   data: {
     type: string;
@@ -810,6 +858,10 @@ export async function processTaskIpc(
     approver_notes?: string | null;
     receipt_path?: string | null;
     reimbursement_method?: string;
+    // For dm_user
+    target?: string;
+    text?: string;
+    sourceJid?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -818,6 +870,91 @@ export async function processTaskIpc(
   const registeredGroups = deps.registeredGroups();
 
   switch (data.type) {
+    case 'dm_user': {
+      const target = (data.target || '').trim();
+      const text = (data.text || '').trim();
+      const sourceJid = data.sourceJid;
+      // Best-effort fallback: resolve source-group JID from registered_groups
+      // if the tool didn't pass one along.
+      const notifyJid =
+        sourceJid ||
+        Object.entries(registeredGroups).find(
+          ([, g]) => g.folder === sourceGroup,
+        )?.[0] ||
+        null;
+
+      const notify = async (msg: string) => {
+        if (!notifyJid) {
+          logger.warn(
+            { sourceGroup, msg },
+            'dm_user: no source JID to send feedback to',
+          );
+          return;
+        }
+        try {
+          await deps.sendMessage(notifyJid, msg);
+        } catch (err) {
+          logger.warn(
+            { notifyJid, err },
+            'dm_user: failed to post feedback to source chat',
+          );
+        }
+      };
+
+      if (!target || !text) {
+        await notify(
+          '`dm_user` rejected: both `target` and `text` are required.',
+        );
+        break;
+      }
+      if (!deps.dmDiscordUser) {
+        await notify(
+          '`dm_user` is unavailable: Discord channel not connected.',
+        );
+        break;
+      }
+
+      const resolution = resolveDmTarget(target, loadDiscordCandidates());
+      if ('error' in resolution) {
+        const sug =
+          resolution.suggestions && resolution.suggestions.length > 0
+            ? `\nDid you mean: ${resolution.suggestions.join(', ')}?`
+            : '';
+        await notify(`Couldn't DM "${target}": ${resolution.error}${sug}`);
+        logger.warn(
+          { target, sourceGroup, error: resolution.error },
+          'dm_user: resolve failed',
+        );
+        break;
+      }
+
+      const person = resolution.person;
+      try {
+        const dmChannelId = await deps.dmDiscordUser(person.discordId, text);
+        logger.info(
+          {
+            sourceGroup,
+            target,
+            resolved: person.slug,
+            dmChannelId,
+            length: text.length,
+          },
+          'dm_user: sent',
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await notify(
+          `Failed to DM ${person.title || person.slug}: ${msg}. ` +
+            `They may have DMs disabled, blocked the bot, or share no guild with it.`,
+        );
+        logger.warn(
+          { target, resolved: person.slug, err: msg },
+          'dm_user: send failed',
+        );
+      }
+      break;
+    }
+
     case 'schedule_task':
       if (
         data.prompt &&
