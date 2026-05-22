@@ -378,9 +378,8 @@ describe('container-runner local-LLM backend wiring', () => {
       SHARED_KB_GROUP: 'slack_main',
       TIMEZONE: 'America/Los_Angeles',
     }));
-    const { runContainerAgent: runLocal } = await import(
-      './container-runner.js'
-    );
+    const { runContainerAgent: runLocal } =
+      await import('./container-runner.js');
 
     await drive(runLocal(testGroup, testInput, () => {}, vi.fn()));
 
@@ -391,7 +390,9 @@ describe('container-runner local-LLM backend wiring', () => {
     expect(args).toContain('NANOCLAW_BACKEND=local');
 
     // Local-LLM base URL + model are in argv (non-secret config)
-    expect(args).toContain('LOCAL_LLM_BASE_URL=http://host.docker.internal:1234/v1');
+    expect(args).toContain(
+      'LOCAL_LLM_BASE_URL=http://host.docker.internal:1234/v1',
+    );
     expect(args).toContain('LOCAL_LLM_MODEL=qwen2.5-coder-32b-instruct');
 
     // API key is passed as a passthrough flag, not inline — and never raw
