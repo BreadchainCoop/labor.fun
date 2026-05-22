@@ -89,16 +89,24 @@ server.tool(
 
 server.tool(
   'dm_user',
-  "Send a direct message to an allowlisted Discord member without needing their numeric ID. " +
-    "Accepts any of: KB slug ('josh-tbs'), Discord ID ('511575159929438224'), " +
-    "Discord username ('theblockchainsocialist'), display name ('Josh | TBS'), " +
-    "or the title from their KB people file ('Josh'). " +
-    "Resolution scans the people/*.md files in the shared KB — the bot will " +
-    "refuse to DM anyone who doesn't have a people file (this is the " +
-    "allowlist surface). On failure (ambiguous match, not found, recipient " +
-    "has DMs disabled, Discord not connected, etc.) an error is posted back " +
-    "in the current chat. Long messages are auto-split at the Discord " +
-    "2000-char limit.",
+  "USE THIS whenever the user asks you to DM, message, tell, contact, ping, " +
+    "or send a private message to a *named person* in the org. You do NOT " +
+    "need their numeric Discord ID — pass the name or handle and the tool " +
+    "resolves it from the KB people files. Example invocations:\n" +
+    "  • \"DM Josh and tell him X\"          → dm_user(target='Josh', text='X')\n" +
+    "  • \"let hunter know Y\"               → dm_user(target='hunter', text='Y')\n" +
+    "  • \"tell ramgos he's a goober\"       → dm_user(target='ramgos', text='ron says you're a goober')\n" +
+    "  • \"message bren about Z\"            → dm_user(target='bren', text='...')\n" +
+    "\n" +
+    "Accepts any of: first name / KB title (recommended), KB slug " +
+    "('josh-tbs'), Discord username ('theblockchainsocialist'), Discord " +
+    "display name ('Josh | TBS'), or numeric Discord ID. Case-insensitive. " +
+    "Resolution scans the shared-KB `people/*.md` files (that's the " +
+    "allowlist — only members with a people file can be DM'd). On a miss " +
+    "you'll get fuzzy suggestions back; on ambiguity you'll get the list " +
+    "of candidates. Long messages auto-split at Discord's 2000-char " +
+    "limit. **Do not ask the user for a numeric ID — just call the tool " +
+    "with the name they gave you.**",
   {
     target: z
       .string()

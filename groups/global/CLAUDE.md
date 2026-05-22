@@ -15,6 +15,7 @@ Read your personality file at `/workspace/global/personality.md` at the start of
 - Run bash commands in your sandbox
 - Schedule tasks to run later or on a recurring basis
 - Send messages back to the chat
+- **DM another member of the org by name** with `dm_user` — pass the person's first name, KB slug, or Discord handle; do **not** ask the user for a numeric Discord ID. The tool resolves the name against the shared-KB `people/*.md` files (that's the allowlist). Example: when someone says "tell Hunter X" or "message Josh that Y", call `dm_user(target='Hunter', text='X')` / `dm_user(target='Josh', text='Y')` directly.
 - Edit or delete messages you previously sent — call `list_my_recent_messages` to look up the message ID, then `edit_message` or `delete_message`. You can only edit/delete your own messages, never user messages. Telegram bots can only delete within 48 hours of sending; edits work indefinitely.
 
 ## Communication
