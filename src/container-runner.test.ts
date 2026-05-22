@@ -17,6 +17,10 @@ vi.mock('./config.js', () => ({
   IDLE_TIMEOUT: 1800000, // 30min
   NANOCLAW_MODEL: undefined,
   NANOCLAW_SUBAGENT_MODEL: undefined,
+  NANOCLAW_BACKEND: 'claude',
+  LOCAL_LLM_BASE_URL: 'http://host.docker.internal:1234/v1',
+  LOCAL_LLM_MODEL: undefined,
+  LOCAL_LLM_API_KEY: undefined,
   SHARED_KB_GROUP: 'slack_main',
   TIMEZONE: 'America/Los_Angeles',
 }));

@@ -9,7 +9,10 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   isPrivilegedGroup,
+  LOCAL_LLM_BASE_URL,
+  LOCAL_LLM_MODEL,
   MAX_MESSAGES_PER_PROMPT,
+  NANOCLAW_BACKEND,
   POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -680,16 +683,26 @@ async function main(): Promise<void> {
   loadState();
   restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-  );
+  // Start credential proxy (containers route API calls through this).
+  // Skipped in local-LLM mode — no Anthropic traffic to proxy.
+  const proxyServer =
+    NANOCLAW_BACKEND === 'local'
+      ? null
+      : await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST);
+
+  if (NANOCLAW_BACKEND === 'local') {
+    logger.info(
+      { backend: 'local', baseUrl: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL },
+      'Backend=local: credential proxy disabled, routing to OpenAI-compatible endpoint',
+    );
+  } else {
+    logger.info({ backend: 'claude' }, 'Backend=claude');
+  }
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    proxyServer.close();
+    proxyServer?.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
