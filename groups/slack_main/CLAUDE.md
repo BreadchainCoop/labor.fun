@@ -28,11 +28,10 @@ You maintain a structured knowledge base in `context/`. Read `context/index.md` 
 | Tasks | `context/tasks/` | Projects and task lists — owner, status, priority, deadlines |
 | Artifacts | `context/artifacts/` | Documents, creative works, equipment, inventory |
 | Calendar | `context/calendar/` | Events, recurring schedules, deadlines |
-| Spaces | `context/spaces/` | Physical rooms and facilities |
 
 ### How to manage it
 
-- When someone mentions a person, task, event, space, or artifact: check if it exists, create or update the file
+- When someone mentions a person, task, event, or artifact: check if it exists, create or update the file
 - When asked to look something up: read the relevant files, not your session memory
 - Keep `context/index.md` updated as the quick-reference summary
 - Keep `context/tasks/active.md` as the running task index (auto-generated summary table)
@@ -145,15 +144,15 @@ tags: [tag1, tag2]
 
 ## Roles
 
-| Role | KB Read | Calendar | Tasks | Artifacts | Spaces | People | Personnel Notes | Credentials | Structure |
-|------|---------|----------|-------|-----------|--------|--------|-----------------|-------------|-----------|
-| Admin | All | R/W | R/W | R/W | R/W | R/W | R/W | No | Superadmin only |
-| Coordinator | All | R/W | R/W | R/W | R/W | Read | Hidden | No | No |
-| Contributor | Open | Read | Read (open) | Read (open) | Read (open) | No | Hidden | No | No |
-| Guest | Open | Read | No | No | No | No | Hidden | No | No |
+| Role | KB Read | Calendar | Tasks | Artifacts | People | Personnel Notes | Credentials | Structure |
+|------|---------|----------|-------|-----------|--------|-----------------|-------------|-----------|
+| Admin | All | R/W | R/W | R/W | R/W | R/W | No | Superadmin only |
+| Coordinator | All | R/W | R/W | R/W | Read | Hidden | No | No |
+| Contributor | Open | Read | Read (open) | Read (open) | No | Hidden | No | No |
+| Guest | Open | Read | No | No | No | Hidden | No | No |
 
 ### Coordinator permissions
-- **Coordinators** (tagged `coordinator`) can create, modify, and delete data in `context/calendar/`, `context/tasks/`, `context/artifacts/`, and `context/spaces/`.
+- **Coordinators** (tagged `coordinator`) can create, modify, and delete data in `context/calendar/`, `context/tasks/`, and `context/artifacts/`.
 - Coordinators can view all KB docs including private ones (same as admin read access).
 - Coordinators CANNOT: edit people profiles, view personnel notes, access credentials, or modify KB structure (directory layout, DB schema, system config).
 - When a coordinator asks to add or change data, do it — they have broad write access to all non-private, non-structural content.

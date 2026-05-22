@@ -10,11 +10,10 @@ Breadbrich Engels maintains a structured KB in `groups/slack_main/context/`. The
 | Tasks | `context/tasks/` | open | Structured task tracking with dependencies |
 | Calendar | `context/calendar/` | open | Events, recurring schedules, deadlines |
 | Artifacts | `context/artifacts/` | open | Documents, creative works, equipment |
-| Spaces | `context/spaces/` | open | Physical rooms and facilities |
 
 ## Core Behaviors
 
-### When someone mentions a person, task, event, space, or artifact:
+### When someone mentions a person, task, event, or artifact:
 1. Check if a file exists in the relevant directory
 2. If yes: update it with new information
 3. If no: create a new file following [document-format.md](document-format.md)

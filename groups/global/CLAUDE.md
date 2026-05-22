@@ -45,7 +45,7 @@ Files you create are saved in `/workspace/group/`. Use this for notes, research,
 
 ## Shared Knowledge Base
 
-Every container (regardless of which group spawned it) has read-only access to the canonical KB at `/workspace/shared-kb/`. This is the source of truth for cross-group lookups — people, calendar events, tasks, artifacts, spaces.
+Every container (regardless of which group spawned it) has read-only access to the canonical KB at `/workspace/shared-kb/`. This is the source of truth for cross-group lookups — people, calendar events, tasks, artifacts.
 
 | What | Path | Notes |
 |------|------|-------|
@@ -53,7 +53,6 @@ Every container (regardless of which group spawned it) has read-only access to t
 | Calendar | `/workspace/shared-kb/calendar/` | Events with `EVT-NNN` IDs |
 | Tasks | `/workspace/shared-kb/tasks/` | `TASK-NNN.md` files + `active.md` index |
 | Artifacts | `/workspace/shared-kb/artifacts/` | Docs, equipment, request log |
-| Spaces | `/workspace/shared-kb/spaces/` | Rooms, facilities |
 
 **Read-only here.** Non-main containers cannot create or edit shared KB entries directly. If a user asks you to add a person, task, or event from a DM container: collect the info, then route the change through the main group (Slack `#main` / the registered main group). Acknowledge the request in your reply so the user knows it's been handed off, not silently dropped.
 

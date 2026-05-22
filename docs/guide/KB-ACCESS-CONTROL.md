@@ -90,7 +90,7 @@ Roles in Breadbrich Engels are tag-based, defined in the `tag_hierarchy` table a
 |---|---|---|
 | **Superadmin** | alice, bob | The two operators with credential and structural authority. Can change deployment, modify the admin dashboard, manage secrets. |
 | **Admin** | alice, bob, ops, carol | Full KB access (including restricted and private docs). Can manage groups, manage tasks, send across channels, view personnel notes. Effectively the operating team. |
-| **Coordinator** | dave | The operations coordinator. Broad write to calendar, tasks, artifacts, spaces. Reads all non-private KB *except personnel notes*. Cross-channel send for operational purposes. Earmarked for live-testing the coordinator deploy path. |
+| **Coordinator** | dave | The operations coordinator. Broad write to calendar, tasks, artifacts. Reads all non-private KB *except personnel notes*. Cross-channel send for operational purposes. Earmarked for live-testing the coordinator deploy path. |
 | **Contributor** | residents, frequent collaborators | Reads open docs. Creates and updates their own tasks, expense requests, maintenance reports. Cannot read restricted or private docs unless granted. |
 | **Guest** | anyone authenticated who isn't otherwise known | Reads open docs only. Cannot write. Default for unrecognized identities. |
 
@@ -176,7 +176,6 @@ Each KB directory under `groups/<name>/context/` has a default role posture. The
 | `calendar/` | R/W | R/W | Read (open) | Read (open) |
 | `tasks/` | R/W | R/W | Read (open) | Read (open) |
 | `artifacts/` | R/W | R/W | Read (open) | Read (open) |
-| `spaces/` | R/W | R/W | Read (open) | Read (open) |
 | `projects/` | R/W | R/W | Read (open) | Read (open) |
 | `maintenance/` | R/W | R/W | Read own; create new | — |
 | Personnel Notes section (anywhere) | Read/Write | — | — | — |
@@ -233,7 +232,7 @@ Result: agent refuses, says the task is private. ✓
 ### Example 3: Guest browses kb-ui
 
 - Sender: an authenticated user with no `kb_person` mapping.
-- Action: `GET /category/spaces`.
+- Action: `GET /category/artifacts`.
 - Layer 1: pass (kb-ui has full FS access; we're at the role layer).
 - Layer 2: guest → can read open docs only.
 - Layer 3: each doc is filtered; the rendered category page shows only `visibility: open` documents.

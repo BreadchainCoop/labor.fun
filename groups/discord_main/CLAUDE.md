@@ -17,7 +17,7 @@ of every rule.
 | What | Where |
 |------|-------|
 | Operational rules | `/workspace/project/rules/` (see `rules/INDEX.md`) |
-| Shared KB (this group) | `context/` — people, tasks, calendar, artifacts, spaces |
+| Shared KB (this group) | `context/` — people, tasks, calendar, artifacts |
 | Read access to other groups | `/workspace/all-groups/` (read-only mount; cooperative mode) |
 | SQLite DB (messages, identities, etc.) | `/workspace/project/store/messages.db` (read-write in cooperative mode — see `rules/knowledge-base/storage.md`) |
 
