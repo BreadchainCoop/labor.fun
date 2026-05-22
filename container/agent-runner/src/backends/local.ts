@@ -20,7 +20,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 
-import { log, writeOutput } from '../runtime.js';
+import { drainIpcInput, log, shouldClose, writeOutput } from '../runtime.js';
 import { McpBridge, OpenAITool } from './mcp-bridge.js';
 import { buildSkillsContext } from './skill-shim.js';
 import { Backend, RunQueryArgs, RunQueryResult } from './types.js';
@@ -188,8 +188,28 @@ export class LocalBackend implements Backend {
     );
 
     let iterations = 0;
+    let closedDuringQuery = false;
     try {
       while (true) {
+        // Check for close sentinel between iterations. Mirrors the Claude
+        // backend's pollIpcDuringQuery loop — without this, a mid-turn close
+        // request would only be picked up on the next idle wait, reintroducing
+        // the idle-timeout delay the sentinel is meant to avoid.
+        if (shouldClose()) {
+          log('[local-backend] Close sentinel detected mid-turn, aborting');
+          closedDuringQuery = true;
+          break;
+        }
+        // Drain any follow-up user messages that arrived mid-turn and fold
+        // them into history so the next model call sees them.
+        const followUps = drainIpcInput();
+        for (const text of followUps) {
+          log(
+            `[local-backend] Appending follow-up IPC message (${text.length} chars)`,
+          );
+          this.history.push({ role: 'user', content: text });
+        }
+
         if (iterations >= MAX_ITERATIONS) {
           log(
             `[local-backend] Iteration cap (${MAX_ITERATIONS}) exceeded, aborting turn`,
@@ -233,16 +253,28 @@ export class LocalBackend implements Backend {
         }
 
         const assistantMsg = choice.message;
+        const hasToolCalls =
+          !!assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0;
         // Always append the assistant turn before dispatching or yielding —
         // otherwise the model loses its own context on the next iteration.
+        // OpenAI-compatible schemas expect `content: null` on tool-call turns
+        // (some servers reject a non-null/empty string alongside tool_calls).
         this.history.push({
           role: 'assistant',
-          content: assistantMsg.content ?? '',
+          content: hasToolCalls ? null : (assistantMsg.content ?? ''),
           tool_calls: assistantMsg.tool_calls,
         });
 
-        if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
-          for (const call of assistantMsg.tool_calls) {
+        if (hasToolCalls) {
+          for (const call of assistantMsg.tool_calls!) {
+            if (shouldClose()) {
+              log(
+                '[local-backend] Close sentinel detected during tool dispatch, aborting',
+              );
+              closedDuringQuery = true;
+              break;
+            }
+
             let parsedArgs: Record<string, unknown> = {};
             try {
               parsedArgs = call.function.arguments
@@ -274,6 +306,7 @@ export class LocalBackend implements Backend {
               content: result,
             });
           }
+          if (closedDuringQuery) break;
           // Iterate: model needs to see the tool results.
           continue;
         }
@@ -305,7 +338,7 @@ export class LocalBackend implements Backend {
     return {
       newSessionId: this.sessionId,
       lastAssistantUuid: undefined,
-      closedDuringQuery: false,
+      closedDuringQuery,
     };
   }
 }

@@ -5,8 +5,13 @@ import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-// Secrets (API keys, tokens) are NOT read here — they are loaded only
-// by the credential proxy (credential-proxy.ts), never exposed to containers.
+// Anthropic secrets (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN) are NOT read
+// here — they are loaded only by the credential proxy (credential-proxy.ts)
+// and never exposed to containers. LOCAL_LLM_API_KEY is an exception: when
+// NANOCLAW_BACKEND=local the container talks directly to a local/operator-run
+// OpenAI-compatible endpoint, so the key must be readable here. It is injected
+// into the container via the runtime env (never argv) — see buildContainerArgs
+// and the spawn() call in runContainerAgent.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
