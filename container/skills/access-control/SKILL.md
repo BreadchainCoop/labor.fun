@@ -13,7 +13,7 @@ Quick-reference for Breadbrich Engels's access control system. Use when checking
 |------|-----|-------|
 | **Superadmin** | alice, bob | Full access, credentials, structure changes |
 | **Admin** | alice, ops, bob, carol | All KB, logs, manage groups/tasks, personnel notes |
-| **Coordinator** | dave | Broad write (calendar/tasks/artifacts/spaces), read non-private, trigger deploys |
+| **Coordinator** | dave | Broad write (calendar/tasks/artifacts), read non-private, trigger deploys |
 | **Contributor** | Team members | Read open docs, add tasks, update open info |
 | **Guest** | Anyone authenticated | Read open docs only |
 

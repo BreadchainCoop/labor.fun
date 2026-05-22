@@ -33,7 +33,6 @@ groups/
     tasks/                  — TASK-NNN.md with owners, priority, linked_events
     calendar/               — Events with linked_tasks
     artifacts/              — Project deliverables
-    spaces/                 — Physical spaces
     index.md                — Root doc with ## Admins section
   telegram_example/CLAUDE.md
 ```

@@ -369,7 +369,6 @@ case 'maintenance_status': {
 ## KB Linkage
 - Every MR gets a markdown file under `groups/slack_main/context/maintenance/<MR-ID>.md` (see Layer 5)
 - `kb_doc_path` on the DB row points at it
-- If the issue is tied to a space, also append a line to `groups/slack_main/context/spaces/<space>.md`
 
 ## Constraints
 - The agent must NEVER auto-resolve a maintenance request without an explicit human action — there is no "timeout → resolved"

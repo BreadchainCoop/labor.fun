@@ -87,7 +87,7 @@ This vocabulary recurs throughout the codebase and the rest of this guide.
 | **Main group** | The single elevated, admin chat (typically the operator's self-chat). Has read-write access to the global KB and can schedule tasks for, send messages to, and manage other groups. There is exactly one main per Breadbrich Engels instance. |
 | **Trigger** | The prefix that wakes the agent in a non-main group. Default is `@Breadbrich Engels` (case-insensitive), set by `ASSISTANT_NAME`. Main does not require a trigger. |
 | **JID** | Jabber ID, the channel-independent unique identifier for a chat (`tg:123456` for Telegram, `1234567890@s.whatsapp.net` for WhatsApp, slack channel id for Slack, etc.). |
-| **KB** | Knowledge Base. The markdown tree mounted at `groups/<name>/context/` containing people, tasks, events, artifacts, spaces, projects, calendar entries, and so on. The KB is the canonical organizational memory; the SQLite database is the canonical system memory. |
+| **KB** | Knowledge Base. The markdown tree mounted at `groups/<name>/context/` containing people, tasks, events, artifacts, projects, calendar entries, and so on. The KB is the canonical organizational memory; the SQLite database is the canonical system memory. |
 | **kb-ui** | The Express web app at `kb-ui/server.mjs`, served on port 8080 and tunneled through Cloudflare to `kb.example.com`. Renders the KB and exposes dashboards (Projects, Admin). |
 | **Container skill** | A directory under `container/skills/` mounted into every agent container at runtime. Examples: `agent-browser`, `slack-formatting`, `capabilities`. These shape *agent* behavior. |
 | **Skill** | One of four extension types. Feature skills are merged git branches; utility skills ship code; operational skills ship only instructions; container skills ship runtime behaviors. See §11. |
@@ -193,7 +193,7 @@ Breadbrich Engels maintains state in two complementary stores. Understanding the
 
 ### 6.1 The markdown KB
 
-Located at `groups/<name>/context/<category>/<doc>.md`. Categories include `people/`, `tasks/`, `calendar/`, `artifacts/`, `spaces/`, `projects/`, and `maintenance/`. Files have a YAML frontmatter:
+Located at `groups/<name>/context/<category>/<doc>.md`. Categories include `people/`, `tasks/`, `calendar/`, `artifacts/`, `projects/`, and `maintenance/`. Files have a YAML frontmatter:
 
 ```markdown
 ---

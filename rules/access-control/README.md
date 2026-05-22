@@ -15,7 +15,7 @@ These rules govern what Breadbrich Engels can share, who can see what, and how r
 |------|-----|-------------|
 | **Superadmin** | alice, bob | Full access, credentials, structure changes |
 | **Admin** | alice, ops, bob, carol | All KB, logs, manage groups/tasks, personnel notes |
-| **Coordinator** | dave | Broad write to calendar/tasks/artifacts/spaces, read all non-private |
+| **Coordinator** | dave | Broad write to calendar/tasks/artifacts, read all non-private |
 | **Contributor** | Team members | Read open docs, add tasks, update open info |
 | **Guest** | Anyone authenticated | Read open docs only |
 

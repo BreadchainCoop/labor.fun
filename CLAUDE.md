@@ -37,7 +37,7 @@ Read `rules/INDEX.md` for the full cross-linked index. When modifying Breadbrich
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations; see `schema/tables.md` for schema reference |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `groups/slack_main/context/` | Knowledge base (people, tasks, calendar, artifacts, spaces) |
+| `groups/slack_main/context/` | Knowledge base (people, tasks, calendar, artifacts) |
 | `kb-ui/server.mjs` | Admin dashboard (Express, Basic Auth) |
 | `container/skills/` | Skills loaded inside agent containers |
 | `schema/tables.md` | Database schema reference |

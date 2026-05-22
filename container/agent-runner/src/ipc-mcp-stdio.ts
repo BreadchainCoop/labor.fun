@@ -41,7 +41,7 @@ const server = new McpServer({
 
 server.tool(
   'modify_kb_file',
-  "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, spaces, or other KB files. The orchestrator enforces access control — your permissions are checked against the sender context (admin, coordinator, etc.). Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md').",
+  "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, or other KB files. The orchestrator enforces access control — your permissions are checked against the sender context (admin, coordinator, etc.). Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md').",
   {
     file_path: z.string().describe('Relative path within the KB context directory (e.g. "tasks/TASK-001.md", "calendar/2026-04-09-event.md")'),
     content: z.string().describe('Full file content to write (including YAML frontmatter)'),

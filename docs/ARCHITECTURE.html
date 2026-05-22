@@ -115,7 +115,6 @@ CLI ---------&gt; direct stdin --&gt; |   IPC Watcher         |
                                 |     people/           |
                                 |     artifacts/        |
                                 |     calendar/         |
-                                |     spaces/           |
                                 +-----------------------+
                                             |
                                     backup  | cron
@@ -302,7 +301,7 @@ CLI ---------&gt; direct stdin --&gt; |   IPC Watcher         |
 <tr><th>Type</th><th>Action</th><th>Authorization</th></tr>
 <tr><td><code>message</code></td><td>Send message to any channel/JID</td><td>Main: any JID. Others: own group or admin-only for cross-group</td></tr>
 <tr><td><code>email</code></td><td>Send email via SMTP</td><td>Whitelist: <whitelisted recipients></td></tr>
-<tr><td><code>modify_kb_file</code></td><td>Write/delete KB files (tasks, people, calendar, etc.)</td><td>Admin: any. Coordinator: calendar/tasks/artifacts/spaces. Others: denied</td></tr>
+<tr><td><code>modify_kb_file</code></td><td>Write/delete KB files (tasks, people, calendar, etc.)</td><td>Admin: any. Coordinator: calendar/tasks/artifacts. Others: denied</td></tr>
 <tr><td><code>schedule_task</code></td><td>Create/modify/delete scheduled tasks</td><td>Non-main: own group only. Main: any group.</td></tr>
 <tr><td><code>register_group</code></td><td>Register new chat group</td><td>Main group only</td></tr>
 </table>
@@ -426,8 +425,7 @@ CLI ---------&gt; direct stdin --&gt; |   IPC Watcher         |
   tasks/             # TASK-NNN.md files (single source of truth)
   projects/          # PROJECT-NNN.md files (group tasks + events)
   artifacts/         # Documents, meeting notes, creative works
-  calendar/          # EVT-NNN event files
-  spaces/            # Physical room/facility descriptions</code></pre>
+  calendar/          # EVT-NNN event files</code></pre>
 
 <h3>Task File Format</h3>
 <pre><code>---

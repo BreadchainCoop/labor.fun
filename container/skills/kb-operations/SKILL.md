@@ -17,7 +17,6 @@ The canonical KB lives in `slack_main/context/`. Every container can read it via
 | Tasks | `/workspace/shared-kb/tasks/` | …/`tasks/` | open | Structured task tracking (TASK-NNN) |
 | Calendar | `/workspace/shared-kb/calendar/` | …/`calendar/` | open | Events, schedules, deadlines |
 | Artifacts | `/workspace/shared-kb/artifacts/` | …/`artifacts/` | open | Documents, creative works, equipment |
-| Spaces | `/workspace/shared-kb/spaces/` | …/`spaces/` | open | Physical rooms and facilities |
 | Financials | `/workspace/shared-kb/financials/` | …/`financials/` | restricted | Budget, expenses, invoices |
 | Dashboards | `/workspace/shared-kb/dashboards/` | …/`dashboards/` | restricted | Visual reports, HTML dashboards |
 
@@ -61,7 +60,7 @@ tags: [tag1, tag2]
 
 | System | Used For | Access |
 |--------|----------|--------|
-| Markdown KB | People, tasks, calendar, artifacts, spaces | File read/write |
+| Markdown KB | People, tasks, calendar, artifacts | File read/write |
 | SQLite DB | Messages, chats, users, expenses | Direct `sqlite3` + MCP tools |
 | Attachments | Photos, business cards, uploads | File read |
 

@@ -121,7 +121,6 @@ const CATEGORY_ICONS = {
   tasks: '\u{2705}',
   artifacts: '\u{1F4E6}',
   calendar: '\u{1F4C5}',
-  spaces: '\u{1F3E0}',
 };
 
 const CATEGORY_LABELS = { calendar: "Events" };
@@ -248,7 +247,7 @@ function layout(title, body, username) {
 
 app.get('/', (req, res) => {
   const username = req.auth.user;
-  const categories = ['people', 'tasks', 'artifacts', 'calendar', 'spaces'];
+  const categories = ['people', 'tasks', 'artifacts', 'calendar'];
 
   // Count items per category
   const catCounts = {};
@@ -1722,7 +1721,6 @@ app.get('/admin', (req, res) => {
           <tr><td style="color:#ddd">calendar/</td><td><span class="badge open">R/W</span></td><td><span class="badge open">R/W</span></td><td><span class="badge restricted">Read</span></td><td><span class="badge restricted">Read</span></td></tr>
           <tr><td style="color:#ddd">tasks/</td><td><span class="badge open">R/W</span></td><td><span class="badge open">R/W</span></td><td><span class="badge restricted">Read (open)</span></td><td><span class="badge restricted">Read (open)</span></td></tr>
           <tr><td style="color:#ddd">artifacts/</td><td><span class="badge open">R/W</span></td><td><span class="badge open">R/W</span></td><td><span class="badge restricted">Read (open)</span></td><td><span class="badge restricted">Read (open)</span></td></tr>
-          <tr><td style="color:#ddd">spaces/</td><td><span class="badge open">R/W</span></td><td><span class="badge open">R/W</span></td><td><span class="badge restricted">Read (open)</span></td><td><span class="badge restricted">Read (open)</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -1743,7 +1741,7 @@ app.get('/admin', (req, res) => {
           <tr><td style="color:#ddd">KB Web UI</td><td style="color:#888">all roles</td><td colspan="2" style="color:#888">Read-only (per visibility)</td><td style="color:#555">\u2014</td><td style="color:#555">\u2014</td><td><span class="badge super">Superadmin only</span></td></tr>
         </tbody>
       </table>
-      <p style="color:#666;margin-top:12px;font-size:12px">* Non-private = all directories except people profiles, personnel notes, and credentials. Coordinator can write to calendar, tasks, artifacts, and spaces.</p>
+      <p style="color:#666;margin-top:12px;font-size:12px">* Non-private = all directories except people profiles, personnel notes, and credentials. Coordinator can write to calendar, tasks, and artifacts.</p>
     </div>
   `;
 
@@ -2036,14 +2034,9 @@ app.get('/architecture', (req, res) => {
           <text x="710" y="205" class="box-sub">visibility: open/restricted</text>
 
           <rect class="box" x="484" y="235" width="200" height="55" fill="#162216" stroke="#1a3a1a"/>
-          <text x="494" y="253" class="box-header">\u{1F3E0} spaces/</text>
+          <text x="494" y="253" class="box-header">\u{1F4C4} index.md</text>
           <line x1="484" y1="259" x2="684" y2="259" stroke="#1a3a1a"/>
-          <text x="494" y="273" class="field">Physical spaces metadata</text>
-
-          <rect class="box" x="700" y="235" width="200" height="55" fill="#162216" stroke="#1a3a1a"/>
-          <text x="710" y="253" class="box-header">\u{1F4C4} index.md</text>
-          <line x1="700" y1="259" x2="900" y2="259" stroke="#1a3a1a"/>
-          <text x="710" y="273" class="field">KB root doc, ## Admins section</text>
+          <text x="494" y="273" class="field">KB root doc, ## Admins section</text>
 
           <!-- KB File format -->
           <rect class="box" x="484" y="305" width="416" height="50" fill="#111" stroke="#333"/>

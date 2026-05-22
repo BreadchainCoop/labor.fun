@@ -9,7 +9,6 @@
 | `calendar/` | R/W | R/W | Read | Read |
 | `tasks/` | R/W | R/W | Read (open) | Read (open) |
 | `artifacts/` | R/W | R/W | Read (open) | Read (open) |
-| `spaces/` | R/W | R/W | Read (open) | Read (open) |
 
 ## By Capability
 
@@ -45,7 +44,7 @@
 ## Coordinator Specifics
 
 Coordinators (currently: Dave Doyle) have broad write access but with limits:
-- **CAN**: Create/edit/delete in calendar, tasks, artifacts, spaces
+- **CAN**: Create/edit/delete in calendar, tasks, artifacts
 - **CAN**: View all KB docs including restricted ones
 - **CAN**: Send cross-channel messages
 - **CAN**: Trigger standard redeployments via the `/redeploy-breadbrich` skill (`safe-deploy.sh` only)
