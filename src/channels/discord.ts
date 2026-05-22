@@ -437,17 +437,34 @@ export class DiscordChannel implements Channel {
    * Open (or fetch) a DM channel with the given Discord user and send a
    * message. Returns the DM channel id so the caller can route follow-up
    * messages there via the normal `sendMessage("dc:<channelId>", ...)`
-   * path. Reuses the standard 2000-char chunking by delegating the actual
-   * send to sendMessage().
+   * path.
    *
-   * Throws on permission failure (user has DMs disabled, bot blocked,
-   * user not visible) so the IPC handler can surface a clear error.
+   * Sends directly via `dm.send(...)` rather than delegating to
+   * `sendMessage()` so DiscordAPIErrors (DMs disabled, recipient
+   * blocked, unknown user, missing shared guild) actually propagate to
+   * the IPC handler — `sendMessage()` swallows-and-logs send errors,
+   * which would otherwise hide failures behind a successful-looking
+   * channel id.
+   *
+   * Handles Discord's 2000-char limit inline with the same chunking
+   * `sendMessage()` uses.
    */
   async dmUser(userId: string, text: string): Promise<string> {
     if (!this.client) throw new Error('Discord client not initialized');
     const user = await this.client.users.fetch(userId);
     const dm = await user.createDM();
-    await this.sendMessage(`dc:${dm.id}`, text);
+    const MAX_LENGTH = 2000;
+    if (text.length <= MAX_LENGTH) {
+      await dm.send(text);
+    } else {
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        await dm.send(text.slice(i, i + MAX_LENGTH));
+      }
+    }
+    logger.info(
+      { userId, channelId: dm.id, length: text.length },
+      'Discord DM sent',
+    );
     return dm.id;
   }
 

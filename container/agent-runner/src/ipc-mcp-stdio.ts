@@ -93,11 +93,12 @@ server.tool(
     "Accepts any of: KB slug ('josh-tbs'), Discord ID ('511575159929438224'), " +
     "Discord username ('theblockchainsocialist'), display name ('Josh | TBS'), " +
     "or the title from their KB people file ('Josh'). " +
-    "Resolution is restricted to people already in the KB / user_identities — " +
-    "the bot will refuse to DM users it doesn't already know. " +
-    "On failure (ambiguous match, not found, recipient has DMs disabled, etc.) " +
-    "an error is posted back in the current chat. " +
-    "Long messages are auto-split at the Discord 2000-char limit.",
+    "Resolution scans the people/*.md files in the shared KB — the bot will " +
+    "refuse to DM anyone who doesn't have a people file (this is the " +
+    "allowlist surface). On failure (ambiguous match, not found, recipient " +
+    "has DMs disabled, Discord not connected, etc.) an error is posted back " +
+    "in the current chat. Long messages are auto-split at the Discord " +
+    "2000-char limit.",
   {
     target: z
       .string()

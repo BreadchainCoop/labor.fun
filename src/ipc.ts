@@ -147,11 +147,16 @@ export interface IpcDeps {
   ) => void;
   /**
    * Open / fetch a DM channel with a Discord user and send a message.
-   * Used by the `dm_user` IPC op. Returns the DM channel id so the
-   * orchestrator can log it. Throws on permission/visibility errors so
-   * the handler can surface a clear failure back to the source chat.
+   * Used by the `dm_user` IPC op.
+   *
+   * Returns the DM channel id on success. Returns `null` when the
+   * Discord channel isn't wired up (no token / factory bailed) so the
+   * IPC handler can render an unambiguous "Discord not connected"
+   * message instead of a misleading recipient-side failure. Throws on
+   * permission / visibility errors (DiscordAPIError) so those can be
+   * surfaced with their underlying message.
    */
-  dmDiscordUser?: (userId: string, text: string) => Promise<string>;
+  dmDiscordUser?: (userId: string, text: string) => Promise<string | null>;
   onTasksChanged: () => void;
 }
 
@@ -931,6 +936,18 @@ export async function processTaskIpc(
       const person = resolution.person;
       try {
         const dmChannelId = await deps.dmDiscordUser(person.discordId, text);
+        if (dmChannelId === null) {
+          // Discord channel isn't wired up. Surface that explicitly
+          // instead of falling through to a recipient-blaming message.
+          await notify(
+            '`dm_user` is unavailable: Discord channel not connected.',
+          );
+          logger.warn(
+            { sourceGroup, target },
+            'dm_user: Discord channel not connected',
+          );
+          break;
+        }
         logger.info(
           {
             sourceGroup,
@@ -943,12 +960,22 @@ export async function processTaskIpc(
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        // Only blame the recipient when the Discord API actually
+        // reports a permission-class refusal:
+        //   50007 — Cannot send messages to this user (DMs off / blocked)
+        //   50001 — Missing access (no shared guild, can't fetch user)
+        //   10013 — Unknown user
+        const code = (err as { code?: unknown })?.code;
+        const isRecipientIssue =
+          code === 50007 || code === 50001 || code === 10013;
+        const hint = isRecipientIssue
+          ? ' They may have DMs disabled, blocked the bot, or share no guild with it.'
+          : '';
         await notify(
-          `Failed to DM ${person.title || person.slug}: ${msg}. ` +
-            `They may have DMs disabled, blocked the bot, or share no guild with it.`,
+          `Failed to DM ${person.title || person.slug}: ${msg}.${hint}`,
         );
         logger.warn(
-          { target, resolved: person.slug, err: msg },
+          { target, resolved: person.slug, err: msg, code },
           'dm_user: send failed',
         );
       }

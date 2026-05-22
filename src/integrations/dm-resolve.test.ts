@@ -97,7 +97,11 @@ describe('resolveDmTarget — string matching', () => {
     expect('suggestions' in r && r.suggestions?.length).toBe(2);
   });
 
-  it('prefers slug over title when both match different people', () => {
+  it('prefers slug over title when both could match different people', () => {
+    // Both records have title 'Ron' (would be ambiguous at the title
+    // level), but only the first has slug 'ron'. Slug is the higher-
+    // priority field, so the slug check finds exactly one hit and
+    // returns immediately — the title-level ambiguity is never reached.
     const c: PersonCandidate[] = [
       {
         slug: 'ron',
@@ -106,8 +110,6 @@ describe('resolveDmTarget — string matching', () => {
         discordUsername: 'ron-handle',
         discordDisplayName: 'Ron',
       },
-      // someone whose slug happens to be the literal string "Ron" — extreme edge
-      // case, but priority is slug-first so the first record should win.
       {
         slug: 'mystery',
         discordId: '2',
@@ -117,8 +119,6 @@ describe('resolveDmTarget — string matching', () => {
       },
     ];
     const r = resolveDmTarget('ron', c);
-    // Two records have title 'Ron'/'ron' but only one has slug 'ron' → slug
-    // wins on the first iteration and we return early.
     expect('person' in r && r.person.discordId).toBe('1');
   });
 

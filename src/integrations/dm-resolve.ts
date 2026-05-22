@@ -1,18 +1,20 @@
 /**
  * Resolve a free-text DM target (name, handle, slug, or Discord ID) to a
- * known Discord member. Inputs come from two sources:
+ * known Discord member.
  *
- *   - `user_identities` table — populated by the Discord members sync.
- *   - `<sharedKb>/context/people/<slug>.md` — also populated by the sync,
- *     readable by humans and curated by them.
+ * This module is intentionally pure: candidate-list in, match out, no DB
+ * or filesystem access. The orchestrator (`src/ipc.ts`) pre-loads
+ * candidates from `<sharedKb>/context/people/<slug>.md` frontmatter —
+ * the people files written by the Discord-members sync — and passes
+ * them in. The `user_identities` table is the same sync's secondary
+ * backing store; we don't read it here because the people files have
+ * the same `discord_id` mapping plus the human-readable fields the
+ * resolver needs.
  *
- * The orchestrator pre-loads candidates and hands them to this pure
- * function so the matching logic stays testable and side-effect-free.
- *
- * Resolution is INTENTIONALLY restricted to candidates that already exist
- * in the system. Random Discord IDs that don't appear in either source
- * are rejected — the bot must never be able to spam-DM strangers, only
- * members the operator has already allowlisted.
+ * Resolution is INTENTIONALLY restricted to candidates that already
+ * exist in the system. Random Discord IDs that don't appear in the
+ * provided list are rejected — the bot must never be able to spam-DM
+ * strangers, only members the operator has already allowlisted.
  */
 
 export interface PersonCandidate {
@@ -63,19 +65,28 @@ export function resolveDmTarget(
   }
 
   const tn = normalize(t);
-  const fields: Array<
-    keyof Pick<
-      PersonCandidate,
-      'slug' | 'title' | 'discordUsername' | 'discordDisplayName'
-    >
-  > = ['slug', 'title', 'discordUsername', 'discordDisplayName'];
+  type MatchField = 'slug' | 'title' | 'discordUsername' | 'discordDisplayName';
+  const fields: MatchField[] = [
+    'slug',
+    'title',
+    'discordUsername',
+    'discordDisplayName',
+  ];
+  // Human-readable labels used in user-facing ambiguity messages (these
+  // strings get surfaced into Discord chats by the IPC handler).
+  const fieldLabel: Record<MatchField, string> = {
+    slug: 'KB slug',
+    title: 'name (KB title)',
+    discordUsername: 'Discord username',
+    discordDisplayName: 'Discord display name',
+  };
 
   for (const field of fields) {
     const hits = candidates.filter((c) => normalize(c[field]) === tn);
     if (hits.length === 1) return { person: hits[0] };
     if (hits.length > 1) {
       return {
-        error: `Ambiguous DM target "${t}" — matches ${hits.length} members on ${field}. Use a slug or Discord ID.`,
+        error: `Ambiguous DM target "${t}" — matches ${hits.length} members on ${fieldLabel[field]}. Use a slug or Discord ID.`,
         suggestions: hits.map((h) => `${h.slug} (${h.discordDisplayName})`),
       };
     }
