@@ -29,7 +29,7 @@ Slack / Telegram / CLI
 |---|---|
 | `src/` | Orchestrator, channels (Slack, Telegram), DB, IPC, permissions, scheduler |
 | `container/` | Dockerfile, agent-runner, build script |
-| `groups/` | Per-group agent memory + KB context (people, tasks, calendar, artifacts, spaces) |
+| `groups/` | Per-group agent memory + KB context (people, tasks, calendar, artifacts) |
 | `kb-ui/` | Admin dashboard — categories, linkages, logs, architecture diagram |
 | `schema/` | Database table definitions (9 tables) and architecture reference |
 | `.claude/skills/` | 30+ installable skills (channels, integrations, tools) |

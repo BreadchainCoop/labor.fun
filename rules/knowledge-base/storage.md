@@ -4,7 +4,7 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 
 ## 1. Markdown Files (Knowledge Base)
 
-**What**: All organizational knowledge — people, tasks, calendar, artifacts, spaces.
+**What**: All organizational knowledge — people, tasks, calendar, artifacts.
 **Where**: `groups/slack_main/context/` on disk, mounted into containers.
 **Format**: Markdown with YAML frontmatter (see [document-format.md](document-format.md)).
 **Managed by**: Breadbrich Engels reads/writes these files directly via filesystem operations.
@@ -15,7 +15,6 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 | `context/tasks/` | `TASK-001.md` | Breadbrich Engels creates/edits markdown files |
 | `context/calendar/` | `2026-05-01-shape-rotator.md` | Breadbrich Engels creates/edits markdown files |
 | `context/artifacts/` | `request_log.md` | Breadbrich Engels creates/edits markdown files |
-| `context/spaces/` | `headquarters.md` | Breadbrich Engels creates/edits markdown files |
 | `context/index.md` | — | Breadbrich Engels maintains as master index |
 | `context/tasks/active.md` | — | Breadbrich Engels maintains as task index |
 | `context/calendar/upcoming.md` | — | Breadbrich Engels maintains as events index |

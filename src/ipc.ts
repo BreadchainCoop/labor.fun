@@ -89,7 +89,7 @@ function getEmailTransporter(): nodemailer.Transporter | null {
 const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
 
 // Directories coordinators can write to
-const COORDINATOR_WRITABLE = ['calendar', 'tasks', 'artifacts', 'spaces'];
+const COORDINATOR_WRITABLE = ['calendar', 'tasks', 'artifacts'];
 
 // Directories only admins can write to
 const ADMIN_ONLY = ['people'];

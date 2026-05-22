@@ -140,7 +140,7 @@ function buildVolumeMounts(
   }
 
   // Shared KB — slack_main is the canonical location for cross-group
-  // KB content (people, calendar, tasks, artifacts, spaces). Mount it
+  // KB content (people, calendar, tasks, artifacts). Mount it
   // read-only at /workspace/shared-kb so every group container can
   // resolve "who is X" / "what's on the calendar" lookups without
   // needing the files duplicated under their own group folder.
