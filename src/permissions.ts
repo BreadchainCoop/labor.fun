@@ -1,9 +1,12 @@
 /**
- * Permissions module — reads KB people files + SQLite identity table
- * to enforce admin checks, tag hierarchy, and user resolution.
+ * Permissions module — identity resolution only.
  *
- * The KB files (groups/{name}/context/people/{name}.md) are the source of truth
- * for user data and tags. This module reads them and caches the results.
+ * After the flat-permissions refactor there is exactly one tier: a sender
+ * either resolves to a known KB person (allowlisted) and gets full access,
+ * or doesn't and gets nothing. KB files under
+ * groups/{name}/context/people/{slug}.md remain the source of truth for
+ * display name and descriptive tags. Tags are metadata only — they no
+ * longer grant any permissions.
  */
 
 import fs from 'fs';
@@ -18,20 +21,17 @@ export interface Person {
   id: string; // filename without .md (e.g., 'alice')
   displayName: string;
   tags: string[];
-  isAdmin: boolean;
 }
 
 export interface SenderContext {
   user_id: string;
   display_name: string;
   tags: string[];
-  is_admin: boolean;
 }
 
 // --- In-memory cache ---
 
 let people: Map<string, Person> = new Map();
-let adminSet: Set<string> = new Set();
 
 // --- KB Loading ---
 
@@ -60,49 +60,16 @@ function parseFrontmatter(content: string): {
 }
 
 /**
- * Parse the admin list from the KB index.md file.
- * Looks for the "## Admins" section and extracts names.
- */
-function parseAdmins(indexContent: string): string[] {
-  const adminsSection = indexContent.match(
-    /## Admins\n([\s\S]*?)(?=\n##|\n$|$)/,
-  );
-  if (!adminsSection) return [];
-
-  const admins: string[] = [];
-  const lines = adminsSection[1].split('\n');
-  for (const line of lines) {
-    // Match "- Name" or "- Name (Role)" or "- **Name**"
-    const match = line.match(/^-\s+\*?\*?([^*(]+)/);
-    if (match) {
-      admins.push(match[1].trim());
-    }
-  }
-  return admins;
-}
-
-/**
  * Load people from KB context directory.
- * Reads people/*.md files and index.md for admin list.
+ * Reads people/*.md files; populates the in-memory cache.
  */
 export function loadPeopleFromKB(contextDir: string): void {
   const newPeople = new Map<string, Person>();
-  const newAdminSet = new Set<string>();
 
-  // Parse index.md for admin names
-  const indexPath = path.join(contextDir, 'index.md');
-  let adminNames: string[] = [];
-  if (fs.existsSync(indexPath)) {
-    const indexContent = fs.readFileSync(indexPath, 'utf-8');
-    adminNames = parseAdmins(indexContent);
-  }
-
-  // Parse people files
   const peopleDir = path.join(contextDir, 'people');
   if (!fs.existsSync(peopleDir)) {
     logger.warn({ peopleDir }, 'People directory not found');
     people = newPeople;
-    adminSet = newAdminSet;
     return;
   }
 
@@ -115,31 +82,12 @@ export function loadPeopleFromKB(contextDir: string): void {
     const content = fs.readFileSync(path.join(peopleDir, file), 'utf-8');
     const { title, tags } = parseFrontmatter(content);
     const displayName = title || id;
-
-    // Check if this person is in the admin list (match by display name)
-    const isAdmin = adminNames.some(
-      (name) => name.toLowerCase() === displayName.toLowerCase(),
-    );
-
-    const person: Person = { id, displayName, tags: tags || [], isAdmin };
-    newPeople.set(id, person);
-
-    if (isAdmin) {
-      newAdminSet.add(id);
-      // Ensure admin tag is in their tags list
-      if (!person.tags.includes('admin')) {
-        person.tags.push('admin');
-      }
-    }
+    newPeople.set(id, { id, displayName, tags: tags || [] });
   }
 
   people = newPeople;
-  adminSet = newAdminSet;
 
-  logger.info(
-    { peopleCount: people.size, adminCount: adminSet.size },
-    'Loaded KB people',
-  );
+  logger.info({ peopleCount: people.size }, 'Loaded KB people');
 }
 
 // --- Identity Resolution ---
@@ -186,29 +134,14 @@ export function getPerson(kbPerson: string): Person | undefined {
 }
 
 /**
- * Check if a KB person is an admin.
+ * The one and only permission predicate: is this sender a known/allowlisted
+ * user? Anyone who resolves to a KB person has full access; anyone who
+ * doesn't is rejected. Intake-layer filtering (sender-allowlist.json) and
+ * the Discord-members sync together ensure that only allowlisted humans
+ * ever get a `user_identities` row.
  */
-export function isAdmin(kbPerson: string): boolean {
-  return adminSet.has(kbPerson);
-}
-
-/**
- * Check if a KB person has a specific tag.
- */
-export function hasTag(kbPerson: string, tag: string): boolean {
-  const person = people.get(kbPerson);
-  if (!person) return false;
-  return person.tags.includes(tag);
-}
-
-/**
- * Check if a user (identified by platform ID) has admin privileges.
- * Resolves platform ID → KB person → admin check.
- */
-export function isSenderAdmin(platformId: string, platform: string): boolean {
-  const kbPerson = resolveUser(platformId, platform);
-  if (!kbPerson) return false;
-  return isAdmin(kbPerson);
+export function isAllowlisted(platformId: string, platform: string): boolean {
+  return resolveUser(platformId, platform) !== undefined;
 }
 
 /**
@@ -228,53 +161,7 @@ export function getSenderContext(
     user_id: person.id,
     display_name: person.displayName,
     tags: person.tags,
-    is_admin: person.isAdmin,
   };
-}
-
-// --- Tag Hierarchy ---
-
-/**
- * Check if a user can assign a given tag to someone.
- * Uses the tag_hierarchy table: the user must have a tag that is
- * a parent of the target tag.
- */
-export function canAssignTag(
-  assignerPerson: string,
-  targetTag: string,
-): boolean {
-  const person = people.get(assignerPerson);
-  if (!person) return false;
-
-  const db = getDb();
-  const placeholders = person.tags.map(() => '?').join(',');
-  if (placeholders.length === 0) return false;
-
-  const row = db
-    .prepare(
-      `SELECT 1 FROM tag_hierarchy WHERE parent_tag IN (${placeholders}) AND child_tag = ? LIMIT 1`,
-    )
-    .get(...person.tags, targetTag) as { 1: number } | undefined;
-
-  return row !== undefined;
-}
-
-/**
- * Get all tags that a person can assign.
- */
-export function getAssignableTags(kbPerson: string): string[] {
-  const person = people.get(kbPerson);
-  if (!person || person.tags.length === 0) return [];
-
-  const db = getDb();
-  const placeholders = person.tags.map(() => '?').join(',');
-  const rows = db
-    .prepare(
-      `SELECT DISTINCT child_tag FROM tag_hierarchy WHERE parent_tag IN (${placeholders})`,
-    )
-    .all(...person.tags) as { child_tag: string }[];
-
-  return rows.map((r) => r.child_tag);
 }
 
 // --- Utility ---
@@ -284,11 +171,4 @@ export function getAssignableTags(kbPerson: string): string[] {
  */
 export function getAllPeople(): Person[] {
   return Array.from(people.values());
-}
-
-/**
- * Get all admin person IDs.
- */
-export function getAdmins(): string[] {
-  return Array.from(adminSet);
 }

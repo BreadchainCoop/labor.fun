@@ -356,37 +356,6 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
-  // Tag hierarchy: which tags can assign which other tags
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS tag_hierarchy (
-      parent_tag TEXT NOT NULL,
-      child_tag TEXT NOT NULL,
-      PRIMARY KEY (parent_tag, child_tag)
-    )
-  `);
-
-  // Seed tag hierarchy (idempotent)
-  const seedHierarchy = database.prepare(
-    `INSERT OR IGNORE INTO tag_hierarchy (parent_tag, child_tag) VALUES (?, ?)`,
-  );
-  const adminChildren = [
-    'admin',
-    'leadership',
-    'engineering',
-    'creative',
-    'operations',
-    'community',
-  ];
-  const leadershipChildren = [
-    'engineering',
-    'creative',
-    'operations',
-    'community',
-  ];
-  for (const child of adminChildren) seedHierarchy.run('admin', child);
-  for (const child of leadershipChildren)
-    seedHierarchy.run('leadership', child);
-
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:ops","platform":"cli","kb_person":"ops"}]'

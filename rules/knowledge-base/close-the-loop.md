@@ -6,7 +6,7 @@
 - ALWAYS create a TASK-NNN.md file for any actionable request (maintenance, expense, event, purchase, scheduling)
 - NEVER just acknowledge in chat without writing the task file
 - Use IPC modify_kb_file action to write from container agents
-- Assign to the relevant person, or Dave (coordinator) as default
+- Assign to the relevant person, or leave unassigned if it's unclear
 
 ## Entity Updates
 - When a NEW person, event, artifact, or space is mentioned: check if a KB file exists, create/update if needed

@@ -26,7 +26,6 @@ function writeSenderContext(
     user_id: string;
     display_name?: string;
     tags?: string[];
-    is_admin?: boolean;
   },
 ): void {
   const inputDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'input');
@@ -37,7 +36,6 @@ function writeSenderContext(
       user_id: ctx.user_id,
       display_name: ctx.display_name ?? ctx.user_id,
       tags: ctx.tags ?? [],
-      is_admin: ctx.is_admin ?? false,
     }),
   );
 }
@@ -807,47 +805,57 @@ describe('transcript task approval IPC handlers', () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0].jid).toBe('main@g.us');
-    expect(sent[0].text).toContain('Coordinator review needed');
+    expect(sent[0].text).toContain('Review needed');
     expect(sent[0].text).toContain('Email landlord');
     expect(sent[0].text).toContain(rows[0].id);
   });
 
-  it('approve_proposed_tasks is rejected when sender lacks coordinator tag', async () => {
+  it('approve_proposed_tasks: any allowlisted sender can approve (flat model)', async () => {
     writeSenderContext('whatsapp_main', {
       user_id: 'contributor',
       tags: ['community'],
     });
-    const [row] = (() => {
-      createProposedTasksBatch([
-        {
-          id: 'PT-noauth-1',
-          summary_id: summaryId,
-          chat_jid: 'other@g.us',
-          group_folder: 'other-group',
-          requester_user_id: 'alex',
-          title: 'task',
-          description: null,
-          proposed_assignee: null,
-          proposed_due_date: null,
-          source_quote: null,
-        },
-      ]);
-      return [getProposedTask('PT-noauth-1')!];
-    })();
-
-    await processTaskIpc(
+    createProposedTasksBatch([
       {
-        type: 'approve_proposed_tasks',
-        items: [{ proposed_task_id: row.id }],
+        id: 'PT-flat-1',
+        summary_id: summaryId,
+        chat_jid: 'other@g.us',
+        group_folder: 'other-group',
+        requester_user_id: 'alex',
+        title: 'task',
+        description: null,
+        proposed_assignee: null,
+        proposed_due_date: null,
+        source_quote: null,
       },
-      'whatsapp_main',
-      true,
-      deps,
-    );
+    ]);
 
-    expect(getProposedTask(row.id)!.status).toBe('pending');
-    expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain('Only coordinators');
+    const tasksDir = path.join(GROUPS_DIR, 'other-group', 'context', 'tasks');
+    const before = fs.existsSync(tasksDir)
+      ? new Set(fs.readdirSync(tasksDir))
+      : new Set<string>();
+
+    try {
+      await processTaskIpc(
+        {
+          type: 'approve_proposed_tasks',
+          items: [{ proposed_task_id: 'PT-flat-1' }],
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      expect(getProposedTask('PT-flat-1')!.status).toBe('created');
+      expect(getProposedTask('PT-flat-1')!.resolved_by).toBe('contributor');
+    } finally {
+      const after = fs.existsSync(tasksDir)
+        ? new Set(fs.readdirSync(tasksDir))
+        : new Set<string>();
+      for (const f of after) {
+        if (!before.has(f)) fs.unlinkSync(path.join(tasksDir, f));
+      }
+    }
   });
 
   it('approve_proposed_tasks is rejected when sender_context is missing (even in main)', async () => {
@@ -878,7 +886,7 @@ describe('transcript task approval IPC handlers', () => {
 
     expect(getProposedTask('PT-nocontext-1')!.status).toBe('pending');
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain('Only coordinators');
+    expect(sent[0].text).toContain('allowlisted sender');
   });
 
   it('approve_proposed_tasks pending → created and writes a TASK-NNN file', async () => {
@@ -1118,7 +1126,7 @@ describe('transcript task approval IPC handlers', () => {
     expect(sent.some((s) => s.text.includes('Rejected'))).toBe(true);
   });
 
-  it('reject_proposed_task is rejected when sender lacks coordinator tag', async () => {
+  it('reject_proposed_task: any allowlisted sender can reject (flat model)', async () => {
     writeSenderContext('whatsapp_main', {
       user_id: 'contributor',
       tags: ['community'],
@@ -1148,7 +1156,8 @@ describe('transcript task approval IPC handlers', () => {
       deps,
     );
 
-    expect(getProposedTask('PT-rej-2')!.status).toBe('pending');
-    expect(sent.some((s) => s.text.includes('Only coordinators'))).toBe(true);
+    expect(getProposedTask('PT-rej-2')!.status).toBe('rejected');
+    expect(getProposedTask('PT-rej-2')!.resolved_by).toBe('contributor');
+    expect(sent.some((s) => s.text.includes('Rejected'))).toBe(true);
   });
 });

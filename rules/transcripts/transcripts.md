@@ -24,13 +24,13 @@ For each item, classify and extract:
 
 | Type | What to Look For | DB Action |
 |------|-----------------|-----------|
-| **Action items** | "I'll do X", "Can you handle Y", "We need to Z" | Submit via `propose_meeting_tasks` for coordinator approval — see [Transcript Task Approval](task-approval.md) |
+| **Action items** | "I'll do X", "Can you handle Y", "We need to Z" | Submit via `propose_meeting_tasks` for review — see [Transcript Task Approval](task-approval.md) |
 | **New events** | "Let's schedule X for Friday", "We have a meeting next week" | Note for calendar addition |
 | **New people** | Names not in the KB people directory | Create KB person files |
 | **Task updates** | References to existing tasks, status changes | Update existing task files |
 | **Documents needed** | "We need the contract", "Send me the report" | Log as document requests |
 
-> **Important**: New action items derived from a transcript are NOT written to `context/tasks/` directly. They go through the coordinator approval queue (`propose_meeting_tasks`). Updates to existing tasks, new people, new events, and document references are NOT gated. See [Transcript Task Approval](task-approval.md).
+> **Important**: New action items derived from a transcript are NOT written to `context/tasks/` directly. They go through the review queue (`propose_meeting_tasks`). Updates to existing tasks, new people, new events, and document references are NOT gated. See [Transcript Task Approval](task-approval.md).
 
 ### Step 3: Identify Gaps
 For EACH extracted item, check if it has complete information:
@@ -54,7 +54,7 @@ The HTML must be self-contained with inline CSS and JS for slide navigation (arr
 ### Step 5: Persist & Respond
 1. Call `save_meeting_summary` first to store the meeting and capture the returned `summary_id`
 2. Submit new action items through the approval queue:
-   - Call `propose_meeting_tasks` with the `summary_id` and the array of extracted action items — do NOT write `context/tasks/TASK-NNN.md` for these. The coordinator will approve or reject; on approval the host writes the TASK file. See [Transcript Task Approval](task-approval.md).
+   - Call `propose_meeting_tasks` with the `summary_id` and the array of extracted action items — do NOT write `context/tasks/TASK-NNN.md` for these. A reviewer (any allowlisted user) will approve or reject; on approval the host writes the TASK file. See [Transcript Task Approval](task-approval.md).
 3. Create/update un-gated KB files directly:
    - New people: create `context/people/name.md` files
    - New events: create `context/calendar/EVT-NNN.md` files

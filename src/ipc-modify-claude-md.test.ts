@@ -11,12 +11,12 @@ const TARGET_DIR = path.join(GROUPS_DIR, TARGET_FOLDER);
 const TARGET_FILE = path.join(TARGET_DIR, 'CLAUDE.md');
 const SOURCE_MAIN = 'telegram_modclaude_main';
 
-function adminCtx() {
+function allowlistedCtx() {
   return {
     sourceGroup: SOURCE_MAIN,
     isMain: true,
-    senderIsAdmin: true,
-    senderId: 'tg:42@admin',
+    hasSenderCtx: true,
+    senderId: 'tg:42@user',
   };
 }
 
@@ -54,7 +54,7 @@ describe('handleModifyGroupClaudeMd', () => {
         new_content: '# Target\n\nFresh memory.\n',
         summary: 'initial seed',
       },
-      adminCtx(),
+      allowlistedCtx(),
     );
 
     expect(result.status).toBe('ok');
@@ -71,7 +71,7 @@ describe('handleModifyGroupClaudeMd', () => {
     const audit = readAuditRows();
     expect(audit.length).toBe(1);
     expect(audit[0].action).toBe('modify_group_claude_md');
-    expect(audit[0].changed_by).toBe('tg:42@admin');
+    expect(audit[0].changed_by).toBe('tg:42@user');
     expect(audit[0].file_path).toBe(TARGET_FILE);
     const changes = JSON.parse(audit[0].changes!);
     expect(changes.targetFolder).toBe(TARGET_FOLDER);
@@ -86,7 +86,7 @@ describe('handleModifyGroupClaudeMd', () => {
 
     const result = handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: 'NEW' },
-      adminCtx(),
+      allowlistedCtx(),
     );
 
     expect(result.status).toBe('ok');
@@ -95,22 +95,20 @@ describe('handleModifyGroupClaudeMd', () => {
     expect(fs.readFileSync(TARGET_FILE, 'utf-8')).toBe('NEW');
   });
 
-  it('rejects when the source group is not main', () => {
+  it('allows a non-main source group when an allowlisted sender is attached', () => {
     const result = handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: 'X' },
-      { ...adminCtx(), isMain: false },
+      { ...allowlistedCtx(), isMain: false },
     );
 
-    expect(result.status).toBe('rejected');
-    expect(result.reason).toBe('unauthorized');
-    expect(fs.existsSync(TARGET_FILE)).toBe(false);
-    expect(readAuditRows().length).toBe(0);
+    expect(result.status).toBe('ok');
+    expect(fs.existsSync(TARGET_FILE)).toBe(true);
   });
 
-  it('rejects when sender is not admin (even from a main group)', () => {
+  it('rejects when there is no allowlisted sender and source is not main', () => {
     const result = handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: 'X' },
-      { ...adminCtx(), senderIsAdmin: false },
+      { ...allowlistedCtx(), isMain: false, hasSenderCtx: false },
     );
 
     expect(result.status).toBe('rejected');
@@ -122,7 +120,7 @@ describe('handleModifyGroupClaudeMd', () => {
   it('rejects path-traversal target_folder', () => {
     const result = handleModifyGroupClaudeMd(
       { target_folder: '../../etc', new_content: 'X' },
-      adminCtx(),
+      allowlistedCtx(),
     );
 
     expect(result.status).toBe('rejected');
@@ -133,11 +131,11 @@ describe('handleModifyGroupClaudeMd', () => {
   it('rejects empty/reserved folder names', () => {
     const empty = handleModifyGroupClaudeMd(
       { target_folder: '', new_content: 'X' },
-      adminCtx(),
+      allowlistedCtx(),
     );
     const global = handleModifyGroupClaudeMd(
       { target_folder: 'global', new_content: 'X' },
-      adminCtx(),
+      allowlistedCtx(),
     );
 
     expect(empty.status).toBe('rejected');
@@ -151,7 +149,7 @@ describe('handleModifyGroupClaudeMd', () => {
     const tooBig = 'x'.repeat(200 * 1024 + 1);
     const result = handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: tooBig },
-      adminCtx(),
+      allowlistedCtx(),
     );
 
     expect(result.status).toBe('rejected');
@@ -164,7 +162,7 @@ describe('handleModifyGroupClaudeMd', () => {
     const atCap = 'y'.repeat(200 * 1024);
     const result = handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: atCap },
-      adminCtx(),
+      allowlistedCtx(),
     );
 
     expect(result.status).toBe('ok');
@@ -174,7 +172,7 @@ describe('handleModifyGroupClaudeMd', () => {
   it('falls back to "unknown@<source>" when senderId is null', () => {
     handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: 'X' },
-      { ...adminCtx(), senderId: null },
+      { ...allowlistedCtx(), senderId: null },
     );
 
     const audit = readAuditRows();

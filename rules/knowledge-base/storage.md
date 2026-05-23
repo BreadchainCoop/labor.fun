@@ -38,8 +38,7 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 | `router_state` | KV state (last timestamps) | Orchestrator (auto) |
 | `scheduled_tasks` | Cron/interval/one-time task definitions | Breadbrich Engels via `schedule_task` MCP tool |
 | `task_run_logs` | Execution history (duration, status, result) | Orchestrator (auto) |
-| `user_identities` | Platform ID → KB person mapping | Orchestrator + manual seeding |
-| `tag_hierarchy` | RBAC tag inheritance tree | Manual seeding |
+| `user_identities` | Platform ID → KB person mapping (presence = allowlisted) | Orchestrator + manual seeding |
 
 **Versioning**: Not git-tracked (in `.gitignore`). DB lives on the droplet.
 **Access control**: In cooperative mode (default) **every** group container has a read-write mount of `store/` at `/workspace/project/store/`. (When `FLAT_ACCESS=false`, only the main group does — the legacy sandboxed model.)

@@ -218,7 +218,7 @@ Why markdown?
 
 ### 6.2 The SQLite database
 
-Located at `store/messages.db`. Around a dozen tables (see §7). Contains channel-level state: messages, chats, registered groups, sessions, scheduled tasks, run logs, identity mappings, tag hierarchy, router cursors, and application data (expenses, meeting summaries).
+Located at `store/messages.db`. Around a dozen tables (see §7). Contains channel-level state: messages, chats, registered groups, sessions, scheduled tasks, run logs, identity mappings, router cursors, and application data (expenses, meeting summaries).
 
 Why SQLite?
 
@@ -260,12 +260,11 @@ This section gives you a one-screen summary of what's in `store/messages.db`. Th
 | `scheduled_tasks` | Cron / interval / once jobs | Has either a `prompt` (Claude task) or a `script` (shell), `next_run` indexed |
 | `task_run_logs` | One row per execution | `status`, `duration_ms`, `result`, `error` |
 
-### 7.3 Identity and RBAC
+### 7.3 Identity
 
 | Table | What it stores | Notes |
 |---|---|---|
-| `user_identities` | `(platform_id, platform) → kb_person` | One row per (slack id, telegram id, etc.) for each person |
-| `tag_hierarchy` | Parent → child role tags | E.g. `admin → leadership, engineering, operations, …`; used for RBAC inheritance |
+| `user_identities` | `(platform_id, platform) → kb_person` | One row per (slack id, telegram id, discord id, etc.) for each person. Presence here = "allowlisted user" under the flat permission model. |
 
 ### 7.4 Application support
 
@@ -369,7 +368,7 @@ rules/
 ├── INDEX.md
 ├── access-control/      # who can see and do what
 ├── finance/             # expense approval, reimbursement, budget tags
-├── identity/            # user resolution, tag hierarchy, platform mapping
+├── identity/            # user resolution, allowlist, platform mapping
 ├── knowledge-base/      # KB structure, document format, task management
 ├── messaging/           # channel formatting, cross-channel send authority
 ├── scheduling/          # cron tasks, API credit conservation, scripts
@@ -534,9 +533,9 @@ grep -E 'ERROR|WARN' logs/breadbrich.log | tail -20    # recent errors
 grep groupCount logs/breadbrich.log | tail -3          # last few startup summaries
 ```
 
-### 12.6 Two-tier authorization for deploy
+### 12.6 Deploy authorization
 
-Deploy permissions follow the role hierarchy. Today, the production deploy path is exercised primarily by admin users (alice, bob, carol, dave). The coordinator role can in principle exercise `safe-deploy.sh` for low-risk rollouts; live-testing this end-to-end is on the near-term list.
+Any allowlisted user can trigger a deploy via the `/redeploy-breadbrich` skill or by running `safe-deploy.sh` directly on the droplet. There are no per-role carve-outs.
 
 ---
 
@@ -580,7 +579,7 @@ The agent:
 3. The host creates an `MR-<timestamp>` row, writes the markdown record, and DMs the operations channel.
 4. Replies with the MR id.
 
-Triage by an ops coordinator: `@Breadbrich Engels triage MR-XYZ to me`. Status updates: `@Breadbrich Engels mark MR-XYZ resolved, fixed the gasket`.
+Triage by any allowlisted user: `@Breadbrich Engels triage MR-XYZ to me`. Status updates: `@Breadbrich Engels mark MR-XYZ resolved, fixed the gasket`.
 
 ### 13.4 "I want to request reimbursement for catering"
 
@@ -594,7 +593,7 @@ Flow:
 
 1. `financial_tracking` classification.
 2. Agent calls `create_expense` with the request as `pending_approval`.
-3. Approver (coordinator < $500 or admin any amount) gets a DM. They reply `approve exp-XYZ at $400` to modify the amount.
+3. Any other allowlisted user (the requester cannot approve their own expense) gets a DM. They reply `approve exp-XYZ at $400` to modify the amount.
 4. Status moves to `receipt_pending`.
 5. After the workshop, the requester submits a receipt: `@Breadbrich Engels here's the receipt for exp-XYZ, actual $447`. Status → `receipt_submitted`.
 6. Finance reimburses: `@Breadbrich Engels reimbursed exp-XYZ via venmo`. Status → `reimbursed`.
@@ -615,7 +614,7 @@ The agent:
 
 ### 13.6 "I want to schedule a daily report"
 
-From the main group (admin only):
+From any registered group (any allowlisted user):
 
 ```
 @Breadbrich Engels schedule a daily 9am report of open MRs and unresolved expenses
@@ -658,7 +657,7 @@ When you're about to change Breadbrich Engels, walk this list:
 - [ ] Deploy with `/ship-feature` or `safe-deploy.sh` — never manual rsync.
 - [ ] If you changed `groups/` content: remember that `groups/` is stateful. You almost certainly want to either (a) propose a change to `groups/global/CLAUDE.md` which *does* deploy, or (b) commit specific KB updates to the droplet through the kb-ui or a separate sync flow.
 
-If the change is risky or controversial: leave a note in `groups/global/CLAUDE.md` and ping Dave on the next redeploy so a Coordinator-level deploy gets exercised live.
+If the change is risky or controversial: leave a note in `groups/global/CLAUDE.md` so the next allowlisted user driving a deploy has the context.
 
 ---
 

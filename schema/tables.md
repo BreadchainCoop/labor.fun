@@ -99,26 +99,13 @@ Execution history for scheduled tasks.
 | error | TEXT | Error details if failed |
 
 ### user_identities
-Maps platform-specific IDs to KB person names for RBAC.
+Maps platform-specific IDs to KB person names. Presence of a row here means the sender is allowlisted — under the flat permission model that is the single permission predicate.
 
 | Column | Type | Notes |
 |---|---|---|
 | **platform_id** | TEXT | Platform-specific user ID (composite PK) |
-| **platform** | TEXT | slack, telegram, cli, etc. |
+| **platform** | TEXT | slack, telegram, discord, cli, etc. |
 | kb_person | TEXT | KB person identifier (e.g. bob, alice) |
-
-### tag_hierarchy
-RBAC permission tree defining which tags can assign other tags.
-
-| Column | Type | Notes |
-|---|---|---|
-| **parent_tag** | TEXT | Holder tag (composite PK) |
-| **child_tag** | TEXT | Assignable tag |
-
-Default hierarchy:
-- `admin` -> leadership, engineering, creative, operations, community
-- `leadership` -> engineering, creative, operations, community
-- `coordinator` -> operations, community
 
 ### app_users
 People records used for assignment and identity resolution.

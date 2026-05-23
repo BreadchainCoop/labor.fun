@@ -91,7 +91,7 @@ After every interaction, append to the request log:
 
 - **WTF List**: Always anonymous submissions
 - **Gotchas**: Log operational issues in `artifacts/gotchas.md`
-- **People cards**: Admin-only for edits; Coordinators can read (not personnel notes)
+- **People cards**: Any allowlisted user can edit; per-document `visibility` frontmatter still gates surfacing
 - **Close the loop**: Every reply should write actionable info to KB, not just respond verbally
 
 ## Related
