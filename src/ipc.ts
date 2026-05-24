@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -86,6 +87,62 @@ function getEmailTransporter(): nodemailer.Transporter | null {
 // --- KB file modification access control ---
 
 const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
+
+/**
+ * Resolve a KB-relative path against `KB_CONTEXT_DIR` and refuse anything
+ * that escapes it. Returns the absolute path on success, or null when the
+ * input is empty / non-string / resolves outside the KB context dir.
+ * Using `path.resolve` + a prefix check is the canonical Node pattern;
+ * substring-replacing `..` is fragile (e.g. `....//` survives).
+ */
+function resolveKbPath(input: unknown): string | null {
+  if (typeof input !== 'string' || input.trim() === '') return null;
+  // Strip leading slashes so absolute-looking inputs are treated as
+  // relative to KB_CONTEXT_DIR rather than re-anchoring at filesystem root.
+  const rel = input.replace(/^\/+/, '');
+  const resolved = path.resolve(KB_CONTEXT_DIR, rel);
+  const prefix = KB_CONTEXT_DIR.endsWith(path.sep)
+    ? KB_CONTEXT_DIR
+    : KB_CONTEXT_DIR + path.sep;
+  if (resolved !== KB_CONTEXT_DIR && !resolved.startsWith(prefix)) {
+    return null;
+  }
+  return resolved;
+}
+
+/**
+ * Resolve breadbrich:breadbrich's numeric uid/gid once at startup so KB
+ * writes can transfer ownership without spawning a shell. Returns null
+ * when the user isn't present on this host (typical in dev), in which
+ * case the chown step is skipped — the orchestrator runs as
+ * `breadbrich` in production, so the write already lands with the right
+ * owner. The shell-out (previously `execSync(chown ...)`) was a
+ * command-injection sink whose input was agent-controlled; switching to
+ * `fs.chownSync` with cached numeric ids closes that.
+ */
+let kbOwnerIdsCached: { uid: number; gid: number } | null | undefined;
+function getKbOwnerIds(): { uid: number; gid: number } | null {
+  if (kbOwnerIdsCached !== undefined) return kbOwnerIdsCached;
+  try {
+    // execFileSync (no shell) with a literal username — no interpolation.
+    const uid = parseInt(
+      execFileSync('id', ['-u', 'breadbrich']).toString().trim(),
+      10,
+    );
+    const gid = parseInt(
+      execFileSync('id', ['-g', 'breadbrich']).toString().trim(),
+      10,
+    );
+    if (!Number.isFinite(uid) || !Number.isFinite(gid)) {
+      kbOwnerIdsCached = null;
+    } else {
+      kbOwnerIdsCached = { uid, gid };
+    }
+  } catch {
+    kbOwnerIdsCached = null;
+  }
+  return kbOwnerIdsCached;
+}
 
 // Flat permission model: any allowlisted (known) sender can write any KB
 // file. Unknown senders are rejected. Callers are responsible for
@@ -386,42 +443,53 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
                 const { allowed, reason } = canModifyKbFile(senderCtx);
 
-                if (allowed) {
-                  const normalized = data.filePath
-                    .replace(/^\/+/, '')
-                    .replace(/\.\./g, '');
-                  const fullPath = path.join(KB_CONTEXT_DIR, normalized);
-                  const action = data.action || 'write';
-
-                  if (action === 'delete') {
-                    if (fs.existsSync(fullPath)) {
-                      fs.unlinkSync(fullPath);
-                      logger.info(
-                        { filePath: normalized, sourceGroup, reason },
-                        'KB file deleted via IPC',
-                      );
-                    }
-                  } else {
-                    // Ensure parent directory exists
-                    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-                    fs.writeFileSync(fullPath, data.content || '');
-                    // Fix ownership
-                    try {
-                      const { execSync } = await import('child_process');
-                      execSync(`chown breadbrich:breadbrich "${fullPath}"`);
-                    } catch {
-                      /* ignore */
-                    }
-                    logger.info(
-                      { filePath: normalized, sourceGroup, reason },
-                      'KB file written via IPC',
-                    );
-                  }
-                } else {
+                if (!allowed) {
                   logger.warn(
                     { filePath: data.filePath, sourceGroup, reason },
                     'KB file modification blocked — insufficient permissions',
                   );
+                } else {
+                  const fullPath = resolveKbPath(data.filePath);
+                  if (!fullPath) {
+                    logger.warn(
+                      { filePath: data.filePath, sourceGroup },
+                      'KB file modification blocked — path escapes KB context dir',
+                    );
+                  } else {
+                    const normalized = path.relative(KB_CONTEXT_DIR, fullPath);
+                    const action = data.action || 'write';
+
+                    if (action === 'delete') {
+                      if (fs.existsSync(fullPath)) {
+                        fs.unlinkSync(fullPath);
+                        logger.info(
+                          { filePath: normalized, sourceGroup, reason },
+                          'KB file deleted via IPC',
+                        );
+                      }
+                    } else {
+                      // Ensure parent directory exists
+                      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+                      fs.writeFileSync(fullPath, data.content || '');
+                      // Fix ownership when running as a user other than
+                      // breadbrich (e.g. when the orchestrator runs as
+                      // root in some bootstrap paths). Uses cached
+                      // numeric ids + fs.chownSync — no shell, no
+                      // interpolation of agent-controlled paths.
+                      const ids = getKbOwnerIds();
+                      if (ids && process.getuid?.() !== ids.uid) {
+                        try {
+                          fs.chownSync(fullPath, ids.uid, ids.gid);
+                        } catch {
+                          /* best-effort; permissions failure is logged elsewhere */
+                        }
+                      }
+                      logger.info(
+                        { filePath: normalized, sourceGroup, reason },
+                        'KB file written via IPC',
+                      );
+                    }
+                  }
                 }
               } else if (
                 data.type === 'add_kb_user' &&
