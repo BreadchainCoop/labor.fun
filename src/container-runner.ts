@@ -311,8 +311,14 @@ function buildContainerArgs(
   // This keeps the PAT out of the containerArgs debug log and host
   // process args. Repo scope is enforced by the PAT itself (fine-grained,
   // all BreadchainCoop repos, read+write).
+  //
+  // GH_TOKEN is the env var the gh CLI uses for authentication. We pass
+  // both so that task script gates can use `gh api` directly without any
+  // extra configuration — GITHUB_PERSONAL_ACCESS_TOKEN alone is not
+  // recognised by gh CLI.
   if (getGithubToken()) {
     args.push('-e', 'GITHUB_PERSONAL_ACCESS_TOKEN');
+    args.push('-e', 'GH_TOKEN');
   }
 
   // Runtime-specific args for host gateway resolution
@@ -384,9 +390,14 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    // Inject the GitHub PAT only into the runtime's process environment
-    // (never argv), matching the `-e GITHUB_PERSONAL_ACCESS_TOKEN`
-    // passthrough flag added in buildContainerArgs.
+    // Inject the GitHub PAT into the runtime's process environment (never
+    // argv), matching the `-e GITHUB_PERSONAL_ACCESS_TOKEN` and `-e GH_TOKEN`
+    // passthrough flags added in buildContainerArgs.
+    //
+    // GITHUB_PERSONAL_ACCESS_TOKEN — used by the GitHub MCP server.
+    // GH_TOKEN                     — used by the gh CLI (different name,
+    //                                same value). Without this, `gh api`
+    //                                calls in task script gates fail silently.
     const githubToken = getGithubToken();
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -395,6 +406,7 @@ export async function runContainerAgent(
             env: {
               ...process.env,
               GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
+              GH_TOKEN: githubToken,
             },
           }
         : {}),
