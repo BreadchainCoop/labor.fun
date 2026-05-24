@@ -339,9 +339,10 @@ describe('container-runner Google Workspace credentials mount', () => {
     delete process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE;
     // Reset fs mocks back to the "nothing exists" defaults
     vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
-    vi.mocked(fs.statSync).mockImplementation(
-      (() => ({ isDirectory: () => false, isFile: () => false })) as never,
-    );
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => false,
+      isFile: () => false,
+    })) as never);
   });
 
   afterEach(() => {
@@ -372,12 +373,11 @@ describe('container-runner Google Workspace credentials mount', () => {
 
   it('mounts creds file and injects env var when path is valid', async () => {
     process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = HOST_CREDS_PATH;
-    vi.mocked(fs.realpathSync).mockImplementation(
-      ((p: string) => p) as never,
-    );
-    vi.mocked(fs.statSync).mockImplementation(
-      (() => ({ isDirectory: () => false, isFile: () => true })) as never,
-    );
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+    })) as never);
 
     await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
 
@@ -392,8 +392,9 @@ describe('container-runner Google Workspace credentials mount', () => {
     );
     expect(
       args.some(
-        (a) => a.includes('GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE') &&
-              a.includes(HOST_CREDS_PATH),
+        (a) =>
+          a.includes('GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE') &&
+          a.includes(HOST_CREDS_PATH),
       ),
     ).toBe(false);
   });
@@ -430,12 +431,11 @@ describe('container-runner Google Workspace credentials mount', () => {
 
   it('omits mount and logs a warning when the path is a directory, not a file', async () => {
     process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = HOST_CREDS_PATH;
-    vi.mocked(fs.realpathSync).mockImplementation(
-      ((p: string) => p) as never,
-    );
-    vi.mocked(fs.statSync).mockImplementation(
-      (() => ({ isDirectory: () => true, isFile: () => false })) as never,
-    );
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => true,
+      isFile: () => false,
+    })) as never);
 
     await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
 
@@ -450,12 +450,11 @@ describe('container-runner Google Workspace credentials mount', () => {
   it('rejects paths that resolve under blocked patterns (e.g. ~/.ssh)', async () => {
     const sshPath = '/home/test/.ssh/id_rsa';
     process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = sshPath;
-    vi.mocked(fs.realpathSync).mockImplementation(
-      ((p: string) => p) as never,
-    );
-    vi.mocked(fs.statSync).mockImplementation(
-      (() => ({ isDirectory: () => false, isFile: () => true })) as never,
-    );
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+    })) as never);
 
     await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
 
