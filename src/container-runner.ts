@@ -252,6 +252,19 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // Google Workspace credentials file for the bundled `gws` MCP server.
+  // Mounted read-only at a fixed in-container path so its contents (refresh
+  // token + access token) never appear in argv or env values. Container env
+  // var GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE points the MCP server at it.
+  const gwsCredsHostPath = getGoogleWorkspaceCredsPath();
+  if (gwsCredsHostPath && fs.existsSync(gwsCredsHostPath)) {
+    mounts.push({
+      hostPath: gwsCredsHostPath,
+      containerPath: CONTAINER_GWS_CREDS_PATH,
+      readonly: true,
+    });
+  }
+
   return mounts;
 }
 
@@ -268,6 +281,25 @@ function getGithubToken(): string | undefined {
   return (
     readEnvFile(['GITHUB_PERSONAL_ACCESS_TOKEN'])
       .GITHUB_PERSONAL_ACCESS_TOKEN || process.env.GITHUB_PERSONAL_ACCESS_TOKEN
+  );
+}
+
+// Fixed in-container path for the mounted gws credentials file. The host
+// path comes from GOOGLE_WORKSPACE_CREDENTIALS_FILE (.env or process.env).
+const CONTAINER_GWS_CREDS_PATH = '/run/secrets/gws-credentials.json';
+
+/**
+ * Host path to the Google Workspace CLI credentials file, read from .env
+ * (with process.env fallback). When set and the file exists, the gws MCP
+ * server is enabled inside the container with read-only access to the
+ * file. Returns undefined when unset, which leaves Google Workspace tools
+ * disabled.
+ */
+function getGoogleWorkspaceCredsPath(): string | undefined {
+  return (
+    readEnvFile(['GOOGLE_WORKSPACE_CREDENTIALS_FILE'])
+      .GOOGLE_WORKSPACE_CREDENTIALS_FILE ||
+    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE
   );
 }
 
@@ -319,6 +351,17 @@ function buildContainerArgs(
   if (getGithubToken()) {
     args.push('-e', 'GITHUB_PERSONAL_ACCESS_TOKEN');
     args.push('-e', 'GH_TOKEN');
+  }
+
+  // Google Workspace MCP: only the in-container path goes in argv (not a
+  // secret); actual credentials live in the read-only mounted file. The
+  // env var presence is what flips hasGoogleWorkspace inside agent-runner.
+  const gwsCredsHostPath = getGoogleWorkspaceCredsPath();
+  if (gwsCredsHostPath && fs.existsSync(gwsCredsHostPath)) {
+    args.push(
+      '-e',
+      `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=${CONTAINER_GWS_CREDS_PATH}`,
+    );
   }
 
   // Runtime-specific args for host gateway resolution
