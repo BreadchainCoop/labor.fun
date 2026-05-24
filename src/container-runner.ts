@@ -256,8 +256,8 @@ function buildVolumeMounts(
   // Mounted read-only at a fixed in-container path so its contents (refresh
   // token + access token) never appear in argv or env values. Container env
   // var GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE points the MCP server at it.
-  const gwsCredsHostPath = getGoogleWorkspaceCredsPath();
-  if (gwsCredsHostPath && fs.existsSync(gwsCredsHostPath)) {
+  const gwsCredsHostPath = resolveGoogleWorkspaceCredsPath();
+  if (gwsCredsHostPath) {
     mounts.push({
       hostPath: gwsCredsHostPath,
       containerPath: CONTAINER_GWS_CREDS_PATH,
@@ -288,19 +288,76 @@ function getGithubToken(): string | undefined {
 // path comes from GOOGLE_WORKSPACE_CREDENTIALS_FILE (.env or process.env).
 const CONTAINER_GWS_CREDS_PATH = '/run/secrets/gws-credentials.json';
 
+// Paths that have no business being mounted as a Workspace credentials file —
+// matched against the resolved realpath. Catches accidents (e.g. env var set
+// to ~/.ssh/id_rsa or /etc/passwd), not adversarial operators (who already
+// control .env). A rejected path skips the mount and logs a warning.
+const GWS_CREDS_BLOCKED_PATTERNS = [
+  '.ssh',
+  '.gnupg',
+  '.gpg',
+  '.aws',
+  '.azure',
+  '.kube',
+  '.docker',
+  '.netrc',
+  'id_rsa',
+  'id_ed25519',
+  '/etc/passwd',
+  '/etc/shadow',
+];
+
 /**
- * Host path to the Google Workspace CLI credentials file, read from .env
- * (with process.env fallback). When set and the file exists, the gws MCP
- * server is enabled inside the container with read-only access to the
- * file. Returns undefined when unset, which leaves Google Workspace tools
- * disabled.
+ * Resolve and validate the host path to the Google Workspace CLI credentials
+ * file. Reads from .env (with process.env fallback); when set, the file must
+ * (a) exist, (b) be a regular file, and (c) not resolve to a path matching
+ * any blocked pattern. On any validation failure, logs a warning and returns
+ * undefined — which leaves Google Workspace tools disabled inside the
+ * container rather than mounting an unintended host file.
  */
-function getGoogleWorkspaceCredsPath(): string | undefined {
-  return (
+function resolveGoogleWorkspaceCredsPath(): string | undefined {
+  const raw =
     readEnvFile(['GOOGLE_WORKSPACE_CREDENTIALS_FILE'])
       .GOOGLE_WORKSPACE_CREDENTIALS_FILE ||
-    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE
-  );
+    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE;
+  if (!raw) return undefined;
+
+  let realPath: string;
+  try {
+    realPath = fs.realpathSync(raw);
+  } catch {
+    logger.warn(
+      { path: raw },
+      'GOOGLE_WORKSPACE_CREDENTIALS_FILE set but path does not exist — gws MCP disabled',
+    );
+    return undefined;
+  }
+
+  let isFile = false;
+  try {
+    isFile = fs.statSync(realPath).isFile();
+  } catch {
+    isFile = false;
+  }
+  if (!isFile) {
+    logger.warn(
+      { path: raw, realPath },
+      'GOOGLE_WORKSPACE_CREDENTIALS_FILE is not a regular file — gws MCP disabled',
+    );
+    return undefined;
+  }
+
+  for (const pattern of GWS_CREDS_BLOCKED_PATTERNS) {
+    if (realPath.includes(pattern)) {
+      logger.warn(
+        { path: raw, realPath, blockedPattern: pattern },
+        'GOOGLE_WORKSPACE_CREDENTIALS_FILE resolves to a path matching a blocked pattern — gws MCP disabled',
+      );
+      return undefined;
+    }
+  }
+
+  return realPath;
 }
 
 function buildContainerArgs(
@@ -356,8 +413,9 @@ function buildContainerArgs(
   // Google Workspace MCP: only the in-container path goes in argv (not a
   // secret); actual credentials live in the read-only mounted file. The
   // env var presence is what flips hasGoogleWorkspace inside agent-runner.
-  const gwsCredsHostPath = getGoogleWorkspaceCredsPath();
-  if (gwsCredsHostPath && fs.existsSync(gwsCredsHostPath)) {
+  // Validation happens inside resolveGoogleWorkspaceCredsPath() — keep the
+  // two call sites in sync by reusing the same resolver.
+  if (resolveGoogleWorkspaceCredsPath()) {
     args.push(
       '-e',
       `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=${CONTAINER_GWS_CREDS_PATH}`,
