@@ -45,9 +45,9 @@ bash -c '
 
 # Using fetch (for non-GitHub APIs)
 bash -c 'node --input-type=module -e "
-  const r = await fetch(\"https://api.github.com/repos/owner/repo/pulls?state=open\");
-  const prs = await r.json();
-  console.log(JSON.stringify({ wakeAgent: prs.length > 0, data: prs.slice(0, 5) }));
+  const r = await fetch(\"https://api.example.com/status\");
+  const data = await r.json();
+  console.log(JSON.stringify({ wakeAgent: data.hasUpdates === true, data }));
 "'
 ```
 
