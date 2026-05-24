@@ -99,7 +99,7 @@ Execution history for scheduled tasks.
 | error | TEXT | Error details if failed |
 
 ### user_identities
-Maps platform-specific IDs to KB person names. Presence of a row here means the sender is allowlisted — under the flat permission model that is the single permission predicate.
+Maps platform-specific IDs to KB person names — the identity-resolution allowlist. The orchestrator writes a `sender_context.json` (with the resolved `user_id`) only for senders that have a row here, and every gated IPC handler authorizes based on the presence of that validated sender context. Note that the chat-level intake filter (`sender-allowlist.json`) is a separate, earlier gate — it controls who can speak to the agent at all before any of this matters.
 
 | Column | Type | Notes |
 |---|---|---|

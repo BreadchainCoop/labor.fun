@@ -15,8 +15,11 @@ function allowlistedCtx() {
   return {
     sourceGroup: SOURCE_MAIN,
     isMain: true,
-    hasSenderCtx: true,
-    senderId: 'tg:42@user',
+    senderCtx: {
+      user_id: 'tg:42@user',
+      display_name: 'Test User',
+      tags: [],
+    },
   };
 }
 
@@ -105,10 +108,10 @@ describe('handleModifyGroupClaudeMd', () => {
     expect(fs.existsSync(TARGET_FILE)).toBe(true);
   });
 
-  it('rejects when there is no allowlisted sender and source is not main', () => {
+  it('rejects when there is no validated sender (even from a main group)', () => {
     const result = handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: 'X' },
-      { ...allowlistedCtx(), isMain: false, hasSenderCtx: false },
+      { ...allowlistedCtx(), senderCtx: null },
     );
 
     expect(result.status).toBe('rejected');
@@ -169,13 +172,20 @@ describe('handleModifyGroupClaudeMd', () => {
     expect(result.bytesAfter).toBe(200 * 1024);
   });
 
-  it('falls back to "unknown@<source>" when senderId is null', () => {
+  it('records the sender user_id in the audit log', () => {
     handleModifyGroupClaudeMd(
       { target_folder: TARGET_FOLDER, new_content: 'X' },
-      { ...allowlistedCtx(), senderId: null },
+      {
+        ...allowlistedCtx(),
+        senderCtx: {
+          user_id: 'discord:99@alice',
+          display_name: 'Alice',
+          tags: ['ops'],
+        },
+      },
     );
 
     const audit = readAuditRows();
-    expect(audit[0].changed_by).toBe(`unknown@${SOURCE_MAIN}`);
+    expect(audit[0].changed_by).toBe('discord:99@alice');
   });
 });

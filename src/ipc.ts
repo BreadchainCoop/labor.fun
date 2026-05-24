@@ -88,33 +88,56 @@ function getEmailTransporter(): nodemailer.Transporter | null {
 const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
 
 // Flat permission model: any allowlisted (known) sender can write any KB
-// file. Unknown senders are rejected. Path traversal is still scrubbed.
+// file. Unknown senders are rejected. Callers are responsible for
+// normalizing the path and confirming it resolves under KB_CONTEXT_DIR
+// before invoking fs writes — this helper only owns the identity gate.
 function canModifyKbFile(
-  filePath: string,
-  senderCtx: { tags?: string[] } | null,
+  senderCtx: IpcSenderCtx | null,
 ): { allowed: boolean; reason: string } {
   if (!senderCtx) {
     return { allowed: false, reason: 'Unknown sender — no identity mapping' };
   }
-  // Scrub path traversal as a defense-in-depth measure; the caller has
-  // already validated the file lives under KB_CONTEXT_DIR.
-  void filePath.replace(/^\/+/, '').replace(/\.\./g, '');
   return { allowed: true, reason: 'Allowlisted sender' };
 }
 
+/**
+ * Validated per-IPC-call sender context. A non-null value means the
+ * orchestrator resolved the sender to a known KB person; `user_id` is the
+ * single authoritative attribution field downstream code may rely on.
+ */
 interface IpcSenderCtx {
-  user_id?: string;
-  display_name?: string;
-  tags?: string[];
+  user_id: string;
+  display_name: string;
+  tags: string[];
+}
+
+/**
+ * Parse and validate a raw sender_context payload. Returns null when
+ * `user_id` is missing or not a non-empty string — the orchestrator never
+ * writes a context without one, so a missing `user_id` means corrupted /
+ * untrusted input and must not pass any allowlist gate.
+ */
+function parseSenderCtx(raw: unknown): IpcSenderCtx | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const userId = typeof obj.user_id === 'string' ? obj.user_id.trim() : '';
+  if (!userId) return null;
+  const displayName =
+    typeof obj.display_name === 'string' && obj.display_name.trim() !== ''
+      ? obj.display_name
+      : userId;
+  const tags = Array.isArray(obj.tags)
+    ? obj.tags.filter((t): t is string => typeof t === 'string')
+    : [];
+  return { user_id: userId, display_name: displayName, tags };
 }
 
 /**
  * Read the per-IPC-call sender context written by the orchestrator.
- * Returns null when absent (e.g. scheduled-task triggers carry no sender).
- *
- * `ipcBaseDir` is passed explicitly because the IPC watcher needs the path
- * during construction; helpers in this file that operate after construction
- * can use `readSenderContext(sourceGroup)` (which uses `DATA_DIR`).
+ * Returns null when absent (scheduled-task triggers carry no sender) or
+ * when the file fails validation. Used by the IPC watcher during its
+ * directory scan; the equivalent helper anchored at DATA_DIR is
+ * `readSenderContext(sourceGroup)` below.
  */
 function readSenderCtxFromDir(
   ipcBaseDir: string,
@@ -127,13 +150,11 @@ function readSenderCtxFromDir(
       'input',
       'sender_context.json',
     );
-    if (fs.existsSync(ctxPath)) {
-      return JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-    }
+    if (!fs.existsSync(ctxPath)) return null;
+    return parseSenderCtx(JSON.parse(fs.readFileSync(ctxPath, 'utf-8')));
   } catch {
-    /* ignore */
+    return null;
   }
-  return null;
 }
 
 export interface IpcDeps {
@@ -352,14 +373,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 if (!senderCtx && isMain) {
                   // Main-group origin without an attached sender (e.g. a
                   // scheduled task fired in the control channel) is
-                  // implicitly authorized.
-                  senderCtx = { tags: [] };
+                  // implicitly authorized; attribute the audit trail to a
+                  // synthetic system identity so the gate stays
+                  // semantically a *validated* allowlist hit.
+                  senderCtx = {
+                    user_id: `system:scheduled@${sourceGroup}`,
+                    display_name: 'scheduled task',
+                    tags: [],
+                  };
                 }
 
-                const { allowed, reason } = canModifyKbFile(
-                  data.filePath,
-                  senderCtx,
-                );
+                const { allowed, reason } = canModifyKbFile(senderCtx);
 
                 if (allowed) {
                   const normalized = data.filePath
@@ -404,19 +428,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 data.target_telegram_jid
               ) {
                 // Create a KB-UI auth entry + DM the credentials.
-                // Flat model: any allowlisted sender may invoke; the
-                // source-group main flag is no longer a gate.
+                // Flat model: any allowlisted sender may invoke. This op
+                // creates auth credentials so we require a validated
+                // sender_context with a real user_id for attribution —
+                // implicit isMain (scheduled task in the control channel)
+                // does NOT pass; the orchestrator must attach a sender.
                 const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
-                const hasSenderCtx = senderCtx !== null;
 
-                if (!hasSenderCtx && !isMain) {
+                if (!senderCtx) {
                   logger.warn(
                     {
                       sourceGroup,
                       isMain,
                       username: data.username,
                     },
-                    'add_kb_user rejected — requires allowlisted sender',
+                    'add_kb_user rejected — requires validated allowlisted sender (user_id)',
                   );
                 } else if (!/^[a-z][a-z0-9_-]{0,31}$/.test(data.username)) {
                   logger.warn(
@@ -462,6 +488,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                           username: data.username,
                           target: data.target_telegram_jid,
                           sourceGroup,
+                          createdBy: senderCtx.user_id,
                         },
                         "KB user created and credentials DM'd",
                       );
@@ -479,13 +506,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 typeof data.new_content === 'string'
               ) {
                 // Rewrite another group's CLAUDE.md. Flat model: any
-                // allowlisted sender may invoke. See
-                // handleModifyGroupClaudeMd for input validation + audit.
+                // allowlisted sender may invoke. This op rewrites another
+                // group's agent memory and is audited; we require a
+                // validated sender_context (user_id) so every entry in
+                // kb_audit_log is attributable to a real allowlisted user.
                 const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
-                const senderId =
-                  typeof senderCtx?.user_id === 'string'
-                    ? senderCtx.user_id
-                    : null;
                 handleModifyGroupClaudeMd(
                   {
                     target_folder: data.target_folder,
@@ -495,12 +520,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         ? data.summary
                         : undefined,
                   },
-                  {
-                    sourceGroup,
-                    isMain,
-                    hasSenderCtx: senderCtx !== null,
-                    senderId,
-                  },
+                  { sourceGroup, isMain, senderCtx },
                 );
               }
               fs.unlinkSync(filePath);
@@ -568,14 +588,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
 // --- Cross-group CLAUDE.md modification ---
 //
 // Any allowlisted sender (from any registered group) can rewrite any other
-// group's CLAUDE.md via this IPC, and a main-group origin without an
-// attached sender (e.g. scheduled task in the control channel) is also
-// authorized. Read-direction visibility (G1: /workspace/all-groups mount)
-// lets agents learn what's happening; this is the write-direction
-// counterpart.
+// group's CLAUDE.md via this IPC. Because the write is silent and
+// privileged (it changes how another group's agent behaves) we require a
+// validated sender_context — implicit isMain (a scheduled task in the
+// control channel without an attached user) is NOT accepted, so every
+// kb_audit_log entry is attributable to a real allowlisted user_id.
+// Read-direction visibility (G1: /workspace/all-groups mount) lets agents
+// learn what's happening; this is the write-direction counterpart.
 //
 // Gates compose AND, not OR:
-//   1. allowlisted    — source group is main OR sender_context.json is present
+//   1. allowlisted    — sender_context with a validated user_id is present
 //   2. valid folder   — isValidGroupFolder rejects path-traversal attempts
 //   3. size cap       — refuses pathological payloads
 //
@@ -603,20 +625,19 @@ export function handleModifyGroupClaudeMd(
   ctx: {
     sourceGroup: string;
     isMain: boolean;
-    hasSenderCtx: boolean;
-    senderId: string | null;
+    senderCtx: IpcSenderCtx | null;
   },
 ): ModifyGroupClaudeMdResult {
   const { target_folder, new_content, summary } = input;
 
-  if (!ctx.isMain && !ctx.hasSenderCtx) {
+  if (!ctx.senderCtx) {
     logger.warn(
       {
         sourceGroup: ctx.sourceGroup,
         isMain: ctx.isMain,
         target_folder,
       },
-      'modify_group_claude_md rejected — requires allowlisted sender',
+      'modify_group_claude_md rejected — requires validated allowlisted sender (user_id)',
     );
     return { status: 'rejected', reason: 'unauthorized' };
   }
@@ -673,7 +694,7 @@ export function handleModifyGroupClaudeMd(
     logKbAudit({
       filePath: targetPath,
       action: 'modify_group_claude_md',
-      changedBy: ctx.senderId ?? `unknown@${ctx.sourceGroup}`,
+      changedBy: ctx.senderCtx.user_id,
       changes: {
         sourceGroup: ctx.sourceGroup,
         targetFolder: target_folder,
@@ -1926,32 +1947,13 @@ export async function processTaskIpc(
 
 // --- Expense helpers ---
 
-interface IpcSenderContext {
-  user_id: string;
-  display_name: string;
-  tags: string[];
-}
+type IpcSenderContext = IpcSenderCtx;
 
+// Convenience wrapper around `readSenderCtxFromDir` anchored at DATA_DIR,
+// for helpers defined outside `startIpcWatcher`'s closure (where the IPC
+// base directory isn't already in scope).
 function readSenderContext(sourceGroup: string): IpcSenderContext | null {
-  try {
-    const ctxPath = path.join(
-      DATA_DIR,
-      'ipc',
-      sourceGroup,
-      'input',
-      'sender_context.json',
-    );
-    if (!fs.existsSync(ctxPath)) return null;
-    const parsed = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-    if (typeof parsed?.user_id !== 'string') return null;
-    return {
-      user_id: parsed.user_id,
-      display_name: parsed.display_name || parsed.user_id,
-      tags: Array.isArray(parsed.tags) ? parsed.tags : [],
-    };
-  } catch {
-    return null;
-  }
+  return readSenderCtxFromDir(path.join(DATA_DIR, 'ipc'), sourceGroup);
 }
 
 function findMainGroupJid(
