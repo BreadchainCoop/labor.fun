@@ -91,9 +91,10 @@ const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
 // file. Unknown senders are rejected. Callers are responsible for
 // normalizing the path and confirming it resolves under KB_CONTEXT_DIR
 // before invoking fs writes — this helper only owns the identity gate.
-function canModifyKbFile(
-  senderCtx: IpcSenderCtx | null,
-): { allowed: boolean; reason: string } {
+function canModifyKbFile(senderCtx: IpcSenderCtx | null): {
+  allowed: boolean;
+  reason: string;
+} {
   if (!senderCtx) {
     return { allowed: false, reason: 'Unknown sender — no identity mapping' };
   }
