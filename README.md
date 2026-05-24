@@ -53,11 +53,11 @@ Accessible at [kb.example.com](https://kb.example.com) (Cloudflare tunnel → Ex
 
 ## Database
 
-SQLite (`store/messages.db`) with 9 tables. Full schema in [`schema/tables.md`](schema/tables.md).
+SQLite (`store/messages.db`). Full schema in [`schema/tables.md`](schema/tables.md).
 
 Core: `chats`, `messages`, `registered_groups`, `sessions`, `router_state`
 Operational: `scheduled_tasks`, `task_run_logs`
-Identity: `user_identities`, `tag_hierarchy`
+Identity: `user_identities`
 
 ## Deployment
 

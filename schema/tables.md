@@ -99,26 +99,13 @@ Execution history for scheduled tasks.
 | error | TEXT | Error details if failed |
 
 ### user_identities
-Maps platform-specific IDs to KB person names for RBAC.
+Maps platform-specific IDs to KB person names — the identity-resolution allowlist. The orchestrator writes a `sender_context.json` (with the resolved `user_id`) only for senders that have a row here, and every gated IPC handler authorizes based on the presence of that validated sender context. Note that the chat-level intake filter (`sender-allowlist.json`) is a separate, earlier gate — it controls who can speak to the agent at all before any of this matters.
 
 | Column | Type | Notes |
 |---|---|---|
 | **platform_id** | TEXT | Platform-specific user ID (composite PK) |
-| **platform** | TEXT | slack, telegram, cli, etc. |
+| **platform** | TEXT | slack, telegram, discord, cli, etc. |
 | kb_person | TEXT | KB person identifier (e.g. bob, alice) |
-
-### tag_hierarchy
-RBAC permission tree defining which tags can assign other tags.
-
-| Column | Type | Notes |
-|---|---|---|
-| **parent_tag** | TEXT | Holder tag (composite PK) |
-| **child_tag** | TEXT | Assignable tag |
-
-Default hierarchy:
-- `admin` -> leadership, engineering, creative, operations, community
-- `leadership` -> engineering, creative, operations, community
-- `coordinator` -> operations, community
 
 ### app_users
 People records used for assignment and identity resolution.

@@ -15,7 +15,7 @@ mcp__nanoclaw__send_message(text="Message here", target_jid="tg:1234567890")
 
 ## Who Can Cross-Send
 
-Only users with `admin` or `coordinator` tags. See [../access-control/role-matrix.md](../access-control/role-matrix.md).
+Any allowlisted user, from any registered group. See [../access-control/role-matrix.md](../access-control/role-matrix.md).
 
 ## Looking Up a JID
 

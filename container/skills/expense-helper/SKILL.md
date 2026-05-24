@@ -54,12 +54,12 @@ If the user mentions an event by name or the conversation context includes an ev
 - **Duplicate submissions**: before submitting, check if the requester already has a similar recent expense; if a match exists, ask if they want to reference the existing one.
 - **Cross-group**: expenses can be requested from any group, but approval notifications go to the main group. Tell the user where the request is going.
 - **Self-approval blocked**: the orchestrator rejects approvals by the requester.
-- **Tier enforcement**: the orchestrator rejects approvals above the sender's tier (coordinators limited to < $500; retrospective needs admin).
+- **Unknown senders blocked**: the orchestrator requires an allowlisted sender (a `sender_context`) for any approval. Any allowlisted user can approve any amount, prospective or retrospective.
 
 ## Status vocabulary (for rendering/responses)
 
 - `pending_approval` — new prospective request awaiting decision
-- `submitted_retro` — new retrospective request awaiting admin review
+- `submitted_retro` — new retrospective request awaiting review
 - `receipt_pending` — approved prospective, waiting on receipt
 - `receipt_submitted` — receipt in, ready for finance
 - `approved_retro` — retrospective approved, ready for finance

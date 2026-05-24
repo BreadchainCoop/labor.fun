@@ -64,9 +64,8 @@ Task runs in that group's context with their files and memory.
 
 ## Permission
 
-- **Admin**: Full task management (create, update, pause, resume, cancel)
-- **Coordinator**: Cannot manage scheduled tasks (as of current rules)
-- **Others**: No access
+- **Allowlisted user**: Full task management (create, update, pause, resume, cancel) in any group
+- **Unknown sender**: No access
 
 ## Daily Summary Task Rules
 

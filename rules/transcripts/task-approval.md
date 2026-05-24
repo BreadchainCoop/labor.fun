@@ -1,18 +1,14 @@
 # Transcript Task Approval Rules
 
-Action items extracted from meeting transcripts go through a coordinator approval queue before they become real KB tasks. This file is the source of truth for that workflow.
+Action items extracted from meeting transcripts go through a review queue before they become real KB tasks. This file is the source of truth for that workflow.
 
 ## Why this exists
 
-Transcript extraction is noisy: misheard names, duplicates of existing TASK-NNN entries, scope creep, ambiguous "we should..." statements. A coordinator review gate keeps the KB clean and prevents notifications firing for tasks that nobody actually owns.
+Transcript extraction is noisy: misheard names, duplicates of existing TASK-NNN entries, scope creep, ambiguous "we should..." statements. A human review gate keeps the KB clean and prevents notifications firing for tasks that nobody actually owns.
 
 ## Who can approve
 
-- Anyone tagged `coordinator` in `context/people/*.md`.
-- Admins (per `context/index.md` "## Admins") can also approve, since admin permissions are a superset of coordinator.
-- **Self-approval is allowed.** A coordinator who submitted the transcript may approve its proposed tasks. There is no "second pair of eyes" requirement at the host layer.
-
-The host enforces this — calls from non-coordinators are dropped with a warning posted back to the main group.
+Any allowlisted user. The host rejects calls without a `sender_context` (unknown sender) and posts a warning back to the main group. Self-approval is allowed — the user who submitted the transcript may approve its proposed tasks. There is no "second pair of eyes" requirement at the host layer.
 
 ## What goes through the gate
 
@@ -32,9 +28,9 @@ The gate is narrow on purpose. Only the highest-noise item type — new tasks �
 [transcript submitted]
   → save_meeting_summary       → meeting_summaries row (status=pending|completed)
   → propose_meeting_tasks      → N proposed_tasks rows (status=pending)
-  → coordinator notified in main group with PT-IDs
+  → reviewers notified in main group with PT-IDs
        ↓
-[coordinator decides per-row]
+[reviewer decides per-row]
   → approve_proposed_tasks (bulk)  → status=approved → host writes TASK-NNN.md → status=created
   → reject_proposed_task           → status=rejected (no KB write)
 ```
@@ -54,12 +50,12 @@ When processing a transcript:
 3. **Do NOT** call `modify_kb_file` to create new TASK-NNN files derived from a transcript. Those go through the approval queue.
 4. People, events, and artifacts mentioned in the transcript still go through `modify_kb_file` directly — no gate.
 
-## When the coordinator responds
+## When the reviewer responds
 
-After the coordinator-review message is posted, the coordinator will reply in natural language (e.g. "approve PT-1714060800000-0 and PT-1714060800000-2, reject PT-1714060800000-1"). The agent translates that into:
+After the review message is posted, a user will reply in natural language (e.g. "approve PT-1714060800000-0 and PT-1714060800000-2, reject PT-1714060800000-1"). The agent translates that into:
 
-- `approve_proposed_tasks` with an array of items (one entry per approved row, with optional `final_title` / `final_assignee` / `final_due_date` overrides if the coordinator asked to refine).
-- `reject_proposed_task` per rejected row, with the coordinator's reason if any.
+- `approve_proposed_tasks` with an array of items (one entry per approved row, with optional `final_title` / `final_assignee` / `final_due_date` overrides if the user asked to refine).
+- `reject_proposed_task` per rejected row, with the user's reason if any.
 
 Bulk approval is encouraged — one tool call covers the whole batch.
 
@@ -73,7 +69,7 @@ Bulk approval is encouraged — one tool call covers the whole batch.
 
 - A `proposed_task` row cannot transition out of `created` or `rejected`. Final states.
 - Approval is idempotent — calling `approve_proposed_tasks` with already-created rows skips them with a "skipped" line in the response message.
-- The host always writes the TASK-NNN.md file with the assigned KB person stored under `created_by` (the coordinator who approved). The original transcript submitter's name is preserved in the `source_quote` and in the meeting_summaries record.
+- The host always writes the TASK-NNN.md file with the assigned KB person stored under `created_by` (the user who approved). The original transcript submitter's name is preserved in the `source_quote` and in the meeting_summaries record.
 - Rejected tasks remain in the `proposed_tasks` table for audit. They are not deleted.
 
 ## Related files
