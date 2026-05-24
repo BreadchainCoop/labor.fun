@@ -64,7 +64,7 @@ const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
-const hasGoogleCalendar = !!process.env.GOOGLE_OAUTH_CREDENTIALS;
+const hasGoogleWorkspace = !!process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
 const hasGithub = !!process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
 
 /**
@@ -479,7 +479,7 @@ async function runQuery(
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        ...(hasGoogleCalendar ? ['mcp__google-calendar__*'] : []),
+        ...(hasGoogleWorkspace ? ['mcp__gws__*'] : []),
         ...(hasGithub ? ['mcp__github__*'] : []),
       ],
       env: sdkEnv,
@@ -496,16 +496,18 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
-        ...(hasGoogleCalendar
+        ...(hasGoogleWorkspace
           ? {
-              'google-calendar': {
-                command: 'google-calendar-mcp',
-                args: [],
+              gws: {
+                command: 'gws',
+                args: [
+                  'mcp',
+                  '-s',
+                  'drive,gmail,calendar,docs,sheets,tasks',
+                ],
                 env: {
-                  GOOGLE_OAUTH_CREDENTIALS:
-                    process.env.GOOGLE_OAUTH_CREDENTIALS!,
-                  GOOGLE_ACCOUNT_MODE:
-                    process.env.GOOGLE_ACCOUNT_MODE || 'breadbrich',
+                  GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:
+                    process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE!,
                 },
               },
             }
