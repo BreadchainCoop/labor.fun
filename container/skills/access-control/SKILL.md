@@ -1,65 +1,45 @@
 ---
 name: access-control
-description: Reference skill for Breadbrich Engels's access control rules. Check who can see/do what, verify permissions, and understand the role hierarchy. Read-only.
+description: Reference skill for Breadbrich Engels's flat access control model. There is one tier — allowlisted users have full access; unknown senders have none. Read-only.
 ---
 
 # /access-control — Permission Check & Reference
 
-Quick-reference for Breadbrich Engels's access control system. Use when checking permissions or explaining what a user can/cannot do.
+Quick-reference for Breadbrich Engels's access control. Use when checking whether the caller can perform an action.
 
-## Role Hierarchy
+## Two States
 
-| Role | Who | Level |
-|------|-----|-------|
-| **Superadmin** | alice, bob | Full access, credentials, structure changes |
-| **Admin** | alice, ops, bob, carol | All KB, logs, manage groups/tasks, personnel notes |
-| **Coordinator** | dave | Broad write (calendar/tasks/artifacts), read non-private, trigger deploys |
-| **Contributor** | Team members | Read open docs, add tasks, update open info |
-| **Guest** | Anyone authenticated | Read open docs only |
+| State | Who | What they can do |
+|-------|-----|------------------|
+| **Allowlisted user** | Anyone with a `sender_context` (a KB people file + identity mapping) | Full read/write everywhere; cross-channel; manage tasks/groups; approve expenses |
+| **Unknown sender** | No KB identity mapping | Open-visibility reads only; no writes; no actions |
 
-## Permission Matrix
+That's the whole model. There are no Admin/Coordinator/Contributor/Guest tiers, and `tags:` on people files are descriptive labels only (no permission effect).
 
-| Permission | Superadmin | Admin | Coordinator | Contributor | Guest |
-|-----------|-----------|-------|-------------|-------------|-------|
-| View all KB docs | Yes | Yes | Yes (no personnel notes) | Open only | Open only |
-| Create/edit KB docs | Yes | Yes | Non-private dirs | No | No |
-| Cross-channel send | Yes | Yes | Yes | No | No |
-| Manage scheduled tasks | Yes | Yes | No | No | No |
-| Manage groups | Yes | Yes | No | No | No |
-| Trigger redeployment | Yes | Yes | Yes (standard only) | No | No |
-| View request logs | Yes | Yes | No | No | No |
-| View credentials | Yes | No | No | No | No |
-| Modify KB structure | Yes | No | No | No | No |
-| Manual rollback | Yes | Yes | No | No | No |
+## Visibility Frontmatter Still Applies
 
-## Core Principles
+Per-document `visibility:` controls **what gets shown**, not whether the user has write access:
 
-1. **Default deny** — if role unknown, treat as Guest
-2. **Check before sharing** — always read frontmatter `visibility` before surfacing content
-3. **Never leak in summaries** — private info must not appear in general updates
-4. **Append-only audit** — every interaction logged
-
-## Visibility Levels
-
-| Level | Who Can See |
-|-------|------------|
-| `open` | All authenticated users |
-| `restricted` | Admins + creator only |
-| `private` | Admins + explicit viewers only |
+| Level | Surfacing rule |
+|-------|---------------|
+| `open` | Safe in summaries and shared replies |
+| `restricted` | Surface only on direct request; not in summaries |
+| `private` | Surface only to the document's `created_by` or on explicit direct request, never in a shared channel without confirmation |
 
 ## Quick Permission Check Flow
 
 1. Identify the requester → `rules/identity/README.md`
-2. Check their role → table above
-3. Check document's `visibility` frontmatter
-4. Only then share content
+2. If they resolved to a KB person → allowlisted → action permitted
+3. Before surfacing a document, check its `visibility` frontmatter
 
-## Special Rules
+## Group-level `isMain`
 
-- **WTF List entries**: Always anonymous. Never record submitter identity.
-- **Personnel notes**: Admin-only. Never share with Coordinators.
-- **Credentials**: Superadmin-only.
-- **Side Project sensitive docs**: Restricted to Bob, Alice, Andrew Miller, dmarz, Dave.
+`isMain` is a property of a registered chat (the "control channel"). It is **not** a permission gate — an allowlisted user can do main-group operations from any registered group.
+
+## Special Surfacing Rules
+
+- **WTF List entries**: always anonymous; never record submitter identity
+- **People profiles**: private by default — don't proactively surface in channels; prefer DMs
 
 ## Related
 

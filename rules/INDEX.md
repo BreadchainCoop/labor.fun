@@ -17,9 +17,9 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 
 | Rule Set | Path | When to Read |
 |----------|------|-------------|
-| [Access Control](access-control/README.md) | `rules/access-control/` | Every interaction — determines what the requester can see/do |
+| [Access Control](access-control/README.md) | `rules/access-control/` | Every interaction — confirm requester is allowlisted |
 | [Privacy Policy](access-control/privacy-policy.md) | `rules/access-control/privacy-policy.md` | Before sharing ANY KB content |
-| [Role Matrix](access-control/role-matrix.md) | `rules/access-control/role-matrix.md` | When checking permissions |
+| [Capability Matrix](access-control/role-matrix.md) | `rules/access-control/role-matrix.md` | Allowlisted vs unknown — what each can do |
 | [Knowledge Base](knowledge-base/README.md) | `rules/knowledge-base/` | Any KB read/write operation |
 | [Task Management](knowledge-base/tasks.md) | `rules/knowledge-base/tasks.md` | Creating, updating, or querying tasks |
 | [Storage Systems](knowledge-base/storage.md) | `rules/knowledge-base/storage.md` | Understanding markdown KB vs SQLite DB |
@@ -30,10 +30,9 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 | [Channel Formatting](messaging/channel-formatting.md) | `rules/messaging/channel-formatting.md` | Before sending any message |
 | [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
-| [Identity & RBAC](identity/README.md) | `rules/identity/` | Resolving who is asking, what tags they have |
-| [Tag Hierarchy](identity/tag-hierarchy.md) | `rules/identity/tag-hierarchy.md` | When assigning or checking tags |
+| [Identity & Allowlist](identity/README.md) | `rules/identity/` | Resolving who is asking; allowlisted vs unknown |
 | [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
-| [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Coordinator approval gate for tasks proposed from meeting transcripts |
+| [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Approval gate for tasks proposed from meeting transcripts |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
 | [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on BreadchainCoop repos |

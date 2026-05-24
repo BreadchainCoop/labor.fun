@@ -1,6 +1,6 @@
 ---
 name: redeploy-breadbrich
-description: Trigger a Breadbrich Engels redeployment from the latest merged main branch. Requires Admin or Coordinator role. Follows the push → merge → deploy workflow — only deploys code already in git.
+description: Trigger a Breadbrich Engels redeployment from the latest merged main branch. Requires an allowlisted user. Follows the push → merge → deploy workflow — only deploys code already in git.
 ---
 
 # /redeploy-breadbrich — Trigger Redeployment
@@ -9,18 +9,14 @@ Trigger a Breadbrich Engels redeployment on the droplet. This skill follows the 
 
 ## Who Can Use This
 
-- **Superadmin** (bob, alice): Full access
-- **Admin** (carol, ops): Full access
-- **Coordinator** (dave): Can trigger standard redeployments. Cannot modify deploy scripts, `.env`, or service configuration.
-
-All other roles: denied. Respond with:
-> Redeployments require Admin or Coordinator access. Ask Bob or Dave to trigger this.
+Any allowlisted user. Unknown senders are denied — respond with:
+> Redeployments require an allowlisted user. If you don't see yourself in `context/people/`, ask someone who is already allowlisted to add you.
 
 ## Pre-Flight Checks
 
 Before triggering a deploy, verify:
 
-1. **Identity**: Confirm the requester is Admin or Coordinator via KB identity resolution
+1. **Identity**: Confirm the requester resolves to a KB person
 2. **Clean state**: Ask if there are any uncommitted changes or open PRs that should be merged first
 3. **Reason**: Log why the redeployment is being triggered
 
@@ -70,14 +66,13 @@ After deployment:
 - **Never deploy unmerged code** — all changes must be in git on `main`
 - **Never modify `.env`, `store/`, or `groups/` during deploy** — these are stateful and preserved
 - **Never skip the backup step** — `safe-deploy.sh` handles this automatically
-- **Coordinators cannot**: modify deploy scripts, change service configuration, access `.env` credentials, or run manual rollbacks
 
 ## Rollback
 
 If a deploy goes wrong and auto-rollback didn't catch it:
 
 ```bash
-# Admin only — manual rollback from latest pre-deploy snapshot
+# Manual rollback from latest pre-deploy snapshot
 ssh "$DROPLET_HOST"
 systemctl stop breadbrich
 cd /
@@ -85,8 +80,6 @@ tar -xzf /opt/breadbrich-backups/pre-deploy/breadbrich-pre-deploy-LATEST.tar.gz
 su - breadbrich -c "cd /opt/breadbrich && npm install --no-audit --no-fund"
 systemctl start breadbrich
 ```
-
-Manual rollback is **Admin-only** — Coordinators should escalate to Bob or Carol.
 
 ## Related
 

@@ -19,13 +19,9 @@
 - Approver may still deny retrospective expenses.
 - Retrospective expenses cannot be modified — only approved or denied as-submitted.
 
-## Approval Chain (by amount tier)
+## Approval
 
-| Amount | Approver |
-|--------|----------|
-| < $500 | Any `coordinator` or admin |
-| ≥ $500 | Admin only |
-| Retrospective (any amount) | Admin only |
+Any allowlisted user may approve any expense — prospective or retrospective, any amount. The only structural constraint is that requesters cannot approve their own expenses.
 
 ## Notifications
 - On request submission: notify the main group (approver queue).
@@ -39,12 +35,11 @@
 
 ## Constraints
 - Requesters cannot approve their own expenses.
-- Approvers cannot exceed their tier.
 - A modified amount does NOT re-enter approval — the requester either accepts the modified amount (by submitting a receipt) or cancels.
 - Retrospective expenses cannot be modified.
 - Receipts are required before reimbursement on all prospective expenses. No receipt = no payout.
 - Expenses linked to an `event_id` should roll up into that event's budget artifact.
-- Only finance-tagged members (or admins) can execute `process_reimbursement`.
+- Any allowlisted user can execute `process_reimbursement`.
 - Only the requester can attach a receipt or cancel their own expense.
 
 ## Lifecycle

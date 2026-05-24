@@ -47,16 +47,15 @@ Writes act as Breadbrich on real repositories. Apply the same care as the
 deployment rule in `CLAUDE.md`:
 
 - **Never push directly to `main`** or any protected branch. Branch → PR.
-- Open PRs for review; do not self-merge unless the requester is Admin or
-  Coordinator and explicitly asks.
+- Open PRs for review; do not self-merge unless an allowlisted user
+  explicitly asks.
 - Do not delete branches, force-push, or rewrite history without explicit
-  instruction from an authorized requester.
+  instruction from an allowlisted user.
 - Treat issue/PR comments as public, on-the-record statements from the org.
   Follow [Messaging](../messaging/README.md) tone.
-- Identity & authorization of the *requester* still applies — see
-  [Access Control](../access-control/README.md) and
-  [Role Matrix](../access-control/role-matrix.md) before acting on a
-  write request.
+- Identity & authorization of the *requester* still applies — confirm
+  they're allowlisted before acting on a write request. See
+  [Access Control](../access-control/README.md).
 
 ## Setup checklist (operator)
 

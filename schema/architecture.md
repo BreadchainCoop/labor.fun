@@ -15,8 +15,7 @@ type: project
 | `router_state` | key | value (JSON) | KV state persistence (last timestamps) |
 | `scheduled_tasks` | id | group_folder (FK), chat_jid (FK), prompt, script, schedule_type (cron\|interval\|once), schedule_value, context_mode, next_run, last_run, last_result, status, created_at | Task scheduling |
 | `task_run_logs` | id (AI) | task_id (FK), run_at, duration_ms, status (ok\|error), result, error | Task execution history |
-| `user_identities` | (platform_id, platform) | kb_person | Maps platform IDs to KB person names |
-| `tag_hierarchy` | (parent_tag, child_tag) | — | RBAC permission tree (admin→leadership→eng, etc.) |
+| `user_identities` | (platform_id, platform) | kb_person | Identity-resolution allowlist: the orchestrator writes `sender_context.json` only for senders with a row here. Chat-level intake (`sender-allowlist.json`) gates earlier. |
 
 **Indices:** messages(timestamp), scheduled_tasks(next_run, status), task_run_logs(task_id, run_at)
 

@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -43,7 +44,6 @@ import { writeApprovedTaskFile } from './kb-tasks.js';
 import { writeOutboundSnapshot } from './container-runner.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { isSenderAdmin } from './permissions.js';
 import { RegisteredGroup } from './types.js';
 
 // --- Email whitelist and transporter ---
@@ -88,47 +88,131 @@ function getEmailTransporter(): nodemailer.Transporter | null {
 
 const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
 
-// Directories coordinators can write to
-const COORDINATOR_WRITABLE = ['calendar', 'tasks', 'artifacts'];
+/**
+ * Resolve a KB-relative path against `KB_CONTEXT_DIR` and refuse anything
+ * that escapes it. Returns the absolute path on success, or null when the
+ * input is empty / non-string / resolves outside the KB context dir.
+ * Using `path.resolve` + a prefix check is the canonical Node pattern;
+ * substring-replacing `..` is fragile (e.g. `....//` survives).
+ */
+function resolveKbPath(input: unknown): string | null {
+  if (typeof input !== 'string' || input.trim() === '') return null;
+  // Strip leading slashes so absolute-looking inputs are treated as
+  // relative to KB_CONTEXT_DIR rather than re-anchoring at filesystem root.
+  const rel = input.replace(/^\/+/, '');
+  const resolved = path.resolve(KB_CONTEXT_DIR, rel);
+  const prefix = KB_CONTEXT_DIR.endsWith(path.sep)
+    ? KB_CONTEXT_DIR
+    : KB_CONTEXT_DIR + path.sep;
+  if (resolved !== KB_CONTEXT_DIR && !resolved.startsWith(prefix)) {
+    return null;
+  }
+  return resolved;
+}
 
-// Directories only admins can write to
-const ADMIN_ONLY = ['people'];
+/**
+ * Resolve breadbrich:breadbrich's numeric uid/gid once at startup so KB
+ * writes can transfer ownership without spawning a shell. Returns null
+ * when the user isn't present on this host (typical in dev), in which
+ * case the chown step is skipped — the orchestrator runs as
+ * `breadbrich` in production, so the write already lands with the right
+ * owner. The shell-out (previously `execSync(chown ...)`) was a
+ * command-injection sink whose input was agent-controlled; switching to
+ * `fs.chownSync` with cached numeric ids closes that.
+ */
+let kbOwnerIdsCached: { uid: number; gid: number } | null | undefined;
+function getKbOwnerIds(): { uid: number; gid: number } | null {
+  if (kbOwnerIdsCached !== undefined) return kbOwnerIdsCached;
+  try {
+    // execFileSync (no shell) with a literal username — no interpolation.
+    const uid = parseInt(
+      execFileSync('id', ['-u', 'breadbrich']).toString().trim(),
+      10,
+    );
+    const gid = parseInt(
+      execFileSync('id', ['-g', 'breadbrich']).toString().trim(),
+      10,
+    );
+    if (!Number.isFinite(uid) || !Number.isFinite(gid)) {
+      kbOwnerIdsCached = null;
+    } else {
+      kbOwnerIdsCached = { uid, gid };
+    }
+  } catch {
+    kbOwnerIdsCached = null;
+  }
+  return kbOwnerIdsCached;
+}
 
-function canModifyKbFile(
-  filePath: string,
-  senderCtx: { is_admin: boolean; tags?: string[] } | null,
-): { allowed: boolean; reason: string } {
+// Flat permission model: any allowlisted (known) sender can write any KB
+// file. Unknown senders are rejected. Callers are responsible for
+// normalizing the path and confirming it resolves under KB_CONTEXT_DIR
+// before invoking fs writes — this helper only owns the identity gate.
+function canModifyKbFile(senderCtx: IpcSenderCtx | null): {
+  allowed: boolean;
+  reason: string;
+} {
   if (!senderCtx) {
     return { allowed: false, reason: 'Unknown sender — no identity mapping' };
   }
+  return { allowed: true, reason: 'Allowlisted sender' };
+}
 
-  // Normalize path — strip leading slashes, prevent traversal
-  const normalized = filePath.replace(/^\/+/, '').replace(/\.\./g, '');
-  const topDir = normalized.split('/')[0];
+/**
+ * Validated per-IPC-call sender context. A non-null value means the
+ * orchestrator resolved the sender to a known KB person; `user_id` is the
+ * single authoritative attribution field downstream code may rely on.
+ */
+interface IpcSenderCtx {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+}
 
-  // Admin can write anything
-  if (senderCtx.is_admin) {
-    return { allowed: true, reason: 'Admin access' };
+/**
+ * Parse and validate a raw sender_context payload. Returns null when
+ * `user_id` is missing or not a non-empty string — the orchestrator never
+ * writes a context without one, so a missing `user_id` means corrupted /
+ * untrusted input and must not pass any allowlist gate.
+ */
+function parseSenderCtx(raw: unknown): IpcSenderCtx | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const userId = typeof obj.user_id === 'string' ? obj.user_id.trim() : '';
+  if (!userId) return null;
+  const displayName =
+    typeof obj.display_name === 'string' && obj.display_name.trim() !== ''
+      ? obj.display_name
+      : userId;
+  const tags = Array.isArray(obj.tags)
+    ? obj.tags.filter((t): t is string => typeof t === 'string')
+    : [];
+  return { user_id: userId, display_name: displayName, tags };
+}
+
+/**
+ * Read the per-IPC-call sender context written by the orchestrator.
+ * Returns null when absent (scheduled-task triggers carry no sender) or
+ * when the file fails validation. Used by the IPC watcher during its
+ * directory scan; the equivalent helper anchored at DATA_DIR is
+ * `readSenderContext(sourceGroup)` below.
+ */
+function readSenderCtxFromDir(
+  ipcBaseDir: string,
+  sourceGroup: string,
+): IpcSenderCtx | null {
+  try {
+    const ctxPath = path.join(
+      ipcBaseDir,
+      sourceGroup,
+      'input',
+      'sender_context.json',
+    );
+    if (!fs.existsSync(ctxPath)) return null;
+    return parseSenderCtx(JSON.parse(fs.readFileSync(ctxPath, 'utf-8')));
+  } catch {
+    return null;
   }
-
-  // Coordinator can write to specific directories
-  const isCoordinator = (senderCtx.tags || []).includes('coordinator');
-  if (isCoordinator) {
-    if (COORDINATOR_WRITABLE.includes(topDir)) {
-      // Block personnel_notes content
-      return { allowed: true, reason: `Coordinator access to ${topDir}/` };
-    }
-    if (ADMIN_ONLY.includes(topDir)) {
-      return { allowed: false, reason: `${topDir}/ requires admin access` };
-    }
-    return {
-      allowed: false,
-      reason: `Coordinators cannot write to ${topDir}/`,
-    };
-  }
-
-  // Everyone else: no KB writes
-  return { allowed: false, reason: 'Insufficient permissions for KB writes' };
 }
 
 export interface IpcDeps {
@@ -224,35 +308,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
-                // Authorization: verify this group can send to this chatJid
+                // Flat permission model: any registered group can send to
+                // its own chat; cross-group sends require an allowlisted
+                // human sender (or main-group origin / scheduled-task in
+                // the destination group itself).
                 const targetGroup = registeredGroups[data.chatJid];
                 const isSameGroup =
                   targetGroup && targetGroup.folder === sourceGroup;
+                const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
+                const hasSenderCtx = senderCtx !== null;
 
-                // Check if the triggering user is admin (from sender_context.json)
-                let senderIsAdmin = false;
-                if (!isMain && !isSameGroup) {
-                  try {
-                    const ctxPath = path.join(
-                      ipcBaseDir,
-                      sourceGroup,
-                      'input',
-                      'sender_context.json',
-                    );
-                    if (fs.existsSync(ctxPath)) {
-                      const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-                      senderIsAdmin = ctx.is_admin === true;
-                    }
-                  } catch {
-                    // Ignore parse errors
-                  }
-                }
-
-                if (isMain || isSameGroup || senderIsAdmin) {
+                if (isMain || isSameGroup || hasSenderCtx) {
                   await deps.sendMessage(data.chatJid, data.text);
                   refreshOutboundSnapshot(sourceGroup, data.chatJid);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup, senderIsAdmin },
+                    { chatJid: data.chatJid, sourceGroup, hasSenderCtx },
                     'IPC message sent',
                   );
                 } else {
@@ -270,26 +340,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 const targetGroup = registeredGroups[data.chatJid];
                 const isSameGroup =
                   targetGroup && targetGroup.folder === sourceGroup;
-
-                let senderIsAdmin = false;
-                if (!isMain && !isSameGroup) {
-                  try {
-                    const ctxPath = path.join(
-                      ipcBaseDir,
-                      sourceGroup,
-                      'input',
-                      'sender_context.json',
-                    );
-                    if (fs.existsSync(ctxPath)) {
-                      const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-                      senderIsAdmin = ctx.is_admin === true;
-                    }
-                  } catch {
-                    // Ignore parse errors
-                  }
-                }
-
-                const authorized = isMain || isSameGroup || senderIsAdmin;
+                const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
+                const hasSenderCtx = senderCtx !== null;
+                const authorized = isMain || isSameGroup || hasSenderCtx;
                 if (!authorized) {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup, type: data.type },
@@ -368,102 +421,97 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
                 }
               } else if (data.type === 'modify_kb_file' && data.filePath) {
-                // KB file modification — RBAC enforced
-                let senderCtx: { is_admin: boolean; tags?: string[] } | null =
-                  null;
-                try {
-                  const ctxPath = path.join(
-                    ipcBaseDir,
-                    sourceGroup,
-                    'input',
-                    'sender_context.json',
-                  );
-                  if (fs.existsSync(ctxPath)) {
-                    senderCtx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-                  }
-                } catch {
-                  // Ignore parse errors
-                }
-
-                // Main group always has access
-                if (isMain) {
-                  senderCtx = { is_admin: true, tags: ['admin'] };
-                }
-
-                const { allowed, reason } = canModifyKbFile(
-                  data.filePath,
-                  senderCtx,
+                // KB file modification — flat permission model: any
+                // allowlisted sender (or main-group origin / same-group
+                // scheduled task) may modify any KB file.
+                let senderCtx: IpcSenderCtx | null = readSenderCtxFromDir(
+                  ipcBaseDir,
+                  sourceGroup,
                 );
+                if (!senderCtx && isMain) {
+                  // Main-group origin without an attached sender (e.g. a
+                  // scheduled task fired in the control channel) is
+                  // implicitly authorized; attribute the audit trail to a
+                  // synthetic system identity so the gate stays
+                  // semantically a *validated* allowlist hit.
+                  senderCtx = {
+                    user_id: `system:scheduled@${sourceGroup}`,
+                    display_name: 'scheduled task',
+                    tags: [],
+                  };
+                }
 
-                if (allowed) {
-                  const normalized = data.filePath
-                    .replace(/^\/+/, '')
-                    .replace(/\.\./g, '');
-                  const fullPath = path.join(KB_CONTEXT_DIR, normalized);
-                  const action = data.action || 'write';
+                const { allowed, reason } = canModifyKbFile(senderCtx);
 
-                  if (action === 'delete') {
-                    if (fs.existsSync(fullPath)) {
-                      fs.unlinkSync(fullPath);
-                      logger.info(
-                        { filePath: normalized, sourceGroup, reason },
-                        'KB file deleted via IPC',
-                      );
-                    }
-                  } else {
-                    // Ensure parent directory exists
-                    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-                    fs.writeFileSync(fullPath, data.content || '');
-                    // Fix ownership
-                    try {
-                      const { execSync } = await import('child_process');
-                      execSync(`chown breadbrich:breadbrich "${fullPath}"`);
-                    } catch {
-                      /* ignore */
-                    }
-                    logger.info(
-                      { filePath: normalized, sourceGroup, reason },
-                      'KB file written via IPC',
-                    );
-                  }
-                } else {
+                if (!allowed) {
                   logger.warn(
                     { filePath: data.filePath, sourceGroup, reason },
                     'KB file modification blocked — insufficient permissions',
                   );
+                } else {
+                  const fullPath = resolveKbPath(data.filePath);
+                  if (!fullPath) {
+                    logger.warn(
+                      { filePath: data.filePath, sourceGroup },
+                      'KB file modification blocked — path escapes KB context dir',
+                    );
+                  } else {
+                    const normalized = path.relative(KB_CONTEXT_DIR, fullPath);
+                    const action = data.action || 'write';
+
+                    if (action === 'delete') {
+                      if (fs.existsSync(fullPath)) {
+                        fs.unlinkSync(fullPath);
+                        logger.info(
+                          { filePath: normalized, sourceGroup, reason },
+                          'KB file deleted via IPC',
+                        );
+                      }
+                    } else {
+                      // Ensure parent directory exists
+                      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+                      fs.writeFileSync(fullPath, data.content || '');
+                      // Fix ownership when running as a user other than
+                      // breadbrich (e.g. when the orchestrator runs as
+                      // root in some bootstrap paths). Uses cached
+                      // numeric ids + fs.chownSync — no shell, no
+                      // interpolation of agent-controlled paths.
+                      const ids = getKbOwnerIds();
+                      if (ids && process.getuid?.() !== ids.uid) {
+                        try {
+                          fs.chownSync(fullPath, ids.uid, ids.gid);
+                        } catch {
+                          /* best-effort; permissions failure is logged elsewhere */
+                        }
+                      }
+                      logger.info(
+                        { filePath: normalized, sourceGroup, reason },
+                        'KB file written via IPC',
+                      );
+                    }
+                  }
                 }
               } else if (
                 data.type === 'add_kb_user' &&
                 data.username &&
                 data.target_telegram_jid
               ) {
-                // PRIVILEGED: create a KB-UI auth entry + DM the credentials.
-                // Requires source group is_main=1 AND sender is admin.
-                let senderIsAdmin = false;
-                try {
-                  const ctxPath = path.join(
-                    ipcBaseDir,
-                    sourceGroup,
-                    'input',
-                    'sender_context.json',
-                  );
-                  if (fs.existsSync(ctxPath)) {
-                    const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-                    senderIsAdmin = ctx.is_admin === true;
-                  }
-                } catch {
-                  /* ignore */
-                }
+                // Create a KB-UI auth entry + DM the credentials.
+                // Flat model: any allowlisted sender may invoke. This op
+                // creates auth credentials so we require a validated
+                // sender_context with a real user_id for attribution —
+                // implicit isMain (scheduled task in the control channel)
+                // does NOT pass; the orchestrator must attach a sender.
+                const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
 
-                if (!isMain || !senderIsAdmin) {
+                if (!senderCtx) {
                   logger.warn(
                     {
                       sourceGroup,
                       isMain,
-                      senderIsAdmin,
                       username: data.username,
                     },
-                    'add_kb_user rejected — requires admin sender in is_main DM',
+                    'add_kb_user rejected — requires validated allowlisted sender (user_id)',
                   );
                 } else if (!/^[a-z][a-z0-9_-]{0,31}$/.test(data.username)) {
                   logger.warn(
@@ -509,6 +557,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                           username: data.username,
                           target: data.target_telegram_jid,
                           sourceGroup,
+                          createdBy: senderCtx.user_id,
                         },
                         "KB user created and credentials DM'd",
                       );
@@ -525,27 +574,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 data.target_folder &&
                 typeof data.new_content === 'string'
               ) {
-                // PRIVILEGED: rewrite another group's CLAUDE.md from main.
-                // See handleModifyGroupClaudeMd for the gate composition.
-                let senderIsAdmin = false;
-                let senderId: string | null = null;
-                try {
-                  const ctxPath = path.join(
-                    ipcBaseDir,
-                    sourceGroup,
-                    'input',
-                    'sender_context.json',
-                  );
-                  if (fs.existsSync(ctxPath)) {
-                    const ctx = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-                    senderIsAdmin = ctx.is_admin === true;
-                    // SenderContext shape from src/permissions.ts uses user_id
-                    senderId =
-                      typeof ctx.user_id === 'string' ? ctx.user_id : null;
-                  }
-                } catch {
-                  /* ignore */
-                }
+                // Rewrite another group's CLAUDE.md. Flat model: any
+                // allowlisted sender may invoke. This op rewrites another
+                // group's agent memory and is audited; we require a
+                // validated sender_context (user_id) so every entry in
+                // kb_audit_log is attributable to a real allowlisted user.
+                const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
                 handleModifyGroupClaudeMd(
                   {
                     target_folder: data.target_folder,
@@ -555,7 +589,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         ? data.summary
                         : undefined,
                   },
-                  { sourceGroup, isMain, senderIsAdmin, senderId },
+                  { sourceGroup, isMain, senderCtx },
                 );
               }
               fs.unlinkSync(filePath);
@@ -590,7 +624,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(tasksDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              // Pass source group identity to processTaskIpc for authorization
+              // Pass source group identity to processTaskIpc; it reads
+              // sender_context.json itself to decide allowlist gates.
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
@@ -619,17 +654,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
   logger.info('IPC watcher started (per-group namespaces)');
 }
 
-// --- Phase G3: privileged main-only CLAUDE.md modification ---
+// --- Cross-group CLAUDE.md modification ---
 //
-// Main-group admins can rewrite any non-self group's CLAUDE.md via this IPC.
-// Read-direction visibility (G1: /workspace/all-groups mount) lets main agents
+// Any allowlisted sender (from any registered group) can rewrite any other
+// group's CLAUDE.md via this IPC. Because the write is silent and
+// privileged (it changes how another group's agent behaves) we require a
+// validated sender_context — implicit isMain (a scheduled task in the
+// control channel without an attached user) is NOT accepted, so every
+// kb_audit_log entry is attributable to a real allowlisted user_id.
+// Read-direction visibility (G1: /workspace/all-groups mount) lets agents
 // learn what's happening; this is the write-direction counterpart.
 //
 // Gates compose AND, not OR:
-//   1. isMain         — source must be a main group
-//   2. senderIsAdmin  — explicit admin context check, NOT auto-elevated from isMain
-//   3. valid folder   — isValidGroupFolder rejects path-traversal attempts
-//   4. size cap       — refuses pathological payloads
+//   1. allowlisted    — sender_context with a validated user_id is present
+//   2. valid folder   — isValidGroupFolder rejects path-traversal attempts
+//   3. size cap       — refuses pathological payloads
 //
 // Silent by design: no notification to the target group's members. Every
 // successful write inserts a kb_audit_log row including the sender, source
@@ -655,21 +694,19 @@ export function handleModifyGroupClaudeMd(
   ctx: {
     sourceGroup: string;
     isMain: boolean;
-    senderIsAdmin: boolean;
-    senderId: string | null;
+    senderCtx: IpcSenderCtx | null;
   },
 ): ModifyGroupClaudeMdResult {
   const { target_folder, new_content, summary } = input;
 
-  if (!ctx.isMain || !ctx.senderIsAdmin) {
+  if (!ctx.senderCtx) {
     logger.warn(
       {
         sourceGroup: ctx.sourceGroup,
         isMain: ctx.isMain,
-        senderIsAdmin: ctx.senderIsAdmin,
         target_folder,
       },
-      'modify_group_claude_md rejected — requires admin sender in is_main DM',
+      'modify_group_claude_md rejected — requires validated allowlisted sender (user_id)',
     );
     return { status: 'rejected', reason: 'unauthorized' };
   }
@@ -726,7 +763,7 @@ export function handleModifyGroupClaudeMd(
     logKbAudit({
       filePath: targetPath,
       action: 'modify_group_claude_md',
-      changedBy: ctx.senderId ?? `unknown@${ctx.sourceGroup}`,
+      changedBy: ctx.senderCtx.user_id,
       changes: {
         sourceGroup: ctx.sourceGroup,
         targetFolder: target_folder,
@@ -873,6 +910,9 @@ export async function processTaskIpc(
   deps: IpcDeps,
 ): Promise<void> {
   const registeredGroups = deps.registeredGroups();
+  // Allowlisted-sender check: a human-triggered run carries a sender
+  // context written by the orchestrator. Scheduled-task runs do not.
+  const hasSenderCtx = readSenderContext(sourceGroup) !== null;
 
   switch (data.type) {
     case 'dm_user': {
@@ -1003,8 +1043,9 @@ export async function processTaskIpc(
 
         const targetFolder = targetGroupEntry.folder;
 
-        // Authorization: non-main groups can only schedule for themselves
-        if (!isMain && targetFolder !== sourceGroup) {
+        // Authorization (flat model): allowlisted human, main group, or
+        // scheduling for the source group itself.
+        if (!isMain && !hasSenderCtx && targetFolder !== sourceGroup) {
           logger.warn(
             { sourceGroup, targetFolder },
             'Unauthorized schedule_task attempt blocked',
@@ -1081,7 +1122,10 @@ export async function processTaskIpc(
     case 'pause_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (
+          task &&
+          (isMain || hasSenderCtx || task.group_folder === sourceGroup)
+        ) {
           updateTask(data.taskId, { status: 'paused' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -1100,7 +1144,10 @@ export async function processTaskIpc(
     case 'resume_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (
+          task &&
+          (isMain || hasSenderCtx || task.group_folder === sourceGroup)
+        ) {
           updateTask(data.taskId, { status: 'active' });
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -1119,7 +1166,10 @@ export async function processTaskIpc(
     case 'cancel_task':
       if (data.taskId) {
         const task = getTaskById(data.taskId);
-        if (task && (isMain || task.group_folder === sourceGroup)) {
+        if (
+          task &&
+          (isMain || hasSenderCtx || task.group_folder === sourceGroup)
+        ) {
           deleteTask(data.taskId);
           logger.info(
             { taskId: data.taskId, sourceGroup },
@@ -1145,7 +1195,7 @@ export async function processTaskIpc(
           );
           break;
         }
-        if (!isMain && task.group_folder !== sourceGroup) {
+        if (!isMain && !hasSenderCtx && task.group_folder !== sourceGroup) {
           logger.warn(
             { taskId: data.taskId, sourceGroup },
             'Unauthorized task update attempt',
@@ -1202,8 +1252,9 @@ export async function processTaskIpc(
       break;
 
     case 'refresh_groups':
-      // Only main group can request a refresh
-      if (isMain) {
+      // Flat model: any allowlisted sender (or main-group origin) can
+      // request a group metadata refresh.
+      if (isMain || hasSenderCtx) {
         logger.info(
           { sourceGroup },
           'Group metadata refresh requested via IPC',
@@ -1213,7 +1264,7 @@ export async function processTaskIpc(
         const availableGroups = deps.getAvailableGroups();
         deps.writeGroupsSnapshot(
           sourceGroup,
-          true,
+          isMain,
           availableGroups,
           new Set(Object.keys(registeredGroups)),
         );
@@ -1226,8 +1277,9 @@ export async function processTaskIpc(
       break;
 
     case 'register_group':
-      // Only main group can register new groups
-      if (!isMain) {
+      // Flat model: any allowlisted sender (or main-group origin) can
+      // register a new group.
+      if (!isMain && !hasSenderCtx) {
         logger.warn(
           { sourceGroup },
           'Unauthorized register_group attempt blocked',
@@ -1386,7 +1438,7 @@ export async function processTaskIpc(
           return `${i + 1}. *${r.title}*${metaSuffix}\n   id: \`${r.id}\``;
         });
         const body =
-          `📝 Coordinator review needed: *${rows.length}* proposed task(s) from "${summary.title}"\n\n` +
+          `📝 Review needed: *${rows.length}* proposed task(s) from "${summary.title}"\n\n` +
           lines.join('\n\n') +
           `\n\nReply with "approve PT-..." or "reject PT-..." for each item.`;
         await deps.sendMessage(mainGroupJid, body);
@@ -1395,7 +1447,7 @@ export async function processTaskIpc(
       deps.onTasksChanged();
       logger.info(
         { summaryId: data.summary_id, count: rows.length, sourceGroup },
-        'Proposed tasks created; coordinator notified',
+        'Proposed tasks created; reviewers notified',
       );
       break;
     }
@@ -1407,27 +1459,20 @@ export async function processTaskIpc(
       }
 
       const senderCtx = readSenderContext(sourceGroup);
-      const isCoordinator =
-        senderCtx !== null &&
-        (senderCtx.is_admin ||
-          senderCtx.tags.includes('coordinator') ||
-          senderCtx.tags.includes('admin'));
-
       const mainGroupJid = findMainGroupJid(registeredGroups);
 
-      // Fail closed: without a valid sender_context.json declaring coordinator
-      // or admin authority, refuse. We do NOT fabricate identity just because
-      // the call originated from the main group — every approval must be
-      // traceable to a real user_id for audit purposes.
-      if (!isCoordinator) {
+      // Fail closed: every approval must be traceable to a real allowlisted
+      // user_id for audit purposes. We do NOT fabricate identity just
+      // because the call originated from the main group.
+      if (!senderCtx) {
         logger.warn(
-          { sourceGroup, hasSenderCtx: senderCtx !== null, isMain },
-          'approve_proposed_tasks: rejected — no valid coordinator identity',
+          { sourceGroup, isMain },
+          'approve_proposed_tasks: rejected — no allowlisted sender identity',
         );
         if (mainGroupJid) {
           await deps.sendMessage(
             mainGroupJid,
-            '⚠️ Only coordinators can approve proposed tasks. The caller must have a sender_context with the coordinator or admin tag.',
+            '⚠️ Approving proposed tasks requires an allowlisted sender (caller must have a sender_context with a user_id).',
           );
         }
         break;
@@ -1537,25 +1582,19 @@ export async function processTaskIpc(
       }
 
       const senderCtx = readSenderContext(sourceGroup);
-      const isCoordinator =
-        senderCtx !== null &&
-        (senderCtx.is_admin ||
-          senderCtx.tags.includes('coordinator') ||
-          senderCtx.tags.includes('admin'));
-
       const mainGroupJid = findMainGroupJid(registeredGroups);
 
       // Fail closed: same reasoning as approve_proposed_tasks. We require a
       // real user_id in resolved_by; isMain alone is not enough.
-      if (!isCoordinator) {
+      if (!senderCtx) {
         logger.warn(
-          { sourceGroup, hasSenderCtx: senderCtx !== null, isMain },
-          'reject_proposed_task: rejected — no valid coordinator identity',
+          { sourceGroup, isMain },
+          'reject_proposed_task: rejected — no allowlisted sender identity',
         );
         if (mainGroupJid) {
           await deps.sendMessage(
             mainGroupJid,
-            '⚠️ Only coordinators can reject proposed tasks. The caller must have a sender_context with the coordinator or admin tag.',
+            '⚠️ Rejecting proposed tasks requires an allowlisted sender (caller must have a sender_context with a user_id).',
           );
         }
         break;
@@ -1716,26 +1755,6 @@ export async function processTaskIpc(
           requesterChat,
           `You cannot approve your own expense ${expense.id}. Another approver must review it.`,
         );
-        break;
-      }
-      if (
-        !canApprove(approverCtx, expense.amount_cents, expense.request_type)
-      ) {
-        logger.warn(
-          {
-            approver: approverCtx.user_id,
-            amount: expense.amount_cents,
-            tags: approverCtx.tags,
-          },
-          'Unauthorized approval attempt',
-        );
-        const mainJid = findMainGroupJid(registeredGroups);
-        if (mainJid) {
-          await deps.sendMessage(
-            mainJid,
-            `${approverCtx.display_name} does not have authority to approve expense ${expense.id} (${formatMoney(expense.amount_cents, expense.currency)}). See rules/finance/expenses.md.`,
-          );
-        }
         break;
       }
       if (
@@ -1905,10 +1924,10 @@ export async function processTaskIpc(
         break;
       }
       const reimburserCtx = readSenderContext(sourceGroup);
-      if (!reimburserCtx || !hasFinanceAuthority(reimburserCtx)) {
+      if (!reimburserCtx) {
         logger.warn(
-          { user: reimburserCtx?.user_id, tags: reimburserCtx?.tags },
-          'non-finance user tried to reimburse',
+          { sourceGroup },
+          'reimbursement requires an allowlisted sender',
         );
         break;
       }
@@ -1997,34 +2016,13 @@ export async function processTaskIpc(
 
 // --- Expense helpers ---
 
-interface IpcSenderContext {
-  user_id: string;
-  display_name: string;
-  tags: string[];
-  is_admin: boolean;
-}
+type IpcSenderContext = IpcSenderCtx;
 
+// Convenience wrapper around `readSenderCtxFromDir` anchored at DATA_DIR,
+// for helpers defined outside `startIpcWatcher`'s closure (where the IPC
+// base directory isn't already in scope).
 function readSenderContext(sourceGroup: string): IpcSenderContext | null {
-  try {
-    const ctxPath = path.join(
-      DATA_DIR,
-      'ipc',
-      sourceGroup,
-      'input',
-      'sender_context.json',
-    );
-    if (!fs.existsSync(ctxPath)) return null;
-    const parsed = JSON.parse(fs.readFileSync(ctxPath, 'utf-8'));
-    if (typeof parsed?.user_id !== 'string') return null;
-    return {
-      user_id: parsed.user_id,
-      display_name: parsed.display_name || parsed.user_id,
-      tags: Array.isArray(parsed.tags) ? parsed.tags : [],
-      is_admin: parsed.is_admin === true,
-    };
-  } catch {
-    return null;
-  }
+  return readSenderCtxFromDir(path.join(DATA_DIR, 'ipc'), sourceGroup);
 }
 
 function findMainGroupJid(
@@ -2046,27 +2044,6 @@ function isDecidableStatus(status: ExpenseStatus): boolean {
   return status === 'pending_approval' || status === 'submitted_retro';
 }
 
-function hasFinanceAuthority(ctx: IpcSenderContext): boolean {
-  return ctx.is_admin || ctx.tags.includes('finance');
-}
-
-function canApprove(
-  ctx: IpcSenderContext,
-  amountCents: number,
-  requestType: 'prospective' | 'retrospective',
-): boolean {
-  // Retrospective approvals require admin — no coordinator shortcut for past spending
-  if (requestType === 'retrospective') return ctx.is_admin;
-
-  // Admin can approve any amount
-  if (ctx.is_admin) return true;
-
-  // Coordinator can approve under $500 (50000 cents)
-  if (ctx.tags.includes('coordinator') && amountCents < 50000) return true;
-
-  return false;
-}
-
 function renderDecisionMessage(
   expense: Expense,
   decision: 'approve' | 'deny' | 'modify',
@@ -2086,15 +2063,6 @@ function renderDecisionMessage(
 }
 
 // --- Event intake / booking helpers ---
-
-function senderHasAnyTag(
-  ctx: IpcSenderContext | null,
-  tags: string[],
-): boolean {
-  if (!ctx) return false;
-  if (ctx.is_admin) return true;
-  return (ctx.tags ?? []).some((t) => tags.includes(t));
-}
 
 function findChatJidForGroup(
   registeredGroups: Record<string, RegisteredGroup>,

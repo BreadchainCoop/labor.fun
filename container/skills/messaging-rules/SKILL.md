@@ -51,8 +51,8 @@ Breadbrich Engels can send messages across platforms using `target_jid`:
 | WhatsApp group | `GROUPID@g.us` | `NNNNNNN@g.us` |
 
 ### Permission Required
-- Admin and Coordinator can cross-channel send
-- Contributors and Guests cannot
+- Any allowlisted user can cross-channel send
+- Unknown senders cannot
 
 ## Person → JID Lookup
 

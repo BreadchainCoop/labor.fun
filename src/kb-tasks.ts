@@ -110,7 +110,7 @@ export function writeApprovedTaskFile(
     sourceQuoteSection,
     '## Checklist',
     '',
-    '- [ ] Pending coordinator-approved task — refine subtasks as needed',
+    '- [ ] Pending approved task — refine subtasks as needed',
     '',
     '## Dependencies',
     '',

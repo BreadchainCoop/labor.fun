@@ -41,7 +41,7 @@ const server = new McpServer({
 
 server.tool(
   'modify_kb_file',
-  "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, or other KB files. The orchestrator enforces access control — your permissions are checked against the sender context (admin, coordinator, etc.). Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md').",
+  "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, or other KB files. The orchestrator enforces access control — allowlisted senders (anyone with a sender_context) have full read/write access; unknown senders are rejected. Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md').",
   {
     file_path: z.string().describe('Relative path within the KB context directory (e.g. "tasks/TASK-001.md", "calendar/2026-04-09-event.md")'),
     content: z.string().describe('Full file content to write (including YAML frontmatter)'),
@@ -146,7 +146,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'Target channel JID for cross-channel messaging. Examples: "tg:1234567890" (Telegram), "slack:CXXXXXXXXX" (Slack). Omit to send to current chat. Admin/coordinator senders are authorized automatically.',
+        'Target channel JID for cross-channel messaging. Examples: "tg:1234567890" (Telegram), "slack:CXXXXXXXXX" (Slack). Omit to send to current chat. Allowlisted senders may send cross-channel from any registered group.',
       ),
     sender: z
       .string()
@@ -182,7 +182,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'Target chat JID. Omit to operate on the current chat. Cross-chat deletion has the same authorization as send_message (main/admin only).',
+        'Target chat JID. Omit to operate on the current chat. Cross-chat deletion has the same authorization as send_message (allowlisted senders).',
       ),
   },
   async (args) => {
@@ -217,7 +217,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'Target chat JID. Omit to operate on the current chat. Cross-chat edits have the same authorization as send_message (main/admin only).',
+        'Target chat JID. Omit to operate on the current chat. Cross-chat edits have the same authorization as send_message (allowlisted senders).',
       ),
   },
   async (args) => {
@@ -795,7 +795,7 @@ The extracted fields (action_items, extracted_events, etc.) are JSON strings. Th
 
 server.tool(
   'propose_meeting_tasks',
-  `Submit action items extracted from a meeting transcript for coordinator approval. Use this INSTEAD of creating TASK-NNN files directly when the items came from a transcript. The coordinator will review each one and approve or reject; approved tasks become real KB tasks automatically.
+  `Submit action items extracted from a meeting transcript for review and approval. Use this INSTEAD of creating TASK-NNN files directly when the items came from a transcript. Any allowlisted user can review and approve or reject the items; approved tasks become real KB tasks automatically.
 
 Call AFTER save_meeting_summary -- pass the summary_id you got back. One call covers the whole batch from a single transcript. Updates to existing tasks, and new people/events extracted from the same transcript, do NOT go through this tool -- use modify_kb_file for those.`,
   {
@@ -831,7 +831,7 @@ Call AFTER save_meeting_summary -- pass the summary_id you got back. One call co
         }),
       )
       .min(1)
-      .describe('Array of proposed tasks to send to the coordinator'),
+      .describe('Array of proposed tasks to send for review'),
   },
   async (args) => {
     const data = {
@@ -848,7 +848,7 @@ Call AFTER save_meeting_summary -- pass the summary_id you got back. One call co
       content: [
         {
           type: 'text' as const,
-          text: `Submitted ${args.tasks.length} proposed task(s) for coordinator approval. The coordinator will see a numbered list with PT-IDs they can approve or reject.`,
+          text: `Submitted ${args.tasks.length} proposed task(s) for review. Reviewers will see a numbered list with PT-IDs they can approve or reject.`,
         },
       ],
     };
@@ -857,9 +857,9 @@ Call AFTER save_meeting_summary -- pass the summary_id you got back. One call co
 
 server.tool(
   'approve_proposed_tasks',
-  `Approve one or more proposed tasks from a meeting transcript. Only call this when the sender is tagged "coordinator" -- the host enforces this and rejects unauthorized callers. Approving creates a real TASK-NNN entry in the KB and notifies the assignee. Self-approval is allowed (the coordinator who submitted the transcript may approve its tasks).
+  `Approve one or more proposed tasks from a meeting transcript. Any allowlisted sender may invoke this (the host requires a sender_context and rejects unauthorized callers). Approving creates a real TASK-NNN entry in the KB and notifies the assignee. Self-approval is allowed (the user who submitted the transcript may approve its tasks).
 
-Pass an array of items even when approving just one. Use overrides only when the coordinator explicitly asked to change the title, assignee, or due date.`,
+Pass an array of items even when approving just one. Use overrides only when the user explicitly asked to change the title, assignee, or due date.`,
   {
     items: z
       .array(
@@ -870,7 +870,7 @@ Pass an array of items even when approving just one. Use overrides only when the
           final_title: z
             .string()
             .optional()
-            .describe('Override title if coordinator requested a refinement'),
+            .describe('Override title if the user requested a refinement'),
           final_assignee: z
             .string()
             .optional()
@@ -907,13 +907,13 @@ Pass an array of items even when approving just one. Use overrides only when the
 
 server.tool(
   'reject_proposed_task',
-  `Reject a proposed task from a meeting transcript. Only call this when the sender is tagged "coordinator". The proposed task is marked rejected; no KB entry is created. Use one call per rejected task; include a short reason if the coordinator gave one.`,
+  `Reject a proposed task from a meeting transcript. Any allowlisted sender may invoke this. The proposed task is marked rejected; no KB entry is created. Use one call per rejected task; include a short reason if the user gave one.`,
   {
     proposed_task_id: z.string().describe('ID of the proposed_task row'),
     reason: z
       .string()
       .optional()
-      .describe('Short reason coordinator gave (audit trail)'),
+      .describe('Short reason the user gave (audit trail)'),
   },
   async (args) => {
     const data = {
@@ -1011,7 +1011,7 @@ server.tool(
 
 server.tool(
   'approve_expense',
-  'Approve an expense as-submitted. Only usable by approvers (coordinator/admin) with authority for the amount tier. The orchestrator enforces tier rules.',
+  'Approve an expense as-submitted. Any allowlisted sender may approve (the orchestrator rejects unknown callers and self-approval).',
   {
     expense_id: z.string(),
     approver_notes: z.string().optional(),
@@ -1138,7 +1138,7 @@ server.tool(
 
 server.tool(
   'add_kb_user',
-  'Create a new KB-UI dashboard user with a generated password and DM the credentials to a target Telegram chat. PRIVILEGED: requires caller to be in an admin DM (is_main=1 group with admin sender). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
+  'Create a new KB-UI dashboard user with a generated password and DM the credentials to a target Telegram chat. Requires an allowlisted caller (sender_context present). Password is generated server-side and never appears in the response — it is only sent via the DM. Returns status only.',
   {
     username: z
       .string()
@@ -1160,7 +1160,7 @@ server.tool(
       content: [
         {
           type: 'text' as const,
-          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${args.target_telegram_jid}. Will be rejected by the orchestrator if caller is not an admin in an admin DM.`,
+          text: `KB user creation queued for ${args.username}; credentials will be DM'd to ${args.target_telegram_jid}. Will be rejected by the orchestrator if the caller is not allowlisted.`,
         },
       ],
     };
@@ -1169,7 +1169,7 @@ server.tool(
 
 server.tool(
   'modify_group_claude_md',
-  'Rewrite another group\'s CLAUDE.md (per-group memory file). PRIVILEGED: requires caller to be in an admin DM (is_main=1 group with admin sender). The write is silent — no notification to the target group\'s members — and audited (kb_audit_log row inserted). Full-replace, not patch: pass the entire new file contents. Use sparingly; this changes how the target group\'s the personal assistant behaves.',
+  'Rewrite another group\'s CLAUDE.md (per-group memory file). Requires an allowlisted caller (sender_context present). The write is silent — no notification to the target group\'s members — and audited (kb_audit_log row inserted). Full-replace, not patch: pass the entire new file contents. Use sparingly; this changes how the target group\'s personal assistant behaves.',
   {
     target_folder: z
       .string()
@@ -1196,7 +1196,7 @@ server.tool(
       content: [
         {
           type: 'text' as const,
-          text: `CLAUDE.md modification queued for ${args.target_folder}. Will be rejected by the orchestrator if caller is not an admin in an admin DM, or if the target_folder is invalid, or if new_content exceeds 200 KB.`,
+          text: `CLAUDE.md modification queued for ${args.target_folder}. Will be rejected by the orchestrator if the caller is not allowlisted, or if the target_folder is invalid, or if new_content exceeds 200 KB.`,
         },
       ],
     };
