@@ -5,7 +5,7 @@ Breadbrich Engels can schedule tasks to run later or on a recurring basis using 
 ## Task Types
 
 | Type | `schedule_type` | `schedule_value` | Example |
-|------|----------------|-------------------|---------|
+|------|----------------|-------------------|--------|
 | Cron | `cron` | Cron expression | `0 9 * * 1` (Mondays 9am) |
 | Interval | `interval` | Milliseconds | `3600000` (every hour) |
 | One-time | `once` | ISO date | `2026-04-15T14:00:00` |
@@ -19,15 +19,35 @@ For recurring tasks, add a `script` that runs before the agent wakes:
 3. If `wakeAgent: false` — nothing happens, waits for next run
 4. If `wakeAgent: true` — agent wakes with the script's data + prompt
 
+### Available tools in scripts
+
+Scripts run as bash with the following available:
+
+- **`gh` CLI** — authenticated automatically via `GH_TOKEN`. Use `gh api` for GitHub API calls.
+- **`curl`** — for arbitrary HTTP requests; use `$GITHUB_PERSONAL_ACCESS_TOKEN` for auth if needed.
+- **`jq`** — for JSON parsing.
+- **`node`** — for more complex logic.
+
 ### Always Test First
 
-Run the script in the sandbox before scheduling:
+Run the script locally before scheduling:
 
 ```bash
+# Using gh CLI (preferred for GitHub API calls)
+bash -c '
+  INCOMPLETE=$(gh api repos/owner/repo/pulls/123 --jq ".state")
+  if [ "$INCOMPLETE" = "open" ]; then
+    echo "{\"wakeAgent\": true}"
+  else
+    echo "{\"wakeAgent\": false}"
+  fi
+'
+
+# Using fetch (for non-GitHub APIs)
 bash -c 'node --input-type=module -e "
-  const r = await fetch(\"https://api.github.com/repos/owner/repo/pulls?state=open\");
-  const prs = await r.json();
-  console.log(JSON.stringify({ wakeAgent: prs.length > 0, data: prs.slice(0, 5) }));
+  const r = await fetch(\"https://api.example.com/status\");
+  const data = await r.json();
+  console.log(JSON.stringify({ wakeAgent: data.hasUpdates === true, data }));
 "'
 ```
 
