@@ -7,14 +7,31 @@
 # credential helper safe-deploy already configured (PAT in
 # /home/breadbrich/.git-credentials). No extra secrets to manage.
 #
-# Serialization with manual deploys is handled by safe-deploy.sh's own
-# flock at the top of the script — if a manual deploy is in flight, our
-# call to safe-deploy.sh will exit fast with "another deploy in progress".
+# DRAIN BEHAVIOR
+# --------------
+# Active agent containers (nanoclaw-*) are processing live user requests
+# at deploy time. Restarting the orchestrator mid-run kills those requests
+# and surfaces as "agent_runs.status='interrupted'" + dropped user replies.
+# To avoid that, this script DEFERS deploys while any agent container is
+# alive, retrying on the next 2-min tick.
+#
+# Safeguards:
+#   * If we've been waiting longer than MAX_DEFER_SECONDS (default 15 min)
+#     we proceed anyway — a stuck container shouldn't block deploys forever.
+#   * A presence-file at $FORCE_FILE forces an immediate deploy regardless
+#     of running containers (for emergency hot-fixes). The file is consumed
+#     (removed) on read so it only forces once.
+#
+# Serialization with manual `safe-deploy.sh` invocations is still handled
+# by safe-deploy's own flock at the top of the script.
 set -euo pipefail
 
 GIT_DIR=/opt/breadbrich-git
 DEPLOY_SH=/opt/breadbrich-backups/safe-deploy.sh
 APP_USER=breadbrich
+FORCE_FILE=/opt/breadbrich-backups/.deploy-force
+DEFER_STATE=/run/breadbrich-deploy-deferred-since
+MAX_DEFER_SECONDS="${MAX_DEFER_SECONDS:-900}"   # 15 min — override via env
 
 log() { echo "[auto-deploy $(date -u +%H:%M:%S)] $*"; }
 
@@ -28,9 +45,44 @@ if [ -z "$REMOTE" ]; then
 fi
 
 if [ "$LOCAL" = "$REMOTE" ]; then
-  # Already at origin/main — most ticks land here. Stay quiet.
+  # Already at origin/main — most ticks land here. Stay quiet and clear
+  # any leftover defer state so the next backlog starts clean.
+  rm -f "$DEFER_STATE"
   exit 0
 fi
 
+# Mirror is behind. Drain-check before triggering safe-deploy.
+# `--filter name=` is substring match (not regex) — matches the convention
+# in src/container-runtime.ts and scripts/hourly-ops.sh.
+ACTIVE_COUNT=$(docker ps --filter name=nanoclaw- -q 2>/dev/null | grep -c . || true)
+
+if [ -f "$FORCE_FILE" ]; then
+  log "force-file present at $FORCE_FILE — bypassing drain check"
+  rm -f "$FORCE_FILE"
+elif [ "$ACTIVE_COUNT" -gt 0 ]; then
+  NOW=$(date +%s)
+  if [ -f "$DEFER_STATE" ]; then
+    SINCE=$(cat "$DEFER_STATE" 2>/dev/null || echo "")
+    if ! [[ "$SINCE" =~ ^[0-9]+$ ]]; then
+      log "defer state file corrupt ('$SINCE') — resetting"
+      echo "$NOW" > "$DEFER_STATE"
+      SINCE=$NOW
+    fi
+    WAITED=$((NOW - SINCE))
+    if [ "$WAITED" -ge "$MAX_DEFER_SECONDS" ]; then
+      log "deferred ${WAITED}s exceeds cap ${MAX_DEFER_SECONDS}s — proceeding anyway ($ACTIVE_COUNT container(s) still running)"
+      rm -f "$DEFER_STATE"
+    else
+      log "$ACTIVE_COUNT agent container(s) running; deferring (waited ${WAITED}s / cap ${MAX_DEFER_SECONDS}s)"
+      exit 0
+    fi
+  else
+    echo "$NOW" > "$DEFER_STATE"
+    log "$ACTIVE_COUNT agent container(s) running; deferring this tick (first detection)"
+    exit 0
+  fi
+fi
+
 log "Mirror $LOCAL behind origin/main $REMOTE — triggering safe-deploy"
+rm -f "$DEFER_STATE"
 exec "$DEPLOY_SH"
