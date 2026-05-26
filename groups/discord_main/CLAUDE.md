@@ -21,6 +21,14 @@ of every rule.
 | Read access to other groups | `/workspace/all-groups/` (read-only mount; cooperative mode) |
 | SQLite DB (messages, identities, etc.) | `/workspace/project/store/messages.db` (read-write in cooperative mode — see `rules/knowledge-base/storage.md`) |
 
+## About the org
+
+The org is **Bread Cooperative** (bread.coop). For any "what is this org /
+what do you do / who are you working for" question, read
+`context/artifacts/org-overview.md` first — it has the canonical name,
+the `BreadchainCoop` (GitHub handle) ≠ "Breadchain" (not the org's name)
+disambiguation, and the authoritative source URLs to fetch from.
+
 ## Discord-specific notes
 
 - People files in `context/people/<slug>.md` are kept in sync from

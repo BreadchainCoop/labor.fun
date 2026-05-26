@@ -44,6 +44,14 @@ When working as a sub-agent or teammate, only use `send_message` if instructed t
 
 Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.
 
+## About the org
+
+The org is **Bread Cooperative** (bread.coop). For any "what is this org /
+what do you do / who are you working for" question, read
+`/workspace/shared-kb/artifacts/org-overview.md` first — it has the
+canonical name, the `BreadchainCoop` (GitHub handle) ≠ "Breadchain" (not
+the org's name) disambiguation, and authoritative source URLs.
+
 ## Shared Knowledge Base
 
 Every container (regardless of which group spawned it) has read-only access to the canonical KB at `/workspace/shared-kb/`. This is the source of truth for cross-group lookups — people, calendar events, tasks, artifacts.
