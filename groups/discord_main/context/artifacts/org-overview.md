@@ -59,5 +59,7 @@ mechanics to a user.
   org name as "Breadchain" — a string only present in the GitHub
   handle. Read this file first whenever a user asks "what is this
   org / what do you do / what's bread.coop".
-- If a fact here turns out to be wrong, **fix it in place** (call
-  `modify_kb_file` on this path) — don't fork a second overview.
+- If a fact here turns out to be wrong, **fix it in place** — call
+  `modify_kb_file` with `path: "artifacts/org-overview.md"` (KB-relative;
+  the shared-KB mount at `/workspace/shared-kb/` is read-only, so direct
+  filesystem writes will fail). Don't fork a second overview document.
