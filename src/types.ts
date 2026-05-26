@@ -107,6 +107,14 @@ export interface Channel {
   addReaction?(jid: string, messageId: string, emoji: string): Promise<void>;
   // Optional: remove an emoji reaction from a message
   removeReaction?(jid: string, messageId: string, emoji: string): Promise<void>;
+  // Optional: pin the reply anchor for the current agent session to a specific
+  // inbound message ID. Prevents a newer inbound message from overwriting the
+  // reply anchor while the agent is still generating a response to an earlier one.
+  setSessionAnchor?(jid: string, messageId: string): void;
+  // Optional: clear the session-pinned anchor so that proactive or scheduled
+  // messages (with no inbound trigger) fall back to the normal last-message
+  // anchor logic rather than replying into a stale thread.
+  clearSessionAnchor?(jid: string): void;
 }
 
 // Callback type that channels use to deliver inbound messages
