@@ -37,10 +37,10 @@ const DM_FOLDER_PREFIX = 'discord_dm_';
 
 /**
  * JID prefix for sending a Discord DM directly to a user by their Discord
- * user ID. Use dc-dm:<userId> (e.g. "dc-dm:123456789") to reach a specific
- * user's DM channel without needing their DM channel ID.
+ * user ID. Use `dc-dm:<userId>` (e.g. `"dc-dm:123456789"`) to reach a
+ * specific user's DM channel without needing their DM channel ID.
  *
- * Distinct from dc:<channelId> which targets a specific channel (guild
+ * Distinct from `dc:<channelId>` which targets a specific channel (guild
  * text channel, thread, or existing DM channel) by its channel ID.
  * Discord user IDs and channel IDs share the same numeric format and
  * cannot be distinguished without an API call, so we use explicit prefixes.
@@ -451,8 +451,8 @@ export class DiscordChannel implements Channel {
    * messages there via the normal `sendMessage("dc:<channelId>", ...)`
    * path.
    *
-   * Use sendMessage("dc-dm:<userId>", text) to reach this from the
-   * standard send_message MCP path — the dc-dm: prefix routes here
+   * Use `sendMessage("dc-dm:<userId>", text)` to reach this from the
+   * standard `send_message` MCP path — the `dc-dm:` prefix routes here
    * directly without going through channel resolution.
    *
    * Handles Discord's 2000-char limit inline with the same chunking
@@ -483,13 +483,17 @@ export class DiscordChannel implements Channel {
       return;
     }
 
-    // dc-dm:<userId> — send a DM directly to a Discord user by their user ID.
+    // `dc-dm:<userId>` — send a DM directly to a Discord user by their user ID.
     // Discord user IDs and channel IDs share the same numeric format and
     // channels.fetch() silently fails on a user ID, so we use an explicit
     // prefix rather than a fallback heuristic.
     if (jid.startsWith(DISCORD_DM_JID_PREFIX)) {
       const userId = jid.slice(DISCORD_DM_JID_PREFIX.length);
-      await this.dmUser(userId, text);
+      try {
+        await this.dmUser(userId, text);
+      } catch (err) {
+        logger.error({ jid, err }, 'Failed to send Discord message');
+      }
       return;
     }
 
