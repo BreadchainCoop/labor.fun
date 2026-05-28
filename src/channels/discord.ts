@@ -36,6 +36,18 @@ export interface DiscordChannelOpts {
 const DM_FOLDER_PREFIX = 'discord_dm_';
 
 /**
+ * JID prefix for sending a Discord DM directly to a user by their Discord
+ * user ID. Use dc-dm:<userId> (e.g. "dc-dm:123456789") to reach a specific
+ * user's DM channel without needing their DM channel ID.
+ *
+ * Distinct from dc:<channelId> which targets a specific channel (guild
+ * text channel, thread, or existing DM channel) by its channel ID.
+ * Discord user IDs and channel IDs share the same numeric format and
+ * cannot be distinguished without an API call, so we use explicit prefixes.
+ */
+export const DISCORD_DM_JID_PREFIX = 'dc-dm:';
+
+/**
  * Map Slack-style emoji names (which the orchestrator uses for the
  * seen/working ACK pattern) to Unicode codepoints Discord.js accepts.
  */
@@ -439,15 +451,12 @@ export class DiscordChannel implements Channel {
    * messages there via the normal `sendMessage("dc:<channelId>", ...)`
    * path.
    *
-   * Sends directly via `dm.send(...)` rather than delegating to
-   * `sendMessage()` so DiscordAPIErrors (DMs disabled, recipient
-   * blocked, unknown user, missing shared guild) actually propagate to
-   * the IPC handler — `sendMessage()` swallows-and-logs send errors,
-   * which would otherwise hide failures behind a successful-looking
-   * channel id.
+   * Use sendMessage("dc-dm:<userId>", text) to reach this from the
+   * standard send_message MCP path — the dc-dm: prefix routes here
+   * directly without going through channel resolution.
    *
    * Handles Discord's 2000-char limit inline with the same chunking
-   * `sendMessage()` uses.
+   * sendMessage() uses.
    */
   async dmUser(userId: string, text: string): Promise<string> {
     if (!this.client) throw new Error('Discord client not initialized');
@@ -471,6 +480,16 @@ export class DiscordChannel implements Channel {
   async sendMessage(jid: string, text: string): Promise<void> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
+      return;
+    }
+
+    // dc-dm:<userId> — send a DM directly to a Discord user by their user ID.
+    // Discord user IDs and channel IDs share the same numeric format and
+    // channels.fetch() silently fails on a user ID, so we use an explicit
+    // prefix rather than a fallback heuristic.
+    if (jid.startsWith(DISCORD_DM_JID_PREFIX)) {
+      const userId = jid.slice(DISCORD_DM_JID_PREFIX.length);
+      await this.dmUser(userId, text);
       return;
     }
 
@@ -542,7 +561,7 @@ export class DiscordChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
-    return jid.startsWith('dc:');
+    return jid.startsWith('dc:') || jid.startsWith(DISCORD_DM_JID_PREFIX);
   }
 
   async disconnect(): Promise<void> {
