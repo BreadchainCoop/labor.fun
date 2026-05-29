@@ -23,6 +23,7 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 | [Knowledge Base](knowledge-base/README.md) | `rules/knowledge-base/` | Any KB read/write operation |
 | [Task Management](knowledge-base/tasks.md) | `rules/knowledge-base/tasks.md` | Creating, updating, or querying tasks |
 | [Storage Systems](knowledge-base/storage.md) | `rules/knowledge-base/storage.md` | Understanding markdown KB vs SQLite DB |
+| [Full-Text Search](knowledge-base/search.md) | `rules/knowledge-base/search.md` | Ranked KB search (FTS5) — when grep isn't enough |
 | [Document Format](knowledge-base/document-format.md) | `rules/knowledge-base/document-format.md` | Creating or editing any KB document |
 | [Request Logging](knowledge-base/request-logging.md) | `rules/knowledge-base/request-logging.md` | After every interaction |
 | [Close the Loop](knowledge-base/close-the-loop.md) | `rules/knowledge-base/close-the-loop.md` | Every reply — ensure actionable info is written to KB |

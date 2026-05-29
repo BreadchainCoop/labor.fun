@@ -39,6 +39,7 @@ Breadbrich Engels maintains a structured KB in `groups/slack_main/context/`. The
 | Rule | When to Read |
 |------|-------------|
 | [Storage Systems](storage.md) | Understanding what lives in markdown vs SQLite |
+| [Full-Text Search](search.md) | Ranked KB search (FTS5) — when grep isn't enough |
 | [Document Format](document-format.md) | Creating or editing any KB document |
 | [Task Management](tasks.md) | Creating, updating, linking, or querying tasks |
 | [Request Logging](request-logging.md) | After every interaction (mandatory) |

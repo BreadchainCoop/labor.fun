@@ -209,6 +209,31 @@ Action items extracted from meeting transcripts that need coordinator approval b
 | resulting_task_id | TEXT | TASK-NNN id created on approval |
 | rejection_reason | TEXT | Optional reason given by coordinator |
 
+### kb_fragments
+
+FTS5 virtual table — chunked KB markdown for ranked full-text search. See `src/kb-index.ts` and `rules/knowledge-base/search.md`.
+
+| Column | Type | Notes |
+|---|---|---|
+| group_folder | TEXT (UNINDEXED) | Owning group's folder |
+| source_path | TEXT (UNINDEXED) | Markdown path relative to the group's `context/` dir |
+| heading | TEXT | Section heading (searchable) |
+| content | TEXT | Fragment body (searchable; tokenizer `porter unicode61`) |
+
+Query with `WHERE kb_fragments MATCH '"term"'` and rank by `bm25(kb_fragments)`. Created inside a try/catch — absent if SQLite lacks the FTS5 module.
+
+### kb_indexed_files
+
+Tracks per-file index state so re-indexing can skip unchanged files.
+
+| Column | Type | Notes |
+|---|---|---|
+| group_folder | TEXT | PK part — owning group |
+| source_path | TEXT | PK part — path relative to `context/` |
+| mtime_ms | INTEGER | File mtime at last index (incremental gate) |
+| fragment_count | INTEGER | Fragments produced from this file |
+| indexed_at | TEXT | ISO timestamp of last index |
+
 ## Indices
 
 | Index | Columns | Purpose |

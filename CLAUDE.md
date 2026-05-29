@@ -35,6 +35,8 @@ Read `rules/INDEX.md` for the full cross-linked index. When modifying Breadbrich
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
+| `src/evaluators/` | Post-turn evaluators (Eliza-style) — deterministic follow-up after each reply |
+| `src/kb-index.ts` | KB full-text search index (SQLite FTS5); see `rules/knowledge-base/search.md` |
 | `src/db.ts` | SQLite operations; see `schema/tables.md` for schema reference |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `groups/slack_main/context/` | Knowledge base (people, tasks, calendar, artifacts) |

@@ -51,8 +51,10 @@ import {
   startAgentRun,
   completeAgentRun,
 } from './db.js';
+import { runEvaluators } from './evaluators/index.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import { reindexAllGroups } from './kb-index.js';
 import { startEmailPoller } from './email-poller.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -335,6 +337,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // Accumulate the user-facing text for the post-turn evaluator pipeline.
+  let sentText = '';
 
   // ACK pattern: react with a thinking emoji on the triggering message,
   // then swap to a checkmark when processing completes.
@@ -358,6 +362,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
+        sentText += (sentText ? '\n' : '') + text;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -416,6 +421,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   completeAgentRun(runId, 'success', outputText.length, runDuration);
+
+  // Post-turn evaluators (Eliza-style): deterministic follow-up bookkeeping
+  // — request logging, KB re-indexing — run in the orchestrator after the
+  // reply was sent. Fully error-isolated; never affects the cursor or reply.
+  try {
+    const groupDir = resolveGroupFolderPath(group.folder);
+    await runEvaluators({
+      group,
+      chatJid,
+      channel: channelRoute,
+      userMessages: missedMessages,
+      responseText: sentText,
+      groupDir,
+      contextDir: path.join(groupDir, 'context'),
+      runId,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    logger.warn({ err, group: group.name }, 'Evaluator pipeline error');
+  }
+
   return true;
 }
 
@@ -678,6 +704,15 @@ async function main(): Promise<void> {
   }
 
   loadState();
+
+  // Warm the KB full-text search index (incremental; cheap on unchanged KBs).
+  try {
+    const kbResult = reindexAllGroups();
+    logger.info({ ...kbResult }, 'KB search index warmed');
+  } catch (err) {
+    logger.warn({ err }, 'KB index warm-up failed (search may be stale)');
+  }
+
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)

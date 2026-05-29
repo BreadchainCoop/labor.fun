@@ -317,6 +317,40 @@ function createSchema(database: Database.Database): void {
     `CREATE INDEX IF NOT EXISTS idx_kb_audit ON kb_audit_log(file_path, timestamp)`,
   );
 
+  // --- Knowledge-base full-text search index ---
+  // FTS5 virtual table holding chunked KB markdown fragments for ranked
+  // (BM25) search, plus a companion table tracking per-file mtime so the
+  // indexer can skip unchanged files. See src/kb-index.ts.
+  //
+  // FTS5 ships with the better-sqlite3 amalgamation, but we still guard the
+  // CREATE in case a custom SQLite build lacks the module — KB search then
+  // degrades to a no-op (callers check kbIndexAvailable()) rather than
+  // crashing the orchestrator on boot.
+  try {
+    database.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS kb_fragments USING fts5(
+        group_folder UNINDEXED,
+        source_path UNINDEXED,
+        heading,
+        content,
+        tokenize = 'porter unicode61'
+      );
+      CREATE TABLE IF NOT EXISTS kb_indexed_files (
+        group_folder TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        mtime_ms INTEGER NOT NULL,
+        fragment_count INTEGER NOT NULL,
+        indexed_at TEXT NOT NULL,
+        PRIMARY KEY (group_folder, source_path)
+      );
+    `);
+  } catch (err) {
+    logger.warn(
+      { err },
+      'FTS5 unavailable — KB full-text search disabled (kb_fragments not created)',
+    );
+  }
+
   // --- Agent runs log ---
   database.exec(`
     CREATE TABLE IF NOT EXISTS agent_runs (
