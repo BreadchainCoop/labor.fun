@@ -50,7 +50,14 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install agent-browser, claude-code, and Google Workspace CLI (gws — Gmail,
 # Calendar, Drive, Docs, Sheets, Tasks via a single MCP server) globally.
-RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli
+#
+# gws is PINNED to 0.7.0 — the last release that ships the `gws mcp` stdio MCP
+# server. Upstream removed the `mcp` subcommand in 0.8.0 (CHANGELOG:
+# "dd3fc90: Remove `mcp` command"), so any newer/unpinned version installs a
+# plain REST CLI with no MCP mode, and the agent-runner's `gws mcp -s …`
+# launch fails with "Unknown service 'mcp'". Revisit if/when an official
+# Google Workspace MCP server returns as a supported package.
+RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli@0.7.0
 
 # Install the official GitHub MCP server (pinned + checksum-verified).
 # Arch-matched to the container so it works whether built on amd64 or
