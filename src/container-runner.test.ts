@@ -43,7 +43,11 @@ vi.mock('fs', async () => {
       writeFileSync: vi.fn(),
       readFileSync: vi.fn(() => ''),
       readdirSync: vi.fn(() => []),
-      statSync: vi.fn(() => ({ isDirectory: () => false })),
+      statSync: vi.fn(() => ({
+        isDirectory: () => false,
+        isFile: () => false,
+      })),
+      realpathSync: vi.fn((p: string) => p),
       copyFileSync: vi.fn(),
     },
   };
@@ -110,6 +114,7 @@ vi.mock('child_process', async () => {
 });
 
 import { spawn } from 'child_process';
+import fs from 'fs';
 import { logger } from './logger.js';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
@@ -315,5 +320,155 @@ describe('container-runner GitHub PAT injection', () => {
     expect(args).not.toContain('GITHUB_PERSONAL_ACCESS_TOKEN');
     // No env override is applied at all when the token is absent
     expect(opts.env).toBeUndefined();
+  });
+});
+
+describe('container-runner Google Workspace credentials mount', () => {
+  const HOST_CREDS_PATH = '/home/test/.config/gws/credentials.json';
+  const CONTAINER_CREDS_PATH = '/run/secrets/gws-credentials.json';
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.debug).mockClear();
+    vi.mocked(logger.info).mockClear();
+    vi.mocked(logger.warn).mockClear();
+    savedEnv = process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE;
+    delete process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE;
+    // Reset fs mocks back to the "nothing exists" defaults
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => false,
+      isFile: () => false,
+    })) as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedEnv === undefined) {
+      delete process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE;
+    } else {
+      process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = savedEnv;
+    }
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnCall() {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1] as unknown as [string, string[], unknown];
+  }
+
+  it('mounts creds file and injects env var when path is valid', async () => {
+    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = HOST_CREDS_PATH;
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+    })) as never);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+
+    // Read-only bind-mount: hostPath:containerPath:ro (matches readonlyMountArgs mock)
+    expect(args).toContain(`${HOST_CREDS_PATH}:${CONTAINER_CREDS_PATH}:ro`);
+
+    // Env var carries the in-container path, not the host path
+    expect(args).toContain(
+      `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=${CONTAINER_CREDS_PATH}`,
+    );
+    expect(
+      args.some(
+        (a) =>
+          a.includes('GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE') &&
+          a.includes(HOST_CREDS_PATH),
+      ),
+    ).toBe(false);
+  });
+
+  it('omits mount and env var when GOOGLE_WORKSPACE_CREDENTIALS_FILE is unset', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+
+    expect(args.some((a) => a.includes(CONTAINER_CREDS_PATH))).toBe(false);
+    expect(
+      args.some((a) => a.startsWith('GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=')),
+    ).toBe(false);
+  });
+
+  it('omits mount and logs a warning when the path does not exist', async () => {
+    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = HOST_CREDS_PATH;
+    vi.mocked(fs.realpathSync).mockImplementation((() => {
+      throw new Error('ENOENT');
+    }) as never);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+    expect(args.some((a) => a.includes(CONTAINER_CREDS_PATH))).toBe(false);
+    expect(
+      args.some((a) => a.startsWith('GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=')),
+    ).toBe(false);
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      expect.objectContaining({ path: HOST_CREDS_PATH }),
+      expect.stringContaining('does not exist'),
+    );
+  });
+
+  it('omits mount and logs a warning when the path is a directory, not a file', async () => {
+    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = HOST_CREDS_PATH;
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => true,
+      isFile: () => false,
+    })) as never);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+    expect(args.some((a) => a.includes(CONTAINER_CREDS_PATH))).toBe(false);
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      expect.objectContaining({ path: HOST_CREDS_PATH }),
+      expect.stringContaining('not a regular file'),
+    );
+  });
+
+  it('rejects paths that resolve under blocked patterns (e.g. ~/.ssh)', async () => {
+    const sshPath = '/home/test/.ssh/id_rsa';
+    process.env.GOOGLE_WORKSPACE_CREDENTIALS_FILE = sshPath;
+    vi.mocked(fs.realpathSync).mockImplementation(((p: string) => p) as never);
+    vi.mocked(fs.statSync).mockImplementation((() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+    })) as never);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+    expect(args.some((a) => a.includes(CONTAINER_CREDS_PATH))).toBe(false);
+    expect(
+      args.some((a) => a.startsWith('GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE=')),
+    ).toBe(false);
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: sshPath,
+        blockedPattern: expect.stringMatching(/\.ssh|id_rsa/),
+      }),
+      expect.stringContaining('blocked pattern'),
+    );
   });
 });
