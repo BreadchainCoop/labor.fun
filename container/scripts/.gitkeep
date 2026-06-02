@@ -1,0 +1,4 @@
+# Keeps container/scripts/ in git so the Dockerfile `COPY scripts/ /app/scripts/`
+# step has a directory to copy. This dir holds task-script gate files at
+# runtime; it may legitimately be empty (PR #44 removed the last tracked file,
+# gcal-poll.mjs, which broke the container build until this placeholder).
