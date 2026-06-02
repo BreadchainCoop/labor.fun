@@ -1,7 +1,12 @@
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation
 
-FROM node:22-slim
+# Debian 13 (trixie) base: glibc 2.41. The bundled Google Workspace CLI (`gws`,
+# installed below) ships a prebuilt native binary that requires GLIBC_2.39+, so
+# the older bookworm-based node:22-slim (glibc 2.36) can install it but cannot
+# execute it. Trixie's apt resolves all the chromium deps below unchanged (the
+# t64 transitional packages cover the renamed libs), so this is a drop-in bump.
+FROM node:22-trixie-slim
 
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
