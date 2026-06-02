@@ -43,8 +43,9 @@ RUN install -dm 0755 /etc/apt/keyrings \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser, claude-code, and Google Calendar MCP globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code @cocal/google-calendar-mcp
+# Install agent-browser, claude-code, and Google Workspace CLI (gws — Gmail,
+# Calendar, Drive, Docs, Sheets, Tasks via a single MCP server) globally.
+RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli
 
 # Install the official GitHub MCP server (pinned + checksum-verified).
 # Arch-matched to the container so it works whether built on amd64 or
