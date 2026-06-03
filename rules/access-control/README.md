@@ -1,6 +1,6 @@
 # Access Control Rules
 
-These rules govern what Breadbrich Engels can share, who can see what, and how requests are authorized. **Read [privacy-policy.md](privacy-policy.md) before sharing ANY KB content.**
+These rules govern what the assistant can share, who can see what, and how requests are authorized. **Read [privacy-policy.md](privacy-policy.md) before sharing ANY KB content.**
 
 ## Quick Reference
 

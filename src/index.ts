@@ -68,9 +68,8 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { startGroupDigestLoop } from './group-digest.js';
-import { startDiscordMembersSyncLoop } from './integrations/discord-members-sync.js';
-import { startGitHubProjectSyncLoop } from './integrations/github-project-sync.js';
+import './integrations/index.js';
+import { startRegisteredIntegrations } from './integrations/registry.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import {
@@ -162,17 +161,11 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       'CLAUDE.md',
     );
     if (fs.existsSync(templateFile)) {
-      let content = fs.readFileSync(templateFile, 'utf-8');
-      if (ASSISTANT_NAME !== 'Breadbrich Engels') {
-        content = content.replace(
-          /^# Breadbrich Engels$/m,
-          `# ${ASSISTANT_NAME}`,
-        );
-        content = content.replace(
-          /You are Breadbrich Engels/g,
-          `You are ${ASSISTANT_NAME}`,
-        );
-      }
+      // Templates use the {{ASSISTANT_NAME}} token so any org/profile can
+      // brand its agent without the framework hardcoding a product name.
+      const content = fs
+        .readFileSync(templateFile, 'utf-8')
+        .replaceAll('{{ASSISTANT_NAME}}', ASSISTANT_NAME);
       fs.writeFileSync(groupMdFile, content);
       logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
     }
@@ -847,9 +840,9 @@ async function main(): Promise<void> {
       if (text) await channel.sendMessage(jid, text);
     },
   });
-  startGroupDigestLoop();
-  startGitHubProjectSyncLoop();
-  startDiscordMembersSyncLoop();
+  // Background flows self-register via ./integrations/index.js (mirrors the
+  // channel registry). Each checks its own config and no-ops when disabled.
+  startRegisteredIntegrations();
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);

@@ -1,26 +1,26 @@
 # Storage Systems
 
-Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds what is critical — don't query SQLite for KB data or edit markdown for message history.
+The assistant uses **two distinct storage systems**. Knowing which one holds what is critical — don't query SQLite for KB data or edit markdown for message history.
 
 ## 1. Markdown Files (Knowledge Base)
 
 **What**: All organizational knowledge — people, tasks, calendar, artifacts.
 **Where**: `groups/slack_main/context/` on disk, mounted into containers.
 **Format**: Markdown with YAML frontmatter (see [document-format.md](document-format.md)).
-**Managed by**: Breadbrich Engels reads/writes these files directly via filesystem operations.
+**Managed by**: the assistant reads/writes these files directly via filesystem operations.
 
 | Directory | Example File | Managed How |
 |-----------|-------------|-------------|
-| `context/people/` | `bob.md` | Breadbrich Engels creates/edits markdown files |
-| `context/tasks/` | `TASK-001.md` | Breadbrich Engels creates/edits markdown files |
-| `context/calendar/` | `2026-05-01-shape-rotator.md` | Breadbrich Engels creates/edits markdown files |
-| `context/artifacts/` | `request_log.md` | Breadbrich Engels creates/edits markdown files |
-| `context/index.md` | — | Breadbrich Engels maintains as master index |
-| `context/tasks/active.md` | — | Breadbrich Engels maintains as task index |
-| `context/calendar/upcoming.md` | — | Breadbrich Engels maintains as events index |
+| `context/people/` | `bob.md` | The assistant creates/edits markdown files |
+| `context/tasks/` | `TASK-001.md` | The assistant creates/edits markdown files |
+| `context/calendar/` | `2026-05-01-shape-rotator.md` | The assistant creates/edits markdown files |
+| `context/artifacts/` | `request_log.md` | The assistant creates/edits markdown files |
+| `context/index.md` | — | The assistant maintains as master index |
+| `context/tasks/active.md` | — | The assistant maintains as task index |
+| `context/calendar/upcoming.md` | — | The assistant maintains as events index |
 
 **Versioning**: Git-tracked. Changes committed to repo.
-**Access control**: Enforced by Breadbrich Engels reading `visibility` frontmatter — not by the filesystem.
+**Access control**: Enforced by the assistant reading `visibility` frontmatter — not by the filesystem.
 
 ## 2. SQLite Database (System State)
 
@@ -36,7 +36,7 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 | `registered_groups` | Group config (folder, trigger, container settings) | Orchestrator via IPC |
 | `sessions` | Claude SDK session IDs per group | Orchestrator (auto) |
 | `router_state` | KV state (last timestamps) | Orchestrator (auto) |
-| `scheduled_tasks` | Cron/interval/one-time task definitions | Breadbrich Engels via `schedule_task` MCP tool |
+| `scheduled_tasks` | Cron/interval/one-time task definitions | The assistant via `schedule_task` MCP tool |
 | `task_run_logs` | Execution history (duration, status, result) | Orchestrator (auto) |
 | `user_identities` | Platform ID → KB person mapping (presence = allowlisted) | Orchestrator + manual seeding |
 
@@ -48,13 +48,13 @@ Breadbrich Engels uses **two distinct storage systems**. Knowing which one holds
 | | Markdown (KB) | SQLite (System) |
 |---|---|---|
 | **Content type** | Organizational knowledge | Operational state |
-| **Who manages** | Breadbrich Engels (file read/write) | Orchestrator process |
+| **Who manages** | The assistant (file read/write) | Orchestrator process |
 | **Versioned in git** | Yes | No |
 | **Access from containers** | All groups (own context, read-only global) | All groups (cooperative mode); main only if `FLAT_ACCESS=false` |
 | **Schema** | YAML frontmatter + markdown body | Relational tables |
 | **Example** | "Person X is an admin with engineering tag" | "Message ID abc123 from <slack-user-id> at timestamp 1712764800" |
 
-## When Breadbrich Engels Queries SQLite
+## When the assistant Queries SQLite
 
 From **any group** in cooperative mode (the DB is mounted read-write at
 `/workspace/project/store/messages.db`). **You can and should query this
@@ -98,7 +98,7 @@ sqlite3 -readonly "$DB" "SELECT jid, name FROM chats ORDER BY last_message_time 
 Use `-readonly` for lookups. Never modify the DB schema — migrations are
 managed by `src/db.ts`.
 
-## When Breadbrich Engels Edits Markdown
+## When the assistant Edits Markdown
 
 From **any group** (each group has its own `context/` if configured):
 

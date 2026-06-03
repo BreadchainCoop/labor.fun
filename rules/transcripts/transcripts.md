@@ -5,7 +5,7 @@
 - No special tags required -- transcripts are an open workflow
 
 ## Trigger Detection
-Breadbrich Engels should recognize a transcript when:
+The assistant should recognize a transcript when:
 - A user explicitly says "here's a transcript", "meeting notes", "process this transcript", etc.
 - A large block of text is pasted that looks like a meeting transcript (multiple speakers, timestamps, dialogue format)
 - A user says "summarize this meeting" followed by text

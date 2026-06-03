@@ -1,20 +1,22 @@
 #!/bin/bash
-# Breadbrich Engels safe deploy — sources code from /opt/breadbrich-git/ (GitHub main).
+# labor.fun safe deploy — sources code from /opt/breadbrich-git/ (GitHub main).
 #
-# RUNS ON THE DROPLET (not locally). Lives at /opt/breadbrich-backups/safe-deploy.sh.
-# This file in the repo is the CANONICAL SOURCE; when it changes, copy it to
-# the droplet: `scp scripts/safe-deploy.sh "$DROPLET_HOST:/opt/breadbrich-backups/safe-deploy.sh"`
-# (the local ./scripts/deploy.sh wrapper does NOT auto-sync this — manual for now).
+# NOTE: setup/safe-deploy.sh is the canonical, self-updating deploy script
+# (installed to /opt/breadbrich-backups/safe-deploy.sh and refreshed on every
+# run). This scripts/ copy is a secondary variant kept in sync by hand.
 #
-# Flow:
+# RUNS ON THE DROPLET (not locally).
+#
+# Org-specific state (store/, data/, groups/) lives under profiles/$PROFILE/
+# (see src/profile.ts). Flow:
 #   1. git fetch + reset --hard to latest origin/main in /opt/breadbrich-git/
-#   2. Pre-deploy snapshot
-#   3. rsync /opt/breadbrich-git/ -> /opt/breadbrich/ (preserving stateful paths)
-#   4. npm install (only if deps changed)
-#   5. npm run build
-#   6. Optional container rebuild
-#   7. Restart Breadbrich Engels
-#   8. Health check; rollback on failure
+#   2. Migrate any legacy root-level state into profiles/$PROFILE/
+#   3. Pre-deploy snapshot
+#   4. rsync /opt/breadbrich-git/ -> /opt/breadbrich/ (preserving stateful paths)
+#   5. npm install (only if deps changed)
+#   6. npm run build
+#   7. Optional container rebuild
+#   8. Restart services; health check; rollback on failure
 
 set -uo pipefail
 
@@ -22,6 +24,15 @@ SOURCE="/opt/breadbrich-git"
 DEPLOY_ROOT="/opt/breadbrich"
 BACKUP_SCRIPT="/opt/breadbrich-backups/backup.sh"
 LOG="/opt/breadbrich-backups/deploy.log"
+
+# Active profile — its groups/store/data are the stateful paths to preserve.
+DEPLOY_ENV="$DEPLOY_ROOT/setup/breadbrich-deploy.env"
+PROFILE="${LABOR_PROFILE:-}"
+if [ -z "$PROFILE" ] && [ -f "$DEPLOY_ENV" ]; then
+  PROFILE="$(grep -E '^LABOR_PROFILE=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"'"'"'"' || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+PROFILE_REL="profiles/$PROFILE"
 
 log() { echo "[$(date -Iseconds)] $*" | tee -a "$LOG"; }
 
@@ -46,13 +57,25 @@ rollback() {
 
 STATEFUL_PATHS=(
   ".env" ".env.bak-*"
-  "store" "data" "groups" "logs"
+  "$PROFILE_REL/store" "$PROFILE_REL/data" "$PROFILE_REL/groups" "logs"
   "kb-ui/users.json"
   "repo-tokens"
   "node_modules" ".npm-cache"
 )
 
-log "=== Starting Breadbrich Engels safe deploy (from $SOURCE) ==="
+log "=== Starting labor.fun safe deploy (from $SOURCE, profile: $PROFILE) ==="
+
+# One-time migration: relocate legacy root-level state into the active
+# profile so rsync --delete can't wipe it. Idempotent.
+PROFILE_ABS="$DEPLOY_ROOT/$PROFILE_REL"
+for d in store data groups; do
+  if [ -e "$DEPLOY_ROOT/$d" ] && [ ! -e "$PROFILE_ABS/$d" ]; then
+    log "Migrating legacy $d -> $PROFILE_REL/$d"
+    mkdir -p "$PROFILE_ABS"
+    mv "$DEPLOY_ROOT/$d" "$PROFILE_ABS/$d"
+  fi
+done
+chown -R breadbrich:breadbrich "$PROFILE_ABS" 2>/dev/null || true
 
 # Fetch latest main
 log "git fetch + reset --hard origin/main..."

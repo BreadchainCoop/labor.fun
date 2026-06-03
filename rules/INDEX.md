@@ -1,10 +1,10 @@
-# Breadbrich Engels Rules Index
+# Assistant Rules Index
 
-Operational rules, access control policies, and process definitions. Breadbrich Engels reads these at runtime to determine how to handle requests. Each rule file is self-contained with cross-links to related rules.
+Operational rules, access control policies, and process definitions. The assistant reads these at runtime to determine how to handle requests. Each rule file is self-contained with cross-links to related rules.
 
-## How Breadbrich Engels Uses These Rules
+## How the assistant Uses These Rules
 
-When Breadbrich Engels starts a conversation, it reads the relevant rules based on context:
+When the assistant starts a conversation, it reads the relevant rules based on context:
 - **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md)
 - **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
 - **Cross-channel requests**: [Messaging](messaging/README.md)
@@ -35,4 +35,4 @@ When Breadbrich Engels starts a conversation, it reads the relevant rules based 
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Approval gate for tasks proposed from meeting transcripts |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
-| [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on BreadchainCoop repos |
+| [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on the org's GitHub org (`githubOrg`) |
