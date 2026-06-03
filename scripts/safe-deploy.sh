@@ -21,14 +21,15 @@
 set -uo pipefail
 
 # --- Resolve active profile + infra config (defaults preserve breadchain) ---
-SOURCE="${GIT_DIR:-/opt/breadbrich-git}"
+# Profiles are host-local (gitignored); read infra config from the LIVE install,
+# not the git mirror.
 BOOT_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
 PROFILE="${LABOR_PROFILE:-}"
-if [ -z "$PROFILE" ] && [ -f "$BOOT_ROOT/setup/breadbrich-deploy.env" ]; then
-  PROFILE="$(grep -E '^LABOR_PROFILE=' "$BOOT_ROOT/setup/breadbrich-deploy.env" | tail -1 | cut -d= -f2- | tr -d '"'"'"'"' || true)"
+if [ -z "$PROFILE" ] && [ -d "$BOOT_ROOT/profiles" ]; then
+  PROFILE="$(ls "$BOOT_ROOT/profiles" 2>/dev/null | grep -vx example | head -n1 || true)"
 fi
 PROFILE="${PROFILE:-breadchain}"
-DEPLOY_CONFIG="$SOURCE/profiles/$PROFILE/deploy.config"
+DEPLOY_CONFIG="$BOOT_ROOT/profiles/$PROFILE/deploy.config"
 # shellcheck disable=SC1090
 [ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
 SOURCE="${GIT_DIR:-/opt/breadbrich-git}"
@@ -64,9 +65,10 @@ rollback() {
 
 STATEFUL_PATHS=(
   ".env" ".env.bak-*"
-  # Preserve runtime state for every profile, not just the active one, so
-  # rsync --delete can't wipe another profile's DB/sessions (e.g. staging).
-  "profiles/*/store" "profiles/*/data" "$PROFILE_REL/groups" "profiles/staging" "logs"
+  # Org profiles are host-local (gitignored, not in the mirror). Preserve the
+  # whole active profile + any other profile's runtime so rsync --delete can't
+  # wipe them. Only `example` (tracked template) syncs from the mirror.
+  "$PROFILE_REL" "profiles/*/store" "profiles/*/data" "profiles/staging" "logs"
   "kb-ui/users.json"
   "repo-tokens"
   "node_modules" ".npm-cache"
@@ -77,13 +79,17 @@ log "=== Starting labor.fun safe deploy (from $SOURCE, profile: $PROFILE) ==="
 # One-time migration: relocate legacy root-level state into the active
 # profile so rsync --delete can't wipe it. Idempotent.
 PROFILE_ABS="$DEPLOY_ROOT/$PROFILE_REL"
+mkdir -p "$PROFILE_ABS"
 for d in store data groups; do
   if [ -e "$DEPLOY_ROOT/$d" ] && [ ! -e "$PROFILE_ABS/$d" ]; then
     log "Migrating legacy $d -> $PROFILE_REL/$d"
-    mkdir -p "$PROFILE_ABS"
     mv "$DEPLOY_ROOT/$d" "$PROFILE_ABS/$d"
   fi
 done
+if [ -f "$DEPLOY_ROOT/setup/breadbrich-deploy.env" ] && [ ! -e "$PROFILE_ABS/deploy.env" ]; then
+  log "Migrating legacy setup/breadbrich-deploy.env -> $PROFILE_REL/deploy.env"
+  mv "$DEPLOY_ROOT/setup/breadbrich-deploy.env" "$PROFILE_ABS/deploy.env"
+fi
 chown -R "$SERVICE_USER:$SERVICE_USER" "$PROFILE_ABS" 2>/dev/null || true
 
 # Fetch latest main

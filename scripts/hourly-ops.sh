@@ -11,19 +11,23 @@
 set -uo pipefail
 
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
-DEPLOY_ENV="$DEPLOY_ROOT/setup/breadbrich-deploy.env"
+# Profiles are host-local; autodetect the single non-example one.
 PROFILE="${LABOR_PROFILE:-}"
-KB_GROUP="${SHARED_KB_GROUP:-}"
-if [ -f "$DEPLOY_ENV" ]; then
-  [ -z "$PROFILE" ] && PROFILE="$(grep -E '^LABOR_PROFILE=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
-  [ -z "$KB_GROUP" ] && KB_GROUP="$(grep -E '^SHARED_KB_GROUP=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+if [ -z "$PROFILE" ] && [ -d "$DEPLOY_ROOT/profiles" ]; then
+  PROFILE="$(ls "$DEPLOY_ROOT/profiles" 2>/dev/null | grep -vx example | head -n1 || true)"
 fi
 PROFILE="${PROFILE:-breadchain}"
-# Infra config (DEPLOY_ROOT, REPO_URL, …) — defaults preserve breadchain.
+# Infra config (DEPLOY_ROOT, REPO_URL, …) from the live profile.
 DEPLOY_CONFIG="$DEPLOY_ROOT/profiles/$PROFILE/deploy.config"
 # shellcheck disable=SC1090
 [ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+# Shared KB group: explicit, else the profile's deploy.env, else default.
+KB_GROUP="${SHARED_KB_GROUP:-}"
+PROFILE_ENV="$DEPLOY_ROOT/profiles/$PROFILE/deploy.env"
+if [ -z "$KB_GROUP" ] && [ -f "$PROFILE_ENV" ]; then
+  KB_GROUP="$(grep -E '^SHARED_KB_GROUP=' "$PROFILE_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
 KB_GROUP="${KB_GROUP:-discord_main}"
 REPO="${REPO_URL:-https://github.com/BreadchainCoop/labor.fun.git}"
 REPO="${REPO#https://github.com/}"; REPO="${REPO%.git}"   # gh wants owner/name
