@@ -681,11 +681,45 @@ async function main(): Promise<void> {
   );
 
   // Graceful shutdown handlers
+  //
+  // Order matters. Disconnect the channels FIRST so each gateway session is
+  // cleanly torn down (DiscordChannel.disconnect() → client.destroy()) before
+  // anything that can block. Previously channels were disconnected LAST, after
+  // proxyServer.close() + queue.shutdown(): proxyServer.close() waits for
+  // in-flight credential-proxy connections (a running agent container streaming
+  // a model response holds one open), which can outlast systemd's stop timeout.
+  // systemd then SIGKILLs the process before disconnect() ever runs, leaving the
+  // Discord gateway half-open — and the NEXT orchestrator inherits a "connected
+  // but receives no events" zombie session, so the bot silently stops
+  // responding until it is restarted again.
+  //
+  // A force-exit backstop guarantees we exit well within systemd's stop window
+  // even if a disconnect/close/drain hangs, so the process terminates cleanly
+  // rather than being SIGKILLed. `shuttingDown` guards a second racing signal.
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info({ signal }, 'Shutdown signal received');
+
+    const force = setTimeout(() => {
+      logger.warn('Graceful shutdown exceeded 8s — forcing exit');
+      process.exit(0);
+    }, 8000);
+    force.unref();
+
+    // 1. Close channel gateways first — bounded so a slow disconnect can't hang.
+    await Promise.race([
+      Promise.allSettled(channels.map((ch) => ch.disconnect())),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
+
+    // 2. Best-effort drain of everything else; none of it can resurrect the
+    //    gateway, so it's safe even if the force-exit fires mid-drain.
     proxyServer.close();
-    await queue.shutdown(10000);
-    for (const ch of channels) await ch.disconnect();
+    await queue.shutdown(3000);
+
+    clearTimeout(force);
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
