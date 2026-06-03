@@ -1,6 +1,6 @@
 # Close the Loop
 
-**HARD RULE: Every Breadbrich Engels interaction that surfaces actionable information MUST write to the KB, not just reply in chat.**
+**HARD RULE: Every assistant interaction that surfaces actionable information MUST write to the KB, not just reply in chat.**
 
 ## Task Creation
 - ALWAYS create a TASK-NNN.md file for any actionable request (maintenance, expense, event, purchase, scheduling)

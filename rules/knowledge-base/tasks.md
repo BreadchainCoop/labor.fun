@@ -65,7 +65,7 @@ Format:
 | Date | User | Comment |
 |------|------|---------|
 | 2026-04-10 14:30 | Bob | Created task from Slack discussion |
-| 2026-04-11 09:00 | Breadbrich Engels | Status changed: open → in_progress |
+| 2026-04-11 09:00 | The assistant | Status changed: open → in_progress |
 ```
 
 ## Task-Event Linking

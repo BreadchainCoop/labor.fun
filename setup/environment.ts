@@ -7,7 +7,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { STORE_DIR } from '../src/config.js';
+import { DATA_DIR, STORE_DIR } from '../src/config.js';
 import { logger } from '../src/logger.js';
 import { commandExists, getPlatform, isHeadless, isWSL } from './platform.js';
 import { emitStatus } from './status.js';
@@ -42,12 +42,12 @@ export async function run(_args: string[]): Promise<void> {
   // Check existing config
   const hasEnv = fs.existsSync(path.join(projectRoot, '.env'));
 
-  const authDir = path.join(projectRoot, 'store', 'auth');
+  const authDir = path.join(STORE_DIR, 'auth');
   const hasAuth = fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
 
   let hasRegisteredGroups = false;
   // Check JSON file first (pre-migration)
-  if (fs.existsSync(path.join(projectRoot, 'data', 'registered_groups.json'))) {
+  if (fs.existsSync(path.join(DATA_DIR, 'registered_groups.json'))) {
     hasRegisteredGroups = true;
   } else {
     // Check SQLite directly using better-sqlite3 (no sqlite3 CLI needed)

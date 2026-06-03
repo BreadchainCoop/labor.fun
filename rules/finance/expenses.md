@@ -1,20 +1,20 @@
 # Expense Rules
 
 ## Who Can Request
-- Any member of the org, from any chat Breadbrich Engels monitors.
+- Any member of the org, from any chat the assistant monitors.
 - Required fields: amount, description.
 - Retrospective requests additionally require: `justification`, `incurred_date`, `receipt_path`.
 
 ## Preferred Path: Prospective
-1. Requester describes the intended expense to Breadbrich Engels.
-2. Breadbrich Engels calls `request_expense` with the details.
+1. Requester describes the intended expense to the assistant.
+2. The assistant calls `request_expense` with the details.
 3. Approver receives notification in the main group, decides: approve / deny / modify.
 4. On approval, requester makes the purchase and attaches receipt via `submit_receipt`.
 5. Finance reimburses via `process_reimbursement`.
 
 ## Discouraged Path: Retrospective
 - Use ONLY for backlog cleanup — expenses already spent without prior approval.
-- Breadbrich Engels MUST surface a friction message: *"Prospective requests are preferred. Please loop in the approver before spending next time."*
+- The assistant MUST surface a friction message: *"Prospective requests are preferred. Please loop in the approver before spending next time."*
 - Receipt must be attached at submission time.
 - Approver may still deny retrospective expenses.
 - Retrospective expenses cannot be modified — only approved or denied as-submitted.

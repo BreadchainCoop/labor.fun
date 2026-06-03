@@ -1,13 +1,14 @@
 #!/bin/bash
-# Deploy Breadbrich Engels from GitHub main to the droplet.
+# Deploy labor.fun from GitHub main to this org's host.
 #
-# The droplet pulls from GitHub (via /opt/breadbrich-git/) rather than rsyncing from
-# this machine — GitHub main is now the source of truth. This script just
-# triggers the droplet-side safe-deploy.
+# The host pulls from GitHub (via $GIT_DIR) rather than rsyncing from this
+# machine — GitHub main is the source of truth. This script just triggers the
+# host-side safe-deploy. Infra paths/names come from the active profile's
+# deploy.config (defaults preserve breadchain).
 #
 # Usage:
 #   ./scripts/deploy.sh           # deploy latest origin/main
-#   ./scripts/deploy.sh --status  # show current state on droplet
+#   ./scripts/deploy.sh --status  # show current state on the host
 #   ./scripts/deploy.sh --logs    # tail the deploy log
 
 set -euo pipefail
@@ -22,23 +23,33 @@ if [ -f "$REPO_ROOT/.env" ]; then
 fi
 DROPLET="${DROPLET_HOST:?Set DROPLET_HOST in .env or environment (e.g. root@your-droplet)}"
 
+# Infra config from the local profile (defaults preserve breadchain).
+PROFILE="${LABOR_PROFILE:-breadchain}"
+DEPLOY_CONFIG="$REPO_ROOT/profiles/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/breadbrich-backups}"
+SERVICE_NAME="${SERVICE_NAME:-breadbrich}"
+SERVICE_USER="${SERVICE_USER:-breadbrich}"
+
 case "${1:-}" in
   --status)
-    ssh "$DROPLET" '
-      echo "=== Breadbrich Engels service ==="
-      systemctl is-active breadbrich
-      echo ""
-      echo "=== Source of truth (origin/main via /opt/breadbrich-git) ==="
-      su - breadbrich -c "cd /opt/breadbrich-git && git log -1 --oneline"
-      echo ""
-      echo "=== Last deploy log entries ==="
-      tail -20 /opt/breadbrich-backups/deploy.log
-    '
+    ssh "$DROPLET" "
+      echo '=== $SERVICE_NAME service ==='
+      systemctl is-active '$SERVICE_NAME'
+      echo ''
+      echo '=== Source of truth (origin/main via $GIT_DIR) ==='
+      su - '$SERVICE_USER' -c 'cd $GIT_DIR && git log -1 --oneline'
+      echo ''
+      echo '=== Last deploy log entries ==='
+      tail -20 '$BACKUP_DIR/deploy.log'
+    "
     exit 0
     ;;
 
   --logs)
-    ssh "$DROPLET" 'tail -f /opt/breadbrich-backups/deploy.log'
+    ssh "$DROPLET" "tail -f '$BACKUP_DIR/deploy.log'"
     exit 0
     ;;
 
@@ -51,5 +62,5 @@ case "${1:-}" in
     ;;
 esac
 
-echo "=== Deploying Breadbrich Engels (latest origin/main) via droplet git-pull ==="
-ssh "$DROPLET" "/opt/breadbrich-backups/safe-deploy.sh"
+echo "=== Deploying labor.fun ($SERVICE_NAME, latest origin/main) via host git-pull ==="
+ssh "$DROPLET" "$BACKUP_DIR/safe-deploy.sh"

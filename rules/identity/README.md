@@ -1,6 +1,6 @@
 # Identity & RBAC Rules
 
-How Breadbrich Engels determines who is making a request. After the flat-permission refactor there are two states: **allowlisted** (a known KB person) and **unknown** — there are no tiers in between.
+How the assistant determines who is making a request. After the flat-permission refactor there are two states: **allowlisted** (a known KB person) and **unknown** — there are no tiers in between.
 
 ## Identity Resolution Pipeline
 

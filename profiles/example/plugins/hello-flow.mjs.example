@@ -1,0 +1,16 @@
+// Example profile plugin. Rename to `hello-flow.mjs` (drop `.example`) to
+// activate it. Registers a trivial background flow that logs on a timer — copy
+// this shape for real channels/integrations. See profiles/example/plugins/README.md.
+
+export default function register({ registerIntegration, logger }) {
+  let timer;
+  registerIntegration({
+    name: 'hello-flow',
+    start: () => {
+      logger.info('[hello-flow] example profile plugin started');
+      // Replace with real work (poll an API, sync to the KB, etc.).
+      timer = setInterval(() => logger.info('[hello-flow] tick'), 3_600_000);
+    },
+    stop: () => clearInterval(timer),
+  });
+}

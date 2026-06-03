@@ -2,7 +2,7 @@
 # Replace with your org's maintainers team or GitHub handles, e.g. @BreadchainCoop/maintainers
 /src/
 /container/
-/groups/
+/profiles/
 /launchd/
 /package.json
 /package-lock.json

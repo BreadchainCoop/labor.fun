@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Breadbrich Engels/Breadbrich Engels post-deploy smoke test
+# labor.fun post-deploy smoke test
 # Run locally — tests the remote droplet via SSH
 # Usage: bash scripts/smoke-test.sh
+#   LABOR_PROFILE selects which profile's DB to inspect (default: read from the
+#   droplet's deploy env, else "breadchain").
 
 set -uo pipefail
 
@@ -15,6 +17,26 @@ if [ -f "$REPO_ROOT/.env" ]; then
 fi
 HOST="${DROPLET_HOST:?Set DROPLET_HOST in .env or environment (e.g. root@your-droplet)}"
 
+# Resolve the active profile: explicit LABOR_PROFILE, else the single
+# non-example profile in this local checkout, else default. Its store/ holds the
+# DB the smoke test inspects.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROFILES_DIR="$SCRIPT_DIR/../profiles"
+PROFILE="${LABOR_PROFILE:-}"
+if [ -z "$PROFILE" ] && [ -d "$PROFILES_DIR" ]; then
+  PROFILE="$(ls "$PROFILES_DIR" 2>/dev/null | grep -vx example | head -n1 || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+DB_REL="profiles/$PROFILE/store/messages.db"
+
+# Infra (DEPLOY_ROOT, SERVICE_USER) from the local profile config; defaults
+# preserve breadchain.
+DEPLOY_CONFIG="$PROFILES_DIR/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+SERVICE_USER="${SERVICE_USER:-breadbrich}"
+
 # Comma-separated list of JIDs the smoke test should assert are registered.
 # If unset, the per-JID assertions are skipped.
 IFS=',' read -ra EXPECTED_JIDS <<< "${EXPECTED_REGISTERED_JIDS:-}"
@@ -25,7 +47,7 @@ FAIL=0
 pass() { echo "  ✓ $1"; ((PASS++)); }
 fail() { echo "  ✗ $1"; ((FAIL++)); }
 
-echo "=== Breadbrich Engels/Breadbrich Engels Smoke Tests ==="
+echo "=== labor.fun Smoke Tests ==="
 echo ""
 
 # 1. Service is running
@@ -60,7 +82,7 @@ if [ "$EXPECTED_GROUPS" -gt 0 ]; then
   fi
 
   # 4. All expected JIDs registered
-  all_jids=$(ssh "$HOST" "su - breadbrich -c 'cd /opt/breadbrich && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"store/messages.db\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
+  all_jids=$(ssh "$HOST" "su - $SERVICE_USER -c 'cd $DEPLOY_ROOT && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"$DB_REL\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
   for jid in "${EXPECTED_JIDS[@]}"; do
     if echo "$all_jids" | grep -qF "$jid"; then
       pass "Registered: $jid"
