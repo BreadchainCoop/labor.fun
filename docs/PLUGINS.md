@@ -6,11 +6,47 @@ registration runs at startup. Nothing edits the core message loop.
 
 | Extension | Registry | Barrel | Add an org-specific one in |
 |---|---|---|---|
-| Channel | `src/channels/registry.ts` | `src/channels/index.ts` | `src/channels/` |
-| Flow (background integration) | `src/integrations/registry.ts` | `src/integrations/index.ts` | `src/integrations/` or `<profile>/plugins/` |
+| Channel | `src/channels/registry.ts` | `src/channels/index.ts` | `src/channels/` (built-in) or **`<profile>/plugins/`** |
+| Flow (background integration) | `src/integrations/registry.ts` | `src/integrations/index.ts` | `src/integrations/` (built-in) or **`<profile>/plugins/`** |
 | Container skill | filesystem | — | `container/skills/` or `<profile>/container-skills/` |
 | Setup step | `setup/index.ts` `STEPS` | — | `setup/` |
 | Rules / KB | filesystem (markdown) | — | `rules/` (core) + `<profile>/groups/` (org) |
+| **Infra / deploy** | `profiles/<org>/deploy.config` | — | each org's profile |
+
+> **Org-specific vs built-in.** Anything in `src/` ships with the framework and
+> is shared by every org. For per-org capabilities — which is the norm when one
+> install serves multiple organizations — put **channels and flows in
+> `<profile>/plugins/`** (below), skills in `<profile>/container-skills/`, and
+> infra in `<profile>/deploy.config`. No framework edits, no merge conflicts
+> between orgs.
+
+## 0. Profile plugins (per-org channels &amp; flows)
+
+The cleanest place for an org's own code. Every `.js`/`.mjs`/`.cjs` file in the
+active profile's `plugins/` directory is loaded at startup (after the built-ins)
+and its `default` (or named `register`) export is called with a small API:
+
+```js
+// profiles/<org>/plugins/sms.mjs
+export default function register({ registerChannel, registerIntegration, readEnvFile, logger }) {
+  registerChannel('sms', (opts) => {
+    const env = readEnvFile(['TWILIO_SID', 'TWILIO_TOKEN']);
+    if (!env.TWILIO_SID) return null;        // missing creds → skipped
+    return new SmsChannel(opts, env);
+  });
+
+  registerIntegration({
+    name: 'nightly-export',
+    start: () => setInterval(() => exportToKb(), 86_400_000),
+  });
+}
+```
+
+The `PluginApi` exposes `registerChannel`, `registerIntegration`, `readEnvFile`,
+and `logger`. Plugins are **plain JS** (the framework build compiles `src/`, not
+`profiles/`), load in filename order, can shadow a built-in by re-registering
+the same name, and are isolated — a throwing plugin is logged and skipped, never
+fatal. The `Channel` / `Integration` interfaces below define what to return.
 
 ---
 

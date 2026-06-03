@@ -10,7 +10,7 @@
 
 set -uo pipefail
 
-DEPLOY_ROOT="/opt/breadbrich"
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
 DEPLOY_ENV="$DEPLOY_ROOT/setup/breadbrich-deploy.env"
 PROFILE="${LABOR_PROFILE:-}"
 KB_GROUP="${SHARED_KB_GROUP:-}"
@@ -19,8 +19,14 @@ if [ -f "$DEPLOY_ENV" ]; then
   [ -z "$KB_GROUP" ] && KB_GROUP="$(grep -E '^SHARED_KB_GROUP=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
 PROFILE="${PROFILE:-breadchain}"
+# Infra config (DEPLOY_ROOT, REPO_URL, …) — defaults preserve breadchain.
+DEPLOY_CONFIG="$DEPLOY_ROOT/profiles/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
 KB_GROUP="${KB_GROUP:-discord_main}"
-REPO="${LABOR_REPO:-BreadchainCoop/labor.fun}"
+REPO="${REPO_URL:-https://github.com/BreadchainCoop/labor.fun.git}"
+REPO="${REPO#https://github.com/}"; REPO="${REPO%.git}"   # gh wants owner/name
 
 LOG="$DEPLOY_ROOT/logs/hourly-ops.log"
 GROUPS="$DEPLOY_ROOT/profiles/$PROFILE/groups"

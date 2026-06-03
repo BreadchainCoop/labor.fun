@@ -52,9 +52,11 @@ Five consistent extension points — all self-register the same way (see
 
 | Extension | Mechanism | Lives in |
 |---|---|---|
-| **Channel** | `registerChannel()` + barrel import | `src/channels/` |
-| **Flow** (background integration) | `registerIntegration()` + barrel import | `src/integrations/` |
+| **Profile plugin** (org channels &amp; flows) | `export default register(api)`, auto-loaded | **`<profile>/plugins/`** |
+| **Channel** (built-in) | `registerChannel()` + barrel import | `src/channels/` |
+| **Flow** (built-in background integration) | `registerIntegration()` + barrel import | `src/integrations/` |
 | **Container skill** | drop a `SKILL.md` folder | `container/skills/` or `<profile>/container-skills/` |
+| **Infra / deploy** | per-org `deploy.config` | `<profile>/deploy.config` |
 | **Setup step** | add to the `STEPS` registry | `setup/` |
 | **Rules / KB** | markdown | `rules/` (core) + `<profile>/groups/` (org) |
 

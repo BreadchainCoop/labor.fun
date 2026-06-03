@@ -1,13 +1,13 @@
 [Unit]
-Description=Run breadbrich-auto-deploy every 2 minutes
-Requires=breadbrich-auto-deploy.service
+Description=Run ${AUTO_DEPLOY_NAME} every 2 minutes
+Requires=${AUTO_DEPLOY_NAME}.service
 
 [Timer]
 # First tick 1 minute after boot, then every 2 minutes.
 OnBootSec=1min
 OnUnitActiveSec=2min
 AccuracySec=10s
-Unit=breadbrich-auto-deploy.service
+Unit=${AUTO_DEPLOY_NAME}.service
 
 [Install]
 WantedBy=timers.target

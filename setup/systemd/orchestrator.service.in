@@ -1,0 +1,24 @@
+[Unit]
+Description=labor.fun orchestrator (${SERVICE_NAME})
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${DEPLOY_ROOT}
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Non-secret runtime config (NODE_ENV, LABOR_PROFILE, KB_*, CREDENTIAL_PROXY_HOST,
+# ...) lives in the per-org deploy env. Secrets stay in ${DEPLOY_ROOT}/.env
+# (loaded by readEnvFile inside Node, not by systemd).
+EnvironmentFile=-${DEPLOY_ENV_FILE}
+ExecStart=/usr/bin/node ${DEPLOY_ROOT}/dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=append:${DEPLOY_ROOT}/logs/${SERVICE_NAME}.log
+StandardError=append:${DEPLOY_ROOT}/logs/${SERVICE_NAME}.error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -109,18 +109,57 @@ the per-channel skills (`/add-slack`, `/add-telegram`, `/add-discord`).
 
 ## 8. (Optional) Add org-specific capabilities
 
-- **Agent skills** for your org: drop a `SKILL.md` folder in
+Everything an org owns lives in its profile — no framework edits:
+
+- **Plugins** (your own channels &amp; background flows): drop a `.mjs` file in
+  `profiles/acme/plugins/` exporting `default function register(api)`. It's
+  auto-loaded at startup. See [PLUGINS.md](PLUGINS.md) §0.
+- **Agent skills**: drop a `SKILL.md` folder in
   `profiles/acme/container-skills/`. It overlays the core `container/skills/`.
-- **Background flows / plugins**: see [PLUGINS.md](PLUGINS.md).
+
+## 9. (Optional) Your own production infrastructure
+
+Each org runs on its own host with its own install path, systemd service names,
+and OS user. Those are **not** baked into the framework — they come from
+`profiles/acme/deploy.config` (copied from `profiles/example/deploy.config`):
+
+```sh
+DEPLOY_ROOT=/opt/acme            # install dir on the host
+GIT_DIR=/opt/acme-git            # git mirror
+BACKUP_DIR=/opt/acme-backups
+SERVICE_NAME=acme                # → acme.service
+KB_SERVICE_NAME=acme-kb          # → acme-kb.service
+AUTO_DEPLOY_NAME=acme-auto-deploy
+SERVICE_USER=acme                # OS user that owns the install
+REPO_URL=https://github.com/your-org/labor.fun.git
+DEPLOY_ENV_FILE=/opt/acme/profiles/acme/deploy.env
+```
+
+The deploy scripts (`scripts/deploy.sh`, `setup/safe-deploy.sh`, …) read this
+file based on `LABOR_PROFILE` and provision the host accordingly — systemd units
+are **rendered from templates** in `setup/systemd/*.in` with your service names
+and paths. The safety-critical logic (drain in-flight agent containers, atomic
+rollback, profile-state migration) is shared and identical for every org; only
+these values differ. With no `deploy.config`, the defaults reproduce the
+reference (breadchain) host.
 
 ---
 
-## Running multiple orgs
+## Running multiple orgs from one checkout
 
-One checkout, one active profile at a time, selected by `LABOR_PROFILE`. Each
-profile keeps its own `store/` (database) and `data/` (sessions), so orgs never
-share state. To run several orgs simultaneously, run one process per profile
-(separate `LABOR_PROFILE` + separate ports), or one checkout per org.
+This is the monorepo model: **everyone clones the same `labor.fun` repo**, and
+each org lives in its own `profiles/<org>/` directory — config, KB, plugins, and
+`deploy.config`. `LABOR_PROFILE` selects which one is active. Each profile keeps
+its own `store/` (database) and `data/` (sessions), so orgs never share state.
+
+- **Three orgs, three hosts:** clone the repo on each host, set
+  `LABOR_PROFILE=<org>`, and give each its own `deploy.config`. Pull framework
+  updates with `git pull` on each host's cadence.
+- **Several orgs on one box (dev):** run one process per profile with distinct
+  `LABOR_PROFILE` + `CREDENTIAL_PROXY_PORT` + `KB_PORT`.
+
+Org code (plugins, infra config, KB) never touches `src/`, so framework upgrades
+land cleanly for all orgs and orgs can't conflict with each other.
 
 ## Renaming / forking the framework
 
