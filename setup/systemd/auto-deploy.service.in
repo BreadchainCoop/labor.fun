@@ -1,0 +1,15 @@
+[Unit]
+Description=labor.fun auto-deploy (${AUTO_DEPLOY_NAME}) — poll origin/main and run safe-deploy when behind
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Without HOME, the inline `git config --global ...` calls inside safe-deploy.sh
+# fail with "fatal: $HOME not set" and trip the ERR trap → rollback. Setting
+# HOME=/root puts git's global config in the standard place for root operations;
+# per-user (service user) git calls are unaffected (su - sets its own HOME).
+Environment=HOME=/root
+ExecStart=${BACKUP_DIR}/auto-deploy.sh
+StandardOutput=append:${DEPLOY_ROOT}/logs/auto-deploy.log
+StandardError=append:${DEPLOY_ROOT}/logs/auto-deploy.error.log

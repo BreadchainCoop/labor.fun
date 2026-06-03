@@ -16,7 +16,9 @@ import {
   IDLE_TIMEOUT,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
+  PROFILE_DIR,
   SHARED_KB_GROUP,
+  STORE_DIR,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -93,10 +95,10 @@ function buildVolumeMounts(
     }
 
     // Main gets writable access to the store (SQLite DB) so it can
-    // query and write to the database directly.
-    const storeDir = path.join(projectRoot, 'store');
+    // query and write to the database directly. The DB lives under the
+    // active profile (STORE_DIR), surfaced at the same container path.
     mounts.push({
-      hostPath: storeDir,
+      hostPath: STORE_DIR,
       containerPath: '/workspace/project/store',
       readonly: false,
     });
@@ -180,14 +182,23 @@ function buildVolumeMounts(
   }
   fs.writeFileSync(settingsFile, JSON.stringify(settingsObj, null, 2) + '\n');
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  // Sync skills into each group's .claude/skills/. Core framework skills from
+  // container/skills/ first, then the active profile's container-skills/ on
+  // top — so an org can add or override agent skills without forking core.
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  const skillSources = [
+    path.join(process.cwd(), 'container', 'skills'),
+    path.join(PROFILE_DIR, 'container-skills'),
+  ];
+  for (const skillsSrc of skillSources) {
+    if (!fs.existsSync(skillsSrc)) continue;
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
+      // Clear the destination first so a profile overlay fully replaces a
+      // same-named core skill (and stale files from a prior run never linger).
+      fs.rmSync(dstDir, { recursive: true, force: true });
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }

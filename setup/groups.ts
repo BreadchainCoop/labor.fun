@@ -65,8 +65,9 @@ async function listGroups(limit: number): Promise<void> {
 
 async function syncGroups(projectRoot: string): Promise<void> {
   // Only WhatsApp needs an upfront group sync; other channels resolve names at runtime.
-  // Detect WhatsApp by checking for auth credentials on disk.
-  const authDir = path.join(projectRoot, 'store', 'auth');
+  // Detect WhatsApp by checking for auth credentials on disk (under the
+  // active profile's store/, resolved by config).
+  const authDir = path.join(STORE_DIR, 'auth');
   const hasWhatsAppAuth =
     fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
 
@@ -118,8 +119,8 @@ import fs from 'fs';
 import Database from 'better-sqlite3';
 
 const logger = pino({ level: 'silent' });
-const authDir = path.join('store', 'auth');
-const dbPath = path.join('store', 'messages.db');
+const authDir = ${JSON.stringify(authDir)};
+const dbPath = ${JSON.stringify(path.join(STORE_DIR, 'messages.db'))};
 
 if (!fs.existsSync(authDir)) {
   console.error('NO_AUTH');
@@ -191,7 +192,11 @@ sock.ev.on('connection.update', async (update) => {
       syncOk = output.includes('SYNCED:');
       logger.info({ output: output.trim() }, 'Sync output');
     } finally {
-      try { fs.unlinkSync(tmpScript); } catch { /* ignore cleanup errors */ }
+      try {
+        fs.unlinkSync(tmpScript);
+      } catch {
+        /* ignore cleanup errors */
+      }
     }
   } catch (err) {
     logger.error({ err }, 'Sync failed');

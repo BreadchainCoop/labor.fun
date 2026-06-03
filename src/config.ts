@@ -2,6 +2,11 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
+import {
+  PROJECT_ROOT,
+  loadProfileConfig,
+  resolveProfileDir,
+} from './profile.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
@@ -14,7 +19,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_MODEL',
   'NANOCLAW_SUBAGENT_MODEL',
   // Feature-flag / integration env vars defined further down in this file.
-  // systemd doesn't load /opt/breadbrich/.env globally, so anything that
+  // systemd doesn't load the install's .env globally, so anything that
   // should be operator-configurable must be listed here for readEnvFile to
   // pick it up at process start.
   'FLAT_ACCESS',
@@ -26,6 +31,9 @@ const envConfig = readEnvFile([
   'GITHUB_PROJECT_HIDE_TITLE_PATTERNS',
   'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
+  'LABOR_PROFILE',
+  'GITHUB_ORG',
+  'SERVICE_USER',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -33,8 +41,25 @@ function envVal(key: string): string | undefined {
   return process.env[key] ?? envConfig[key];
 }
 
+// --- Active profile (org instance) ---
+// The framework is org-agnostic; identity, KB content, and runtime state come
+// from the active profile under profiles/<name>/. See src/profile.ts.
+export const PROFILE_DIR = resolveProfileDir();
+export const PROFILE = loadProfileConfig(PROFILE_DIR);
+export { PROJECT_ROOT };
+
 export const ASSISTANT_NAME =
-  process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Breadbrich Engels';
+  process.env.ASSISTANT_NAME ||
+  envConfig.ASSISTANT_NAME ||
+  PROFILE.assistantName;
+export const ORG_NAME = PROFILE.orgName;
+export const ORG_SHORT_NAME = PROFILE.orgShortName || PROFILE.orgName;
+export const ORG_WEBSITE = PROFILE.orgWebsite;
+export const GITHUB_ORG = envVal('GITHUB_ORG') || PROFILE.githubOrg;
+export const GITHUB_REPO = PROFILE.githubRepo;
+export const KB_DASHBOARD_URL = PROFILE.kbDashboardUrl;
+export const SERVICE_USER =
+  envVal('SERVICE_USER') || PROFILE.serviceUser || 'breadbrich';
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER ||
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
@@ -42,7 +67,6 @@ export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || os.homedir();
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
@@ -58,9 +82,11 @@ export const SENDER_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'sender-allowlist.json',
 );
-export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+// Runtime state lives under the active profile so multiple orgs can coexist
+// in one checkout (one active at a time, selected via LABOR_PROFILE).
+export const STORE_DIR = path.resolve(PROFILE_DIR, 'store');
+export const GROUPS_DIR = path.resolve(PROFILE_DIR, 'groups');
+export const DATA_DIR = path.resolve(PROFILE_DIR, 'data');
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -170,7 +196,8 @@ export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
 // the GitHub Projects V2 sync as the write target for synced files.
 // Must match the systemd unit's CONTEXT_DIR for the kb-ui dashboard or
 // the page won't see synced data. Default: slack_main.
-export const SHARED_KB_GROUP = envVal('SHARED_KB_GROUP') || 'slack_main';
+export const SHARED_KB_GROUP =
+  envVal('SHARED_KB_GROUP') || PROFILE.sharedKbGroup || 'slack_main';
 
 // How often the Discord-members → KB people sync re-runs in the background
 // (alongside the DM-allowlist refresh, but on its own cadence). Default 1
@@ -213,6 +240,7 @@ function resolveConfigTimezone(): string {
   const candidates = [
     process.env.TZ,
     envConfig.TZ,
+    PROFILE.timezone,
     Intl.DateTimeFormat().resolvedOptions().timeZone,
   ];
   for (const tz of candidates) {

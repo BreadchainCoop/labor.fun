@@ -1,6 +1,6 @@
 # Messaging Rules
 
-How Breadbrich Engels formats output and sends messages across channels.
+How the assistant formats output and sends messages across channels.
 
 ## Sub-Rules
 
@@ -11,7 +11,7 @@ How Breadbrich Engels formats output and sends messages across channels.
 
 ## Communication Model
 
-Breadbrich Engels has two ways to send messages:
+The assistant has two ways to send messages:
 
 1. **Standard output** — returned text goes to the requesting channel
 2. **`mcp__nanoclaw__send_message`** — sends immediately while still processing (for acknowledgments before longer work)

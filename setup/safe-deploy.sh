@@ -1,20 +1,51 @@
 #!/usr/bin/env bash
-# safe-deploy.sh — deploy Breadbrich Engels from GitHub main to /opt/breadbrich.
+# safe-deploy.sh — deploy labor.fun from GitHub main to this org's host.
 #
-# Source of truth is GitHub main, mirrored into /opt/breadbrich-git, then
-# synced into the live app dir preserving stateful paths. Honors the
+# Source of truth is GitHub main, mirrored into $GIT_DIR, then synced into the
+# live app dir ($DEPLOY_ROOT) preserving stateful paths. Honors the
 # push -> merge -> deploy rule. Run as root: takes a backup, rolls back on
 # any failure.
+#
+# Infra (install paths, systemd service names, OS user) is parameterized via
+# profiles/$PROFILE/deploy.config; the defaults below reproduce the breadchain
+# droplet. Org-specific state (groups/, store/, data/) lives under
+# profiles/$PROFILE/ — see src/profile.ts.
 set -euo pipefail
 
-GIT_DIR=/opt/breadbrich-git
-APP_DIR=/opt/breadbrich
-BK_DIR=/opt/breadbrich-backups
+# --- Resolve active profile + infra config ---------------------------------
+# Profiles are host-local (gitignored, not in the repo), so the infra config is
+# read from the LIVE install ($DEPLOY_ROOT/profiles/<profile>/), not the git
+# mirror. Override via env (DEPLOY_ROOT=..., LABOR_PROFILE=...) for a new org.
+BOOT_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+PROFILE="${LABOR_PROFILE:-}"
+if [ -z "$PROFILE" ] && [ -d "$BOOT_ROOT/profiles" ]; then
+  # Single non-example profile present? Use it (mirrors src/profile.ts).
+  PROFILE="$(ls "$BOOT_ROOT/profiles" 2>/dev/null | grep -vx example | head -n1 || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+DEPLOY_CONFIG="$BOOT_ROOT/profiles/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+
+# Infra vars — config wins, else breadchain-preserving defaults.
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/breadbrich-backups}"
+SERVICE_NAME="${SERVICE_NAME:-breadbrich}"
+KB_SERVICE_NAME="${KB_SERVICE_NAME:-breadbrich-kb}"
+AUTO_DEPLOY_NAME="${AUTO_DEPLOY_NAME:-breadbrich-auto-deploy}"
+SERVICE_USER="${SERVICE_USER:-breadbrich}"
+# Runtime env lives in the profile (host-local), derived unless overridden.
+DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-$DEPLOY_ROOT/profiles/$PROFILE/deploy.env}"
+
+APP_DIR="$DEPLOY_ROOT"
+BK_DIR="$BACKUP_DIR"
+APP_USER="$SERVICE_USER"
 PRE="$BK_DIR/pre-deploy"
 TS="$(date -u +%Y%m%d-%H%M%S)"
-SNAP="$PRE/breadbrich-pre-deploy-$TS.tar.gz"
-APP_USER=breadbrich
-LOCK_FILE=/run/breadbrich-deploy.lock
+SNAP="$PRE/$SERVICE_NAME-pre-deploy-$TS.tar.gz"
+LOCK_FILE="/run/$SERVICE_NAME-deploy.lock"
+PROFILE_REL="profiles/$PROFILE"
 
 log() { echo "[safe-deploy $(date -u +%H:%M:%S)] $*"; }
 as_app() { su - "$APP_USER" -c "$*"; }
@@ -30,18 +61,39 @@ fi
 
 mkdir -p "$PRE"
 
+# --- 0. One-time migration: relocate legacy root-level state into the active
+# profile. Pre-profile installs kept store/, data/, and groups/ at $APP_DIR
+# root; profile-aware code expects them under $APP_DIR/$PROFILE_REL/. Move
+# them once, before backup + sync, so rsync --delete can't wipe them.
+# Idempotent: a no-op once the profile paths exist.
+PROFILE_ABS="$APP_DIR/$PROFILE_REL"
+mkdir -p "$PROFILE_ABS"
+for d in store data groups; do
+  if [ -e "$APP_DIR/$d" ] && [ ! -e "$PROFILE_ABS/$d" ]; then
+    log "Migrating legacy $d -> $PROFILE_REL/$d"
+    mv "$APP_DIR/$d" "$PROFILE_ABS/$d"
+  fi
+done
+# Legacy runtime env: setup/breadbrich-deploy.env -> profiles/<profile>/deploy.env.
+if [ -f "$APP_DIR/setup/breadbrich-deploy.env" ] && [ ! -e "$PROFILE_ABS/deploy.env" ]; then
+  log "Migrating legacy setup/breadbrich-deploy.env -> $PROFILE_REL/deploy.env"
+  mv "$APP_DIR/setup/breadbrich-deploy.env" "$PROFILE_ABS/deploy.env"
+fi
+chown -R "$APP_USER:$APP_USER" "$PROFILE_ABS" 2>/dev/null || true
+
 # --- 1. Pre-deploy backup (stateful paths + current built code) ---
-log "Backup -> $SNAP"
+log "Backup -> $SNAP (profile: $PROFILE)"
 tar -czf "$SNAP" -C "$APP_DIR" \
-  .env store data groups kb-ui/users.json dist logs 2>/dev/null || true
-ln -sfn "$SNAP" "$PRE/breadbrich-pre-deploy-LATEST.tar.gz"
+  .env "$PROFILE_REL/store" "$PROFILE_REL/data" "$PROFILE_REL/groups" \
+  kb-ui/users.json dist logs 2>/dev/null || true
+ln -sfn "$SNAP" "$PRE/$SERVICE_NAME-pre-deploy-LATEST.tar.gz"
 
 rollback() {
   log "FAILURE during deploy — rolling back from $SNAP"
-  systemctl stop breadbrich breadbrich-kb || true
+  systemctl stop "$SERVICE_NAME" "$KB_SERVICE_NAME" || true
   tar -xzf "$SNAP" -C "$APP_DIR" || true
   chown -R "$APP_USER:$APP_USER" "$APP_DIR" || true
-  systemctl start breadbrich breadbrich-kb || true
+  systemctl start "$SERVICE_NAME" "$KB_SERVICE_NAME" || true
   log "Rollback complete — services restarted on previous state"
   exit 1
 }
@@ -61,13 +113,20 @@ if [ "$OLD" = "$NEW" ]; then
 fi
 
 # --- 3. Sync code into live app dir, preserving stateful paths ---
-log "Sync code -> $APP_DIR"
+log "Sync code -> $APP_DIR (preserving host-local profiles)"
+# Org profiles are host-local (gitignored, not in the mirror), so rsync --delete
+# would wipe them. Exclude every real profile; only `example` (a tracked
+# template) is allowed to sync from the mirror.
+#   - the entire active profile (config, deploy.env, groups, store, data)
+#   - any other profile's store/ + data/ (one box, several orgs)
+#   - the local staging profile
 rsync -a --delete \
   --exclude='.git/' \
   --exclude='.env' \
-  --exclude='store/' \
-  --exclude='data/' \
-  --exclude='groups/' \
+  --exclude="/$PROFILE_REL/" \
+  --exclude='/profiles/*/store/' \
+  --exclude='/profiles/*/data/' \
+  --exclude='/profiles/staging/' \
   --exclude='kb-ui/users.json' \
   --exclude='node_modules/' \
   --exclude='dist/' \
@@ -99,31 +158,45 @@ else
   log "container/ unchanged -> skip image rebuild"
 fi
 
-# --- 7a. Install systemd unit changes from the repo (services + timers).
-# Newly-installed *.timer units are also `enable --now`-d so a fresh
-# bootstrap doesn't need a manual systemctl invocation.
+# --- 7a. Render + install systemd units from templates (services + timers).
+# Unit *.in templates carry ${DEPLOY_ROOT}/${SERVICE_NAME}/${SERVICE_USER}/…
+# placeholders; we render them with this deployment's infra config so each org
+# gets its own service names + paths. A newly-installed timer is enabled --now.
 UNITS_DIR="$GIT_DIR/setup/systemd"
 units_changed=0
 declare -a new_timers=()
-if [ -d "$UNITS_DIR" ]; then
-  shopt -s nullglob
-  for unit_src in "$UNITS_DIR"/*.service "$UNITS_DIR"/*.timer; do
-    unit_name="$(basename "$unit_src")"
-    unit_dst="/etc/systemd/system/$unit_name"
-    was_present=0
-    [ -e "$unit_dst" ] && was_present=1
-    if ! cmp -s "$unit_src" "$unit_dst" 2>/dev/null; then
-      log "Unit changed: $unit_name -> installing"
-      install -m 644 -o root -g root "$unit_src" "$unit_dst"
-      units_changed=1
-      # New timer that wasn't installed before — enable + start it after
-      # the upcoming daemon-reload.
-      if [ "$was_present" -eq 0 ] && [[ "$unit_name" == *.timer ]]; then
-        new_timers+=("$unit_name")
-      fi
+render_unit() {
+  # $1 = template basename, $2 = destination unit name (without dir)
+  local src="$UNITS_DIR/$1" dst="/etc/systemd/system/$2"
+  [ -f "$src" ] || return 0
+  local rendered
+  rendered="$(DEPLOY_ROOT="$DEPLOY_ROOT" BACKUP_DIR="$BACKUP_DIR" \
+    SERVICE_NAME="$SERVICE_NAME" KB_SERVICE_NAME="$KB_SERVICE_NAME" \
+    AUTO_DEPLOY_NAME="$AUTO_DEPLOY_NAME" SERVICE_USER="$SERVICE_USER" \
+    DEPLOY_ENV_FILE="$DEPLOY_ENV_FILE" \
+    envsubst '${DEPLOY_ROOT} ${BACKUP_DIR} ${SERVICE_NAME} ${KB_SERVICE_NAME} ${AUTO_DEPLOY_NAME} ${SERVICE_USER} ${DEPLOY_ENV_FILE}' \
+    < "$src")"
+  local was_present=0
+  [ -e "$dst" ] && was_present=1
+  if ! printf '%s' "$rendered" | cmp -s - "$dst" 2>/dev/null; then
+    log "Unit changed: $2 -> installing"
+    printf '%s' "$rendered" > "$dst"
+    chmod 644 "$dst"; chown root:root "$dst"
+    units_changed=1
+    if [ "$was_present" -eq 0 ] && [[ "$2" == *.timer ]]; then
+      new_timers+=("$2")
     fi
-  done
-  shopt -u nullglob
+  fi
+}
+if [ -d "$UNITS_DIR" ]; then
+  # Fail the deploy (→ ERR trap → rollback) rather than leaving units stale.
+  command -v envsubst >/dev/null 2>&1 || {
+    log "envsubst missing — install gettext-base, then redeploy"; false
+  }
+  render_unit orchestrator.service.in "$SERVICE_NAME.service"
+  render_unit kb.service.in           "$KB_SERVICE_NAME.service"
+  render_unit auto-deploy.service.in  "$AUTO_DEPLOY_NAME.service"
+  render_unit auto-deploy.timer.in    "$AUTO_DEPLOY_NAME.timer"
   if [ "$units_changed" -eq 1 ]; then
     log "systemctl daemon-reload"
     systemctl daemon-reload
@@ -145,12 +218,12 @@ fi
 
 # --- 7b. Restart services ---
 log "Restart services"
-systemctl restart breadbrich
-systemctl restart breadbrich-kb
+systemctl restart "$SERVICE_NAME"
+systemctl restart "$KB_SERVICE_NAME"
 
 # --- 8. Health check ---
 log "Health check (settle + retry up to 45s)"
-for s in breadbrich breadbrich-kb; do
+for s in "$SERVICE_NAME" "$KB_SERVICE_NAME"; do
   ok=0
   for _ in $(seq 1 9); do
     sleep 5

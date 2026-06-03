@@ -12,6 +12,8 @@ import {
   FLAT_ACCESS,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
+  PROJECT_ROOT,
+  SERVICE_USER,
   SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
@@ -86,7 +88,7 @@ function getEmailTransporter(): nodemailer.Transporter | null {
 
 // --- KB file modification access control ---
 
-const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
+const KB_CONTEXT_DIR = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context');
 
 /**
  * Resolve a KB-relative path against `KB_CONTEXT_DIR` and refuse anything
@@ -111,11 +113,12 @@ function resolveKbPath(input: unknown): string | null {
 }
 
 /**
- * Resolve breadbrich:breadbrich's numeric uid/gid once at startup so KB
- * writes can transfer ownership without spawning a shell. Returns null
- * when the user isn't present on this host (typical in dev), in which
- * case the chown step is skipped — the orchestrator runs as
- * `breadbrich` in production, so the write already lands with the right
+ * Resolve the service user's numeric uid/gid once at startup so KB writes
+ * can transfer ownership without spawning a shell. The user comes from
+ * SERVICE_USER (the active profile's serviceUser, overridable per env).
+ * Returns null when that user isn't present on this host (typical in dev),
+ * in which case the chown step is skipped — the orchestrator runs as the
+ * service user in production, so the write already lands with the right
  * owner. The shell-out (previously `execSync(chown ...)`) was a
  * command-injection sink whose input was agent-controlled; switching to
  * `fs.chownSync` with cached numeric ids closes that.
@@ -125,12 +128,14 @@ function getKbOwnerIds(): { uid: number; gid: number } | null {
   if (kbOwnerIdsCached !== undefined) return kbOwnerIdsCached;
   try {
     // execFileSync (no shell) with a literal username — no interpolation.
+    // `--` ends option parsing so a SERVICE_USER starting with `-` is treated
+    // as a username, not a flag.
     const uid = parseInt(
-      execFileSync('id', ['-u', 'breadbrich']).toString().trim(),
+      execFileSync('id', ['-u', '--', SERVICE_USER]).toString().trim(),
       10,
     );
     const gid = parseInt(
-      execFileSync('id', ['-g', 'breadbrich']).toString().trim(),
+      execFileSync('id', ['-g', '--', SERVICE_USER]).toString().trim(),
       10,
     );
     if (!Number.isFinite(uid) || !Number.isFinite(gid)) {
@@ -521,7 +526,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 } else {
                   const usersFile =
                     process.env.USERS_FILE ||
-                    '/opt/breadbrich/kb-ui/users.json';
+                    path.join(PROJECT_ROOT, 'kb-ui', 'users.json');
                   let users: Record<string, string> = {};
                   try {
                     if (fs.existsSync(usersFile)) {

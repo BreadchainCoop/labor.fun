@@ -5,7 +5,14 @@ node_modules/
 # Build output
 dist/
 
-# Local data & runtime
+# Org profiles are LOCAL instances — never tracked in the shared framework repo.
+# Only the `example` template is committed. Each org (breadchain, acme, …) is
+# created locally from profiles/example and lives only on that org's clone/host
+# (config, deploy.config, deploy.env, KB, plugins, store, data — all local).
+/profiles/*
+!/profiles/example/
+
+# Legacy root layout (pre-profile dev installs)
 store/
 data/
 .config/
@@ -36,11 +43,7 @@ staging-data/
 .env.staging.local
 .claude-backups/
 
-# Live-edited KB content lives on the droplet under /opt/breadbrich/groups/*/context/
-# and is preserved as stateful by safe-deploy.sh — the repo cannot be the source
-# of truth without a real sync mechanism. Keep this gitignored to avoid drift;
-# add new entries via the live system (or scp) rather than via PR.
-# See project_breadbrich_kb_mount_gap.md memory for the full rationale.
+# Legacy root-layout KB content (pre-profile dev installs).
 groups/*/context/
 
 # Runtime lock file written by the schedule skill — never commit

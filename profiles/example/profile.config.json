@@ -1,0 +1,13 @@
+{
+  "assistantName": "Aide",
+  "orgName": "Example Org",
+  "orgShortName": "Example",
+  "orgWebsite": "https://example.com",
+  "githubOrg": "your-github-org",
+  "githubRepo": "labor.fun",
+  "kbDashboardUrl": "https://kb.example.com",
+  "sharedKbGroup": "slack_main",
+  "serviceUser": "laborfun",
+  "telegramBotUsername": "your_bot_username",
+  "timezone": "UTC"
+}

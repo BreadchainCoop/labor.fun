@@ -1,10 +1,14 @@
-# Breadbrich Engels
+# labor.fun
 
-Multi-channel AI assistant for your organization. Built on NanoClaw — runs Claude agents in isolated containers with per-group memory.
+A standalone, **multi-org** framework for multi-channel AI assistants. Runs
+Claude agents in isolated containers with per-group memory. (Internal container
+protocol keeps the `nanoclaw` codename.)
 
 ## Quick Context
 
-Single Node.js process. Channels (Telegram, Slack) self-register at startup. Messages route to Claude Agent SDK running in Docker containers. Each group has isolated filesystem and memory. KB dashboard at kb.example.com.
+Single Node.js process. Channels (Telegram, Slack, Discord) self-register at startup. Messages route to Claude Agent SDK running in Docker containers. Each group has isolated filesystem and memory.
+
+**The framework is org-agnostic.** Every org-specific thing — identity, KB, people, runtime state — lives in a **profile** under `profiles/<name>/`. The active profile is chosen at startup via `LABOR_PROFILE` (else the single profile present, else the repo root for legacy/dev). `profile.config.json` is the single source of truth for brand/identity/paths; the code reads it via `src/profile.ts` → `src/config.ts`. Never hardcode an org name, path, or GitHub org in `src/` — derive it from the profile/config. See `docs/NEW-ORG-GUIDE.md` and `docs/PLUGINS.md`.
 
 ## Rules & Operational Knowledge
 
@@ -18,9 +22,9 @@ Breadbrich Engels's behavior is defined by structured rule files in [`rules/`](r
 | [Scheduling](rules/scheduling/README.md) | `rules/scheduling/` | Cron tasks, scripts, API credit conservation |
 | [Identity & RBAC](rules/identity/README.md) | `rules/identity/` | User resolution, tag hierarchy, platform mapping |
 | [Transcripts](rules/transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction |
-| [GitHub Integration](rules/integrations/github.md) | `rules/integrations/` | GitHub issues/PRs/code/Actions on BreadchainCoop repos |
+| [GitHub Integration](rules/integrations/github.md) | `rules/integrations/` | GitHub issues/PRs/code/Actions on the org's GitHub org (`githubOrg` in the active profile) |
 
-Read `rules/INDEX.md` for the full cross-linked index. When modifying Breadbrich Engels's behavior — update the relevant rule file, not ad-hoc code.
+Read `rules/INDEX.md` for the full cross-linked index. When modifying the assistant's behavior — update the relevant rule file, not ad-hoc code. Rules are framework-wide and org-agnostic; reference the profile's config (`orgName`, `githubOrg`) rather than hardcoding an org.
 
 ## Key Files
 
@@ -32,14 +36,18 @@ Read `rules/INDEX.md` for the full cross-linked index. When modifying Breadbrich
 | `src/channels/telegram.ts` | Telegram channel (grammy) |
 | `src/ipc.ts` | IPC watcher and task processing |
 | `src/permissions.ts` | KB-based RBAC, identity resolution |
-| `src/config.ts` | Trigger pattern, paths, intervals |
+| `src/config.ts` | Trigger pattern, paths, intervals (derived from active profile) |
+| `src/profile.ts` | Profile resolution + `profile.config.json` loading (org-agnostic core) |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
+| `src/integrations/registry.ts` | Flow/integration registry (background flows self-register) |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations; see `schema/tables.md` for schema reference |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `groups/slack_main/context/` | Knowledge base (people, tasks, calendar, artifacts) |
+| `profiles/<org>/profile.config.json` | Per-org identity & config (single source of truth) |
+| `profiles/<org>/groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
+| `profiles/<org>/groups/<sharedKbGroup>/context/` | Knowledge base (people, tasks, calendar, artifacts) |
+| `profiles/example/` | Copy-me template for a new org |
 | `kb-ui/server.mjs` | Admin dashboard (Express, Basic Auth) |
-| `container/skills/` | Skills loaded inside agent containers |
+| `container/skills/` | Skills loaded inside agent containers (+ `<profile>/container-skills/`) |
 | `schema/tables.md` | Database schema reference |
 
 ## Credentials
@@ -68,11 +76,11 @@ npm test             # Run tests
 
 All code changes must follow this workflow:
 1. Commit to a feature branch
-2. Push to GitHub and create a PR on BreadchainCoop/breadbrich-engels
+2. Push to GitHub and create a PR on the framework repo (`BreadchainCoop/labor.fun`)
 3. Merge the PR to main
-4. Deploy via `safe-deploy.sh` on the droplet (or `/redeploy-breadbrich` skill)
+4. Deploy via `safe-deploy.sh` on the host (or `/redeploy-breadbrich` skill)
 
-Never rsync individual files to the droplet. Never restart services after manual edits. The only exception is data in `.gitignore` (store/, .env, groups/ runtime state).
+Never rsync individual files to the host. Never restart services after manual edits. The only exception is data in `.gitignore` (`profiles/<org>/store/`, `.env`, profile runtime state).
 
 ```bash
 # On the droplet — proper deploy:

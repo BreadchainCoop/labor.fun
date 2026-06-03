@@ -1,10 +1,11 @@
 #!/bin/bash
-# Breadbrich Engels staging environment — local Mac, isolated from prod.
+# labor.fun staging environment — local Mac, isolated from prod.
 #
 # Uses:
-#   - .env.staging (separate from prod .env)
-#   - ./staging-data/ for store/, data/, groups/ (not touched by rsync or prod)
-#   - Separate Telegram bot (@breadbrich_staging_bot) and Slack channel
+#   - .env.staging (separate from prod .env), which sets LABOR_PROFILE=staging
+#   - profiles/staging/ for store/, data/, groups/ (its own profile, gitignored)
+#   - ./staging-data/ for logs + pidfile only
+#   - Separate Telegram bot and Slack channel
 #
 # Usage:
 #   ./scripts/staging.sh init       # first-time setup (create .env.staging from template)
@@ -18,6 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 STAGING_DATA="$PROJECT_ROOT/staging-data"
+STAGING_PROFILE="$PROJECT_ROOT/profiles/staging"
 STAGING_ENV="$PROJECT_ROOT/.env.staging"
 STAGING_LOG="$STAGING_DATA/staging.log"
 STAGING_PIDFILE="$STAGING_DATA/staging.pid"
@@ -26,10 +28,19 @@ cmd="${1:-}"
 
 case "$cmd" in
   init)
-    mkdir -p "$STAGING_DATA"/{store,data,groups,logs}
-    mkdir -p "$STAGING_DATA/groups/main"
-    cat > "$STAGING_DATA/groups/main/CLAUDE.md" <<'EOF'
-# Staging main group
+    mkdir -p "$STAGING_DATA/logs"
+    mkdir -p "$STAGING_PROFILE/groups/main"
+    if [ ! -f "$STAGING_PROFILE/profile.config.json" ]; then
+      cat > "$STAGING_PROFILE/profile.config.json" <<'EOF'
+{
+  "assistantName": "Staging Aide",
+  "orgName": "Staging Org",
+  "sharedKbGroup": "main"
+}
+EOF
+    fi
+    cat > "$STAGING_PROFILE/groups/main/CLAUDE.md" <<'EOF'
+# {{ASSISTANT_NAME}} (staging)
 
 This is the staging environment. Do not use real credentials here.
 EOF
@@ -47,8 +58,11 @@ EOF
 # For Slack: create a new channel #breadbrich-staging and use the same workspace app,
 # or create a separate app. Either way, set SLACK_BOT_TOKEN / SLACK_APP_TOKEN below.
 
+# Active profile — staging state lives under profiles/staging/
+LABOR_PROFILE=staging
+
 # Required — replace with staging values
-ASSISTANT_NAME=Breadbrich Engels Staging
+ASSISTANT_NAME=Staging Aide
 TELEGRAM_BOT_TOKEN=PASTE_STAGING_BOT_TOKEN_HERE
 SLACK_BOT_TOKEN=PASTE_STAGING_SLACK_BOT_TOKEN
 SLACK_APP_TOKEN=PASTE_STAGING_SLACK_APP_TOKEN
@@ -58,11 +72,8 @@ SLACK_SIGNING_SECRET=PASTE_STAGING_SLACK_SIGNING_SECRET
 # Or mint a separate staging-only token via `claude setup-token`
 CLAUDE_CODE_OAUTH_TOKEN=PASTE_STAGING_OAUTH_TOKEN
 
-# Staging uses separate paths so it doesn't collide with prod
-DATA_DIR=./staging-data/data
-STORE_DIR=./staging-data/store
-GROUPS_DIR=./staging-data/groups
-LOG_DIR=./staging-data/logs
+# Staging state (store/, data/, groups/) lives under profiles/staging/ via
+# LABOR_PROFILE above — no path overrides needed.
 
 # Use a distinct credential proxy port so multiple envs can coexist
 CREDENTIAL_PROXY_PORT=3002
@@ -134,10 +145,10 @@ EOF
     if [ -f "$STAGING_PIDFILE" ] && kill -0 "$(cat "$STAGING_PIDFILE")" 2>/dev/null; then
       echo "Stop staging first: staging.sh stop"; exit 1
     fi
-    read -p "Wipe all staging data at $STAGING_DATA ? [y/N] " yn
+    read -p "Wipe all staging data at $STAGING_PROFILE ? [y/N] " yn
     if [ "$yn" = "y" ]; then
-      rm -rf "$STAGING_DATA"/{store,data,groups,logs}/*
-      echo "Staging data wiped (env and top-level dirs preserved)."
+      rm -rf "$STAGING_PROFILE"/{store,data}/* "$STAGING_PROFILE"/groups/*/context/* "$STAGING_DATA/logs"/*
+      echo "Staging data wiped (profile config and dirs preserved)."
     fi
     ;;
 
