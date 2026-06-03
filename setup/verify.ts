@@ -116,8 +116,8 @@ export async function run(_args: string[]): Promise<void> {
 
   const channelAuth: Record<string, string> = {};
 
-  // WhatsApp: check for auth credentials on disk
-  const authDir = path.join(projectRoot, 'store', 'auth');
+  // WhatsApp: check for auth credentials on disk (under the active profile)
+  const authDir = path.join(STORE_DIR, 'auth');
   if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
     channelAuth.whatsapp = 'authenticated';
   }
