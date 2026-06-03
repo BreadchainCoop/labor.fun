@@ -4,8 +4,8 @@
 # Prerequisite: create a fine-grained PAT at
 #   https://github.com/settings/personal-access-tokens/new
 # with:
-#   - Resource owner: Organization-Breadbrich Engels
-#   - Repository access: Only select repositories → BreadchainCoop/breadbrich-engels
+#   - Resource owner: the org that owns the framework repo (e.g. BreadchainCoop)
+#   - Repository access: Only select repositories → BreadchainCoop/labor.fun
 #   - Repository permissions: Contents → Read-only
 # Copy the token (starts with "github_pat_...") and export it before running:
 #
@@ -49,9 +49,9 @@ NETRC
 chmod 600 /home/breadbrich/.netrc
 chown breadbrich:breadbrich /home/breadbrich/.netrc
 
-# Clone the fork into /opt/breadbrich-git (fresh clone each time — idempotent)
+# Clone the framework repo into /opt/breadbrich-git (fresh clone each time — idempotent)
 rm -rf /opt/breadbrich-git
-su - breadbrich -c 'git clone --depth 1 --branch main https://github.com/BreadchainCoop/breadbrich-engels.git /opt/breadbrich-git'
+su - breadbrich -c 'git clone --depth 1 --branch main https://github.com/BreadchainCoop/labor.fun.git /opt/breadbrich-git'
 
 echo ""
 echo "Clone succeeded. Current HEAD:"

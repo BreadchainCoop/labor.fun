@@ -1,17 +1,17 @@
 ---
 name: update-breadbrich
-description: Efficiently bring upstream Breadbrich Engels updates into a customized install, with preview, selective cherry-pick, and low token usage.
+description: Efficiently bring upstream labor.fun updates into a customized install, with preview, selective cherry-pick, and low token usage. Accepts an optional upstream repo URL argument.
 ---
 
 # About
 
-Your Breadbrich Engels fork drifts from upstream as you customize it. This skill pulls upstream changes into your install without losing your modifications.
+Your labor.fun fork drifts from upstream as you customize it. This skill pulls upstream changes into your install without losing your modifications.
 
-Run `/update-breadbrich` in Claude Code.
+Run `/update-breadbrich` in Claude Code. You can pass the upstream repo URL as an argument: `/update-breadbrich https://github.com/your-org/labor.fun.git`.
 
 ## How it works
 
-**Preflight**: checks for clean working tree (`git status --porcelain`). If `upstream` remote is missing, asks you for the URL (defaults to `https://github.com/qwibitai/salem.git`) and adds it. Detects the upstream branch name (`main` or `master`).
+**Preflight**: checks for clean working tree (`git status --porcelain`). Resolves the upstream repo URL — you can pass one as an argument; otherwise it uses the existing `upstream` remote, or asks you (default `https://github.com/BreadchainCoop/labor.fun.git`). If you pass a URL that differs from the current `upstream`, it offers to update the remote. Detects the upstream branch name (`main` or `master`).
 
 **Backup**: creates a timestamped backup branch and tag (`backup/pre-update-<hash>-<timestamp>`, `pre-update-<hash>-<timestamp>`) before touching anything. Safe to run multiple times.
 
@@ -65,12 +65,18 @@ Run:
 If output is non-empty:
 - Tell the user to commit or stash first, then stop.
 
-Confirm remotes:
+Resolve the upstream repo URL. There are three sources, in priority order:
+1. **Argument**: if the user invoked the skill with a URL (e.g. `/update-breadbrich https://github.com/your-org/labor.fun.git`), use that URL.
+2. **Existing remote**: otherwise run `git remote -v`. If an `upstream` remote exists, use its URL.
+3. **Ask**: otherwise ask the user for the upstream repo URL (default: `https://github.com/BreadchainCoop/labor.fun.git`).
+
+Then reconcile the remote with the resolved URL:
 - `git remote -v`
-If `upstream` is missing:
-- Ask the user for the upstream repo URL (default: `https://github.com/qwibitai/salem.git`).
-- Add it: `git remote add upstream <user-provided-url>`
-- Then: `git fetch upstream --prune`
+- If `upstream` is missing: `git remote add upstream <resolved-url>`
+- If `upstream` exists but its URL differs from a URL the user explicitly provided (argument or answer): show both and ask whether to update it. If yes: `git remote set-url upstream <resolved-url>`. If no: keep the existing remote.
+- Fetch: `git fetch upstream --prune`
+
+Validate the URL looks like a git remote (starts with `https://`, `git@`, or `ssh://`, ends in `.git` or is a recognizable host path). If it doesn't, ask the user to confirm before adding it.
 
 Determine the upstream branch name:
 - `git branch -r | grep upstream/`

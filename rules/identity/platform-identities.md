@@ -32,8 +32,8 @@ CREATE TABLE user_identities (
 
 When a new team member needs to be linked:
 
-1. Have them send a message to Breadbrich Engels on the platform
-2. Breadbrich Engels captures their platform ID from the message metadata
+1. Have them send a message to the assistant on the platform
+2. The assistant captures their platform ID from the message metadata
 3. Create/update their `context/people/{name}.md` file
 4. Insert into `user_identities` table
 

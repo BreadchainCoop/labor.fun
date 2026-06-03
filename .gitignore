@@ -5,9 +5,13 @@ node_modules/
 # Build output
 dist/
 
-# Local data & runtime
+# Local data & runtime (per-profile and legacy root layout)
 store/
 data/
+profiles/*/store/
+profiles/*/data/
+# Local-only staging profile (created by scripts/staging.sh)
+profiles/staging/
 .config/
 logs/
 
@@ -36,11 +40,11 @@ staging-data/
 .env.staging.local
 .claude-backups/
 
-# Live-edited KB content lives on the droplet under /opt/breadbrich/groups/*/context/
-# and is preserved as stateful by safe-deploy.sh — the repo cannot be the source
-# of truth without a real sync mechanism. Keep this gitignored to avoid drift;
-# add new entries via the live system (or scp) rather than via PR.
-# See project_breadbrich_kb_mount_gap.md memory for the full rationale.
+# Live-edited KB content for the breadchain profile lives on the droplet and is
+# preserved as stateful by safe-deploy.sh — keep it gitignored to avoid drift.
+# (The example profile's context/ IS tracked as a template; other orgs can
+# choose to track or ignore their own profile's context the same way.)
+profiles/breadchain/groups/*/context/
 groups/*/context/
 
 # Runtime lock file written by the schedule skill — never commit

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# safe-deploy.sh — deploy Breadbrich Engels from GitHub main to /opt/breadbrich.
+# safe-deploy.sh — deploy labor.fun from GitHub main to /opt/breadbrich.
 #
 # Source of truth is GitHub main, mirrored into /opt/breadbrich-git, then
 # synced into the live app dir preserving stateful paths. Honors the
 # push -> merge -> deploy rule. Run as root: takes a backup, rolls back on
 # any failure.
+#
+# Org-specific state (groups/, store/, data/) lives under
+# profiles/$PROFILE/ — see src/profile.ts. PROFILE defaults to the value in
+# breadbrich-deploy.env (LABOR_PROFILE), else "breadchain".
 set -euo pipefail
 
 GIT_DIR=/opt/breadbrich-git
@@ -15,6 +19,16 @@ TS="$(date -u +%Y%m%d-%H%M%S)"
 SNAP="$PRE/breadbrich-pre-deploy-$TS.tar.gz"
 APP_USER=breadbrich
 LOCK_FILE=/run/breadbrich-deploy.lock
+
+# Active profile — its groups/store/data are the stateful paths to preserve.
+# Sourced from the deploy env so it stays aligned with what the services use.
+DEPLOY_ENV="$APP_DIR/setup/breadbrich-deploy.env"
+PROFILE="${LABOR_PROFILE:-}"
+if [ -z "$PROFILE" ] && [ -f "$DEPLOY_ENV" ]; then
+  PROFILE="$(grep -E '^LABOR_PROFILE=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"'"'"'"' || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+PROFILE_REL="profiles/$PROFILE"
 
 log() { echo "[safe-deploy $(date -u +%H:%M:%S)] $*"; }
 as_app() { su - "$APP_USER" -c "$*"; }
@@ -30,10 +44,26 @@ fi
 
 mkdir -p "$PRE"
 
+# --- 0. One-time migration: relocate legacy root-level state into the active
+# profile. Pre-profile installs kept store/, data/, and groups/ at $APP_DIR
+# root; profile-aware code expects them under $APP_DIR/$PROFILE_REL/. Move
+# them once, before backup + sync, so rsync --delete can't wipe them.
+# Idempotent: a no-op once the profile paths exist.
+PROFILE_ABS="$APP_DIR/$PROFILE_REL"
+for d in store data groups; do
+  if [ -e "$APP_DIR/$d" ] && [ ! -e "$PROFILE_ABS/$d" ]; then
+    log "Migrating legacy $d -> $PROFILE_REL/$d"
+    mkdir -p "$PROFILE_ABS"
+    mv "$APP_DIR/$d" "$PROFILE_ABS/$d"
+  fi
+done
+chown -R "$APP_USER:$APP_USER" "$PROFILE_ABS" 2>/dev/null || true
+
 # --- 1. Pre-deploy backup (stateful paths + current built code) ---
-log "Backup -> $SNAP"
+log "Backup -> $SNAP (profile: $PROFILE)"
 tar -czf "$SNAP" -C "$APP_DIR" \
-  .env store data groups kb-ui/users.json dist logs 2>/dev/null || true
+  .env "$PROFILE_REL/store" "$PROFILE_REL/data" "$PROFILE_REL/groups" \
+  kb-ui/users.json dist logs 2>/dev/null || true
 ln -sfn "$SNAP" "$PRE/breadbrich-pre-deploy-LATEST.tar.gz"
 
 rollback() {
@@ -61,13 +91,13 @@ if [ "$OLD" = "$NEW" ]; then
 fi
 
 # --- 3. Sync code into live app dir, preserving stateful paths ---
-log "Sync code -> $APP_DIR"
+log "Sync code -> $APP_DIR (preserving $PROFILE_REL state)"
 rsync -a --delete \
   --exclude='.git/' \
   --exclude='.env' \
-  --exclude='store/' \
-  --exclude='data/' \
-  --exclude='groups/' \
+  --exclude="/$PROFILE_REL/store/" \
+  --exclude="/$PROFILE_REL/data/" \
+  --exclude="/$PROFILE_REL/groups/" \
   --exclude='kb-ui/users.json' \
   --exclude='node_modules/' \
   --exclude='dist/' \

@@ -60,7 +60,7 @@ if [ "$EXPECTED_GROUPS" -gt 0 ]; then
   fi
 
   # 4. All expected JIDs registered
-  all_jids=$(ssh "$HOST" "su - breadbrich -c 'cd /opt/breadbrich && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"store/messages.db\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
+  all_jids=$(ssh "$HOST" "su - breadbrich -c 'cd /opt/breadbrich && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"profiles/breadchain/store/messages.db\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
   for jid in "${EXPECTED_JIDS[@]}"; do
     if echo "$all_jids" | grep -qF "$jid"; then
       pass "Registered: $jid"

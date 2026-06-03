@@ -1,6 +1,6 @@
 # Scheduling Rules
 
-Breadbrich Engels can schedule tasks to run later or on a recurring basis using `schedule_task`.
+The assistant can schedule tasks to run later or on a recurring basis using `schedule_task`.
 
 ## Task Types
 
@@ -53,7 +53,7 @@ bash -c 'node --input-type=module -e "
 
 ### When NOT to Use Scripts
 
-If the task needs Breadbrich Engels's judgment every time (daily briefings, reminders, reports), skip the script — just use a prompt.
+If the task needs the assistant's judgment every time (daily briefings, reminders, reports), skip the script — just use a prompt.
 
 ## API Credit Conservation
 

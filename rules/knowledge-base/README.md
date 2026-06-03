@@ -1,6 +1,6 @@
 # Knowledge Base Rules
 
-Breadbrich Engels maintains a structured KB in `groups/slack_main/context/`. These rules govern how documents are created, updated, and organized.
+The assistant maintains a structured KB in `groups/slack_main/context/`. These rules govern how documents are created, updated, and organized.
 
 ## Directory Structure
 

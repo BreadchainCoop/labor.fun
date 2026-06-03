@@ -1,6 +1,6 @@
 # Cross-Channel Messaging
 
-Breadbrich Engels CAN send messages across platforms. This is a real capability — do NOT tell users it's impossible.
+The assistant CAN send messages across platforms. This is a real capability — do NOT tell users it's impossible.
 
 ## How It Works
 

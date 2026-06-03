@@ -16,6 +16,7 @@ import {
   IDLE_TIMEOUT,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
+  PROFILE_DIR,
   SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
@@ -180,10 +181,16 @@ function buildVolumeMounts(
   }
   fs.writeFileSync(settingsFile, JSON.stringify(settingsObj, null, 2) + '\n');
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  // Sync skills into each group's .claude/skills/. Core framework skills from
+  // container/skills/ first, then the active profile's container-skills/ on
+  // top — so an org can add or override agent skills without forking core.
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  const skillSources = [
+    path.join(process.cwd(), 'container', 'skills'),
+    path.join(PROFILE_DIR, 'container-skills'),
+  ];
+  for (const skillsSrc of skillSources) {
+    if (!fs.existsSync(skillsSrc)) continue;
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;

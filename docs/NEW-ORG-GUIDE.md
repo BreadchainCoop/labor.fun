@@ -1,0 +1,130 @@
+# Onboarding a new organization
+
+labor.fun is a single framework that can run **many organizations**. Each org is
+a self-contained **profile** under `profiles/<name>/`. The framework code never
+hardcodes a specific org — everything org-specific is read from the active
+profile at startup.
+
+This guide takes you from a fresh checkout to a running assistant for your org.
+
+---
+
+## 1. What a profile is
+
+```
+profiles/<your-org>/
+├── profile.config.json     # identity & config — the single source of truth
+├── groups/                 # per-group agent memory + KB context
+│   ├── main/CLAUDE.md      # template for the privileged "main" control channel
+│   ├── global/CLAUDE.md    # template for ordinary channels
+│   └── <sharedKbGroup>/context/   # the shared knowledge base (people/, tasks/, …)
+├── store/                  # SQLite DB                (created at runtime, gitignored)
+├── data/                   # sessions + IPC           (created at runtime, gitignored)
+├── container-skills/       # optional: org-specific agent skills
+└── plugins/                # optional: org-specific plugins
+```
+
+Only `profile.config.json` and `groups/` are authored by you; `store/` and
+`data/` are runtime state.
+
+## 2. Create your profile
+
+Copy the template — never edit `profiles/example` in place:
+
+```bash
+cp -r profiles/example profiles/acme
+```
+
+## 3. Fill in `profile.config.json`
+
+This file is the **single source of truth** for your org's identity. Every brand
+string, path, and GitHub reference in the framework derives from it.
+
+```jsonc
+{
+  "assistantName": "Aide",                 // what the agent answers to
+  "orgName": "Acme Cooperative",           // canonical org name
+  "orgShortName": "Acme",
+  "orgWebsite": "https://acme.example",
+  "githubOrg": "acme-coop",                // GitHub org the agent operates on
+  "githubRepo": "labor.fun",
+  "kbDashboardUrl": "https://kb.acme.example",
+  "sharedKbGroup": "slack_main",           // which group folder holds the shared KB
+  "serviceUser": "laborfun",               // OS user that owns KB files in prod
+  "telegramBotUsername": "acme_bot",
+  "timezone": "America/New_York"
+}
+```
+
+| Field | Used for |
+|---|---|
+| `assistantName` | Agent identity; default trigger `@<assistantName>`; CLAUDE.md `{{ASSISTANT_NAME}}` substitution |
+| `orgName` / `orgShortName` / `orgWebsite` | How the agent refers to your org |
+| `githubOrg` / `githubRepo` | GitHub integration scope (issues/PRs/Actions) |
+| `kbDashboardUrl` | Links the agent surfaces to the KB dashboard |
+| `sharedKbGroup` | Group whose `context/` is mounted read-only into every container |
+| `serviceUser` | KB file ownership on the production host |
+| `timezone` | Scheduling and message formatting |
+
+Any field can also be overridden by an env var (e.g. `ASSISTANT_NAME`,
+`GITHUB_ORG`, `SHARED_KB_GROUP`) when you need a per-deploy override.
+
+## 4. Write the agent's instructions
+
+Edit `groups/main/CLAUDE.md` (privileged control channel) and
+`groups/global/CLAUDE.md` (ordinary channels) to describe your org and how the
+assistant should behave. Use the `{{ASSISTANT_NAME}}` token anywhere you want the
+configured name substituted — it's filled in when a group is first registered.
+
+The authoritative **operating rules** (access control, messaging, scheduling,
+identity, integrations) live in the framework `rules/` directory and apply to
+every org. Don't copy them into your profile; reference them.
+
+## 5. Seed your people (the allowlist)
+
+Add one markdown file per member under
+`groups/<sharedKbGroup>/context/people/<slug>.md`. This folder **is** the
+allowlist — identity resolution and RBAC are driven by it. See
+`rules/identity/` and `rules/access-control/` for the schema and role hierarchy.
+
+## 6. Activate the profile
+
+```bash
+echo "LABOR_PROFILE=acme" >> .env
+```
+
+If `acme` is the only profile present (besides `example`), it's auto-selected and
+`LABOR_PROFILE` is optional. With more than one profile, it's required.
+
+## 7. Install & run
+
+```bash
+npm install
+npm run setup        # interactive wizard: timezone, env, container, groups, register, service
+npm run dev          # or `npm run build && npm start`
+```
+
+Register your channels (Slack/Telegram/Discord) during `npm run setup`, or via
+the per-channel skills (`/add-slack`, `/add-telegram`, `/add-discord`).
+
+## 8. (Optional) Add org-specific capabilities
+
+- **Agent skills** for your org: drop a `SKILL.md` folder in
+  `profiles/acme/container-skills/`. It overlays the core `container/skills/`.
+- **Background flows / plugins**: see [PLUGINS.md](PLUGINS.md).
+
+---
+
+## Running multiple orgs
+
+One checkout, one active profile at a time, selected by `LABOR_PROFILE`. Each
+profile keeps its own `store/` (database) and `data/` (sessions), so orgs never
+share state. To run several orgs simultaneously, run one process per profile
+(separate `LABOR_PROFILE` + separate ports), or one checkout per org.
+
+## Renaming / forking the framework
+
+The framework is named **labor.fun** (`package.json`). The internal container
+protocol keeps the `nanoclaw` codename (`NANOCLAW_*` env vars, output markers,
+container name prefix) — that's an implementation detail, not org-facing, and
+left unchanged to avoid churn.

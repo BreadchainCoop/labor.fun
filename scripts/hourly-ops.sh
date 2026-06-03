@@ -1,34 +1,47 @@
 #!/bin/bash
-# Breadbrich Engels hourly operations cron job
+# labor.fun hourly operations cron job
 # Runs every hour to:
-#   1. Check for Dave's open PRs that need review/merge/deploy
-#   2. Verify recent TG messages were ingested into tasks/KB
+#   1. Check for open PRs that need review/merge/deploy
+#   2. Verify recent messages were ingested into tasks/KB
 #   3. Compact group memory files (except active conversations)
 #
 # Logs to /opt/breadbrich/logs/hourly-ops.log
+# Org-specific state lives under profiles/$PROFILE/ (see src/profile.ts).
 
 set -uo pipefail
 
-LOG="/opt/breadbrich/logs/hourly-ops.log"
-DB="/opt/breadbrich/store/messages.db"
-CONTEXT="/opt/breadbrich/groups/slack_main/context"
-GROUPS="/opt/breadbrich/groups"
+DEPLOY_ROOT="/opt/breadbrich"
+DEPLOY_ENV="$DEPLOY_ROOT/setup/breadbrich-deploy.env"
+PROFILE="${LABOR_PROFILE:-}"
+KB_GROUP="${SHARED_KB_GROUP:-}"
+if [ -f "$DEPLOY_ENV" ]; then
+  [ -z "$PROFILE" ] && PROFILE="$(grep -E '^LABOR_PROFILE=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  [ -z "$KB_GROUP" ] && KB_GROUP="$(grep -E '^SHARED_KB_GROUP=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+KB_GROUP="${KB_GROUP:-discord_main}"
+REPO="${LABOR_REPO:-BreadchainCoop/labor.fun}"
+
+LOG="$DEPLOY_ROOT/logs/hourly-ops.log"
+GROUPS="$DEPLOY_ROOT/profiles/$PROFILE/groups"
+DB="$DEPLOY_ROOT/profiles/$PROFILE/store/messages.db"
+CONTEXT="$GROUPS/$KB_GROUP/context"
 NOW=$(date -Iseconds)
 
 log() { echo "[$NOW] $*" >> "$LOG"; }
 
 log "=== Hourly ops started ==="
 
-# --- 1. Check for open PRs from Dave ---
+# --- 1. Check for open PRs ---
 log "Checking open PRs..."
 if command -v gh &>/dev/null; then
-  PRS=$(gh pr list --repo BreadchainCoop/breadbrich-engels --state open --json number,title,createdAt 2>/dev/null || echo "[]")
+  PRS=$(gh pr list --repo "$REPO" --state open --json number,title,createdAt 2>/dev/null || echo "[]")
   PR_COUNT=$(echo "$PRS" | node -e "process.stdin.on('data',d=>{console.log(JSON.parse(d).length)})" 2>/dev/null || echo "0")
   if [ "$PR_COUNT" -gt "0" ]; then
-    log "ALERT: $PR_COUNT open PR(s) from Dave need review"
+    log "ALERT: $PR_COUNT open PR(s) need review"
     echo "$PRS" | node -e "process.stdin.on('data',d=>{JSON.parse(d).forEach(p=>console.log('  #'+p.number+': '+p.title))})" >> "$LOG" 2>/dev/null
   else
-    log "No open PRs from Dave"
+    log "No open PRs"
   fi
 else
   log "WARN: gh CLI not available, skipping PR check"

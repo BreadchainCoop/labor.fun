@@ -1,7 +1,7 @@
 {
-  "name": "breadbrich-engels",
+  "name": "labor.fun",
   "version": "0.1.0",
-  "description": "Breadbrich Engels — multi-channel AI assistant. Built on NanoClaw: Claude agents in isolated containers with per-group memory.",
+  "description": "labor.fun — a standalone, multi-org framework for multi-channel AI assistants. Runs Claude agents in isolated containers with per-group memory; each organization is a drop-in profile.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

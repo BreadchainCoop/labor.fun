@@ -12,6 +12,8 @@ import {
   FLAT_ACCESS,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
+  PROJECT_ROOT,
+  SERVICE_USER,
   SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
@@ -86,7 +88,7 @@ function getEmailTransporter(): nodemailer.Transporter | null {
 
 // --- KB file modification access control ---
 
-const KB_CONTEXT_DIR = '/opt/breadbrich/groups/slack_main/context';
+const KB_CONTEXT_DIR = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context');
 
 /**
  * Resolve a KB-relative path against `KB_CONTEXT_DIR` and refuse anything
@@ -126,11 +128,11 @@ function getKbOwnerIds(): { uid: number; gid: number } | null {
   try {
     // execFileSync (no shell) with a literal username — no interpolation.
     const uid = parseInt(
-      execFileSync('id', ['-u', 'breadbrich']).toString().trim(),
+      execFileSync('id', ['-u', SERVICE_USER]).toString().trim(),
       10,
     );
     const gid = parseInt(
-      execFileSync('id', ['-g', 'breadbrich']).toString().trim(),
+      execFileSync('id', ['-g', SERVICE_USER]).toString().trim(),
       10,
     );
     if (!Number.isFinite(uid) || !Number.isFinite(gid)) {
@@ -521,7 +523,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 } else {
                   const usersFile =
                     process.env.USERS_FILE ||
-                    '/opt/breadbrich/kb-ui/users.json';
+                    path.join(PROJECT_ROOT, 'kb-ui', 'users.json');
                   let users: Record<string, string> = {};
                   try {
                     if (fs.existsSync(usersFile)) {

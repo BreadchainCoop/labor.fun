@@ -1,0 +1,12 @@
+{
+  "assistantName": "Breadbrich Engels",
+  "orgName": "Bread Cooperative",
+  "orgShortName": "Bread",
+  "orgWebsite": "https://bread.coop",
+  "githubOrg": "BreadchainCoop",
+  "githubRepo": "labor.fun",
+  "kbDashboardUrl": "https://kb.example.com",
+  "sharedKbGroup": "discord_main",
+  "serviceUser": "breadbrich",
+  "telegramBotUsername": "your_bot_username"
+}
