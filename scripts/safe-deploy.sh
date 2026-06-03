@@ -57,7 +57,9 @@ rollback() {
 
 STATEFUL_PATHS=(
   ".env" ".env.bak-*"
-  "$PROFILE_REL/store" "$PROFILE_REL/data" "$PROFILE_REL/groups" "logs"
+  # Preserve runtime state for every profile, not just the active one, so
+  # rsync --delete can't wipe another profile's DB/sessions (e.g. staging).
+  "profiles/*/store" "profiles/*/data" "$PROFILE_REL/groups" "profiles/staging" "logs"
   "kb-ui/users.json"
   "repo-tokens"
   "node_modules" ".npm-cache"

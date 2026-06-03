@@ -89,6 +89,15 @@ export function resolveProfileDir(): string {
           `Create profiles/${name}/ or unset LABOR_PROFILE.`,
       );
     }
+    // An explicitly-selected profile with no config is almost always a
+    // misconfiguration — warn rather than silently fall back to defaults.
+    if (!fs.existsSync(path.join(dir, 'profile.config.json'))) {
+      logger.warn(
+        { profile: name, dir },
+        'LABOR_PROFILE is set but profile.config.json is missing — ' +
+          'using framework defaults (assistant name, org, etc.)',
+      );
+    }
     return dir;
   }
 
@@ -119,16 +128,31 @@ export function resolveProfileDir(): string {
 /** Load and validate a profile's config, filling in framework defaults. */
 export function loadProfileConfig(dir: string): ProfileConfig {
   const file = path.join(dir, 'profile.config.json');
+  let contents: string;
   try {
-    const raw = JSON.parse(
-      fs.readFileSync(file, 'utf-8'),
-    ) as Partial<ProfileConfig>;
-    return { ...DEFAULTS, ...raw };
+    contents = fs.readFileSync(file, 'utf-8');
   } catch (err) {
-    logger.debug(
-      { err, file },
-      'No profile.config.json found — using framework defaults',
-    );
-    return { ...DEFAULTS };
+    // Missing file is the expected legacy/dev/test case → quiet defaults.
+    // Any other read error (permissions, etc.) is surfaced, not swallowed.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      logger.debug(
+        { file },
+        'No profile.config.json — using framework defaults',
+      );
+      return { ...DEFAULTS };
+    }
+    throw err;
   }
+  // A present-but-malformed config must fail loudly rather than silently
+  // starting the app with the wrong identity/config.
+  let raw: Partial<ProfileConfig>;
+  try {
+    raw = JSON.parse(contents) as Partial<ProfileConfig>;
+  } catch (err) {
+    throw new Error(
+      `Invalid JSON in ${file}: ${(err as Error).message}. ` +
+        `Fix the file or remove it to use framework defaults.`,
+    );
+  }
+  return { ...DEFAULTS, ...raw };
 }

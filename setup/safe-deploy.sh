@@ -91,13 +91,19 @@ if [ "$OLD" = "$NEW" ]; then
 fi
 
 # --- 3. Sync code into live app dir, preserving stateful paths ---
-log "Sync code -> $APP_DIR (preserving $PROFILE_REL state)"
+log "Sync code -> $APP_DIR (preserving profile runtime state)"
+# Preserve gitignored runtime state for EVERY profile on the host (not just the
+# active one) so rsync --delete can't wipe another profile's DB/sessions:
+#   - any profile's store/ + data/ (DB + sessions)
+#   - the active profile's groups/ (live KB, excluded from git)
+#   - the entirely-local staging profile
 rsync -a --delete \
   --exclude='.git/' \
   --exclude='.env' \
-  --exclude="/$PROFILE_REL/store/" \
-  --exclude="/$PROFILE_REL/data/" \
+  --exclude='/profiles/*/store/' \
+  --exclude='/profiles/*/data/' \
   --exclude="/$PROFILE_REL/groups/" \
+  --exclude='/profiles/staging/' \
   --exclude='kb-ui/users.json' \
   --exclude='node_modules/' \
   --exclude='dist/' \

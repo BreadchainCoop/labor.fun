@@ -113,11 +113,12 @@ function resolveKbPath(input: unknown): string | null {
 }
 
 /**
- * Resolve breadbrich:breadbrich's numeric uid/gid once at startup so KB
- * writes can transfer ownership without spawning a shell. Returns null
- * when the user isn't present on this host (typical in dev), in which
- * case the chown step is skipped — the orchestrator runs as
- * `breadbrich` in production, so the write already lands with the right
+ * Resolve the service user's numeric uid/gid once at startup so KB writes
+ * can transfer ownership without spawning a shell. The user comes from
+ * SERVICE_USER (the active profile's serviceUser, overridable per env).
+ * Returns null when that user isn't present on this host (typical in dev),
+ * in which case the chown step is skipped — the orchestrator runs as the
+ * service user in production, so the write already lands with the right
  * owner. The shell-out (previously `execSync(chown ...)`) was a
  * command-injection sink whose input was agent-controlled; switching to
  * `fs.chownSync` with cached numeric ids closes that.

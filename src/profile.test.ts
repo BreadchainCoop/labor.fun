@@ -49,11 +49,10 @@ describe('loadProfileConfig', () => {
     expect(cfg.sharedKbGroup).toBe('slack_main');
   });
 
-  it('falls back to defaults on malformed JSON instead of throwing', () => {
+  it('throws on malformed JSON instead of silently using defaults', () => {
     const dir = makeProfile();
     fs.writeFileSync(path.join(dir, 'profile.config.json'), '{ not json');
-    const cfg = loadProfileConfig(dir);
-    expect(cfg.assistantName).toBe('labor.fun');
+    expect(() => loadProfileConfig(dir)).toThrow(/Invalid JSON/);
   });
 
   it('lets a profile override the shared KB group', () => {
