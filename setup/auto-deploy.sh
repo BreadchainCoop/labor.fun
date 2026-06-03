@@ -26,10 +26,14 @@
 # by safe-deploy's own flock at the top of the script.
 set -euo pipefail
 
-# --- Resolve infra config (defaults preserve the breadchain droplet) ---
-GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
-PROFILE="${LABOR_PROFILE:-breadchain}"
-DEPLOY_CONFIG="$GIT_DIR/profiles/$PROFILE/deploy.config"
+# --- Resolve infra config from the live install (profiles are host-local) ---
+BOOT_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+PROFILE="${LABOR_PROFILE:-}"
+if [ -z "$PROFILE" ] && [ -d "$BOOT_ROOT/profiles" ]; then
+  PROFILE="$(ls "$BOOT_ROOT/profiles" 2>/dev/null | grep -vx example | head -n1 || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+DEPLOY_CONFIG="$BOOT_ROOT/profiles/$PROFILE/deploy.config"
 # shellcheck disable=SC1090
 [ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
 GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"

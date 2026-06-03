@@ -20,15 +20,18 @@ labor.fun/                  ← the framework (org-agnostic, reusable)
 ├── kb-ui/                  Admin dashboard
 ├── rules/                  Core operating rules the agent follows
 ├── setup/                  Install wizard steps
-└── profiles/              ← one directory per organization
-    ├── example/            A copy-me template for new orgs
-    └── breadchain/         The reference org (Bread Cooperative)
+└── profiles/              ← org instances (only `example` is tracked)
+    └── example/            A copy-me template for new orgs
         ├── profile.config.json   identity & config (single source of truth)
         ├── groups/               per-group memory + KB context
-        ├── store/  data/         runtime state (gitignored)
+        ├── deploy.config         per-org host: paths, service names, user
         ├── container-skills/      optional org-specific agent skills
-        └── plugins/               optional org-specific plugins
+        └── plugins/               optional org-specific channels & flows
 ```
+
+A real org (e.g. `profiles/acme/`) is created **locally** from `example` and is
+**gitignored** — its config, KB, plugins, infra, `store/`, and `data/` live only
+on that org's clone/host, never in the shared framework repo.
 
 **Active profile** is selected at startup: `LABOR_PROFILE=<name>` (in `.env`),
 else the single profile present, else the repo root (legacy/dev layout).

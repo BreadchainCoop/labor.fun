@@ -13,16 +13,17 @@
 set -euo pipefail
 
 # --- Resolve active profile + infra config ---------------------------------
-# Bootstrap the git mirror + profile so we can read the per-profile
-# deploy.config; override via env (GIT_DIR=..., LABOR_PROFILE=...) for a new org.
-GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
+# Profiles are host-local (gitignored, not in the repo), so the infra config is
+# read from the LIVE install ($DEPLOY_ROOT/profiles/<profile>/), not the git
+# mirror. Override via env (DEPLOY_ROOT=..., LABOR_PROFILE=...) for a new org.
+BOOT_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
 PROFILE="${LABOR_PROFILE:-}"
-BOOT_DEPLOY_ENV="${DEPLOY_ROOT:-/opt/breadbrich}/setup/breadbrich-deploy.env"
-if [ -z "$PROFILE" ] && [ -f "$BOOT_DEPLOY_ENV" ]; then
-  PROFILE="$(grep -E '^LABOR_PROFILE=' "$BOOT_DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"'"'"'"' || true)"
+if [ -z "$PROFILE" ] && [ -d "$BOOT_ROOT/profiles" ]; then
+  # Single non-example profile present? Use it (mirrors src/profile.ts).
+  PROFILE="$(ls "$BOOT_ROOT/profiles" 2>/dev/null | grep -vx example | head -n1 || true)"
 fi
 PROFILE="${PROFILE:-breadchain}"
-DEPLOY_CONFIG="$GIT_DIR/profiles/$PROFILE/deploy.config"
+DEPLOY_CONFIG="$BOOT_ROOT/profiles/$PROFILE/deploy.config"
 # shellcheck disable=SC1090
 [ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
 
@@ -34,7 +35,8 @@ SERVICE_NAME="${SERVICE_NAME:-breadbrich}"
 KB_SERVICE_NAME="${KB_SERVICE_NAME:-breadbrich-kb}"
 AUTO_DEPLOY_NAME="${AUTO_DEPLOY_NAME:-breadbrich-auto-deploy}"
 SERVICE_USER="${SERVICE_USER:-breadbrich}"
-DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-$DEPLOY_ROOT/setup/breadbrich-deploy.env}"
+# Runtime env lives in the profile (host-local), derived unless overridden.
+DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-$DEPLOY_ROOT/profiles/$PROFILE/deploy.env}"
 
 APP_DIR="$DEPLOY_ROOT"
 BK_DIR="$BACKUP_DIR"
@@ -65,13 +67,18 @@ mkdir -p "$PRE"
 # them once, before backup + sync, so rsync --delete can't wipe them.
 # Idempotent: a no-op once the profile paths exist.
 PROFILE_ABS="$APP_DIR/$PROFILE_REL"
+mkdir -p "$PROFILE_ABS"
 for d in store data groups; do
   if [ -e "$APP_DIR/$d" ] && [ ! -e "$PROFILE_ABS/$d" ]; then
     log "Migrating legacy $d -> $PROFILE_REL/$d"
-    mkdir -p "$PROFILE_ABS"
     mv "$APP_DIR/$d" "$PROFILE_ABS/$d"
   fi
 done
+# Legacy runtime env: setup/breadbrich-deploy.env -> profiles/<profile>/deploy.env.
+if [ -f "$APP_DIR/setup/breadbrich-deploy.env" ] && [ ! -e "$PROFILE_ABS/deploy.env" ]; then
+  log "Migrating legacy setup/breadbrich-deploy.env -> $PROFILE_REL/deploy.env"
+  mv "$APP_DIR/setup/breadbrich-deploy.env" "$PROFILE_ABS/deploy.env"
+fi
 chown -R "$APP_USER:$APP_USER" "$PROFILE_ABS" 2>/dev/null || true
 
 # --- 1. Pre-deploy backup (stateful paths + current built code) ---
@@ -106,18 +113,19 @@ if [ "$OLD" = "$NEW" ]; then
 fi
 
 # --- 3. Sync code into live app dir, preserving stateful paths ---
-log "Sync code -> $APP_DIR (preserving profile runtime state)"
-# Preserve gitignored runtime state for EVERY profile on the host (not just the
-# active one) so rsync --delete can't wipe another profile's DB/sessions:
-#   - any profile's store/ + data/ (DB + sessions)
-#   - the active profile's groups/ (live KB, excluded from git)
-#   - the entirely-local staging profile
+log "Sync code -> $APP_DIR (preserving host-local profiles)"
+# Org profiles are host-local (gitignored, not in the mirror), so rsync --delete
+# would wipe them. Exclude every real profile; only `example` (a tracked
+# template) is allowed to sync from the mirror.
+#   - the entire active profile (config, deploy.env, groups, store, data)
+#   - any other profile's store/ + data/ (one box, several orgs)
+#   - the local staging profile
 rsync -a --delete \
   --exclude='.git/' \
   --exclude='.env' \
+  --exclude="/$PROFILE_REL/" \
   --exclude='/profiles/*/store/' \
   --exclude='/profiles/*/data/' \
-  --exclude="/$PROFILE_REL/groups/" \
   --exclude='/profiles/staging/' \
   --exclude='kb-ui/users.json' \
   --exclude='node_modules/' \
