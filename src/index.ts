@@ -329,6 +329,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // Sum of the actual text the agent sent the user, accumulated across the
+  // streaming callbacks below. completeAgentRun() is given this — NOT the
+  // length of runAgent()'s return value, which is just the status string
+  // ('success'/'error'), and which previously made agent_runs.output_length
+  // always 7 ("success") or 5 ("error") regardless of the real reply.
+  let outputLength = 0;
 
   // ACK pattern: react with a thinking emoji on the triggering message,
   // then swap to a checkmark when processing completes.
@@ -352,6 +358,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
+        outputLength += text.length;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -376,15 +383,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     await channel.removeReaction!(chatJid, triggerMessageId, 'thinking_face');
   }
 
-  // Calculate output length for logging
-  const outputText = typeof output === 'string' ? output : '';
   const runDuration = Date.now() - runStartTime;
 
   if (output === 'error' || hadError) {
     completeAgentRun(
       runId,
       'error',
-      outputText.length,
+      outputLength,
       runDuration,
       outputSentToUser
         ? 'Agent returned error (partial output sent to user)'
@@ -409,7 +414,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
-  completeAgentRun(runId, 'success', outputText.length, runDuration);
+  completeAgentRun(runId, 'success', outputLength, runDuration);
   return true;
 }
 
