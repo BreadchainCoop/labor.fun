@@ -97,6 +97,21 @@ function buildVolumeMounts(
     // Main gets writable access to the store (SQLite DB) so it can
     // query and write to the database directly. The DB lives under the
     // active profile (STORE_DIR), surfaced at the same container path.
+    //
+    // The mount target /workspace/project/store sits UNDER the read-only
+    // /workspace/project bind (= projectRoot). Docker can only create that
+    // nested mountpoint if projectRoot/store exists on the host. In the
+    // profile layout the real store is STORE_DIR (profiles/<name>/store),
+    // so projectRoot/store is otherwise absent — the deploy migration moves
+    // the legacy root-level store/ into the profile. Without a stub the
+    // container dies at startup with "mkdirat .../store: read-only file
+    // system" (code 125) and every message is dropped. Ensure an empty stub
+    // mountpoint exists so the writable store bind can mount over it.
+    // Idempotent, and a no-op in the legacy root layout (STORE_DIR == stub).
+    const storeMountpoint = path.join(projectRoot, 'store');
+    if (!fs.existsSync(storeMountpoint)) {
+      fs.mkdirSync(storeMountpoint, { recursive: true });
+    }
     mounts.push({
       hostPath: STORE_DIR,
       containerPath: '/workspace/project/store',
