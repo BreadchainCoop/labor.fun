@@ -59,13 +59,15 @@ NETRC
 chmod 600 "/home/$SERVICE_USER/.netrc"
 chown "$SERVICE_USER:$SERVICE_USER" "/home/$SERVICE_USER/.netrc"
 
-# Clone the framework repo into the git mirror (fresh clone each time — idempotent)
+# Clone the framework repo into the git mirror (fresh clone each time — idempotent).
+# Values below are expanded locally by this (unquoted) heredoc; the inner single
+# quotes protect them when the remote shell runs su's -c command.
 rm -rf "$GIT_DIR"
-su - "$SERVICE_USER" -c 'git clone --depth 1 --branch main "$REPO_URL" "$GIT_DIR"'
+su - "$SERVICE_USER" -c "git clone --depth 1 --branch main '$REPO_URL' '$GIT_DIR'"
 
 echo ""
 echo "Clone succeeded. Current HEAD:"
-su - "$SERVICE_USER" -c 'cd "$GIT_DIR" && git log -1 --oneline'
+su - "$SERVICE_USER" -c "cd '$GIT_DIR' && git log -1 --oneline"
 EOF
 
 echo ""
