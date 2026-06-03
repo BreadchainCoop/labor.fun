@@ -87,6 +87,15 @@ vi.mock('discord.js', () => {
       }),
     };
 
+    users = {
+      fetch: vi.fn().mockResolvedValue({
+        createDM: vi.fn().mockResolvedValue({
+          id: 'dm-channel-123',
+          send: vi.fn().mockResolvedValue(undefined),
+        }),
+      }),
+    };
+
     destroy() {
       this._ready = false;
     }
@@ -827,6 +836,41 @@ describe('DiscordChannel', () => {
       expect(mockChannel.send).toHaveBeenNthCalledWith(1, 'x'.repeat(2000));
       expect(mockChannel.send).toHaveBeenNthCalledWith(2, 'x'.repeat(1000));
     });
+
+    it('sends a DM via users.fetch when jid has dc-dm: prefix', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const dmSend = vi.fn().mockResolvedValue(undefined);
+      const createDM = vi
+        .fn()
+        .mockResolvedValue({ id: 'dm-channel-123', send: dmSend });
+      currentClient().users.fetch.mockResolvedValueOnce({ createDM });
+
+      await channel.sendMessage('dc-dm:987654321', 'Hello DM');
+
+      expect(currentClient().users.fetch).toHaveBeenCalledWith('987654321');
+      expect(createDM).toHaveBeenCalled();
+      expect(dmSend).toHaveBeenCalledWith('Hello DM');
+      // Must NOT attempt channel resolution for a dc-dm: JID
+      expect(currentClient().channels.fetch).not.toHaveBeenCalled();
+    });
+
+    it('handles dc-dm: send failures gracefully', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      currentClient().users.fetch.mockRejectedValueOnce(
+        new Error('Unknown User'),
+      );
+
+      // Should not throw — error is caught and logged
+      await expect(
+        channel.sendMessage('dc-dm:987654321', 'Will fail'),
+      ).resolves.toBeUndefined();
+    });
   });
 
   // --- ownsJid ---
@@ -835,6 +879,11 @@ describe('DiscordChannel', () => {
     it('owns dc: JIDs', () => {
       const channel = new DiscordChannel('test-token', createTestOpts());
       expect(channel.ownsJid('dc:1234567890123456')).toBe(true);
+    });
+
+    it('owns dc-dm: JIDs', () => {
+      const channel = new DiscordChannel('test-token', createTestOpts());
+      expect(channel.ownsJid('dc-dm:987654321')).toBe(true);
     });
 
     it('does not own WhatsApp group JIDs', () => {
