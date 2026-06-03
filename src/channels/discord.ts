@@ -15,6 +15,7 @@ import {
   DISCORD_DM_ROLE_REFRESH_INTERVAL,
   TRIGGER_PATTERN,
 } from '../config.js';
+import { storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -463,11 +464,27 @@ export class DiscordChannel implements Channel {
     const user = await this.client.users.fetch(userId);
     const dm = await user.createDM();
     const MAX_LENGTH = 2000;
+    // Log outbound under the DM channel's jid (`dc:<channelId>`), the same key
+    // a registered DM group uses, so proactive DMs are recorded too.
+    const dmJid = `dc:${dm.id}`;
+    const storeSent = (id: string, chunk: string) => {
+      try {
+        storeOutboundMessage(dmJid, id, chunk, ASSISTANT_NAME);
+      } catch (err) {
+        logger.warn(
+          { err, jid: dmJid },
+          'storeOutboundMessage failed (continuing)',
+        );
+      }
+    };
     if (text.length <= MAX_LENGTH) {
-      await dm.send(text);
+      const sent = await dm.send(text);
+      if (sent?.id) storeSent(sent.id, text);
     } else {
       for (let i = 0; i < text.length; i += MAX_LENGTH) {
-        await dm.send(text.slice(i, i + MAX_LENGTH));
+        const chunk = text.slice(i, i + MAX_LENGTH);
+        const sent = await dm.send(chunk);
+        if (sent?.id) storeSent(sent.id, chunk);
       }
     }
     logger.info(
@@ -505,13 +522,30 @@ export class DiscordChannel implements Channel {
       }
       const textChannel = target as TextChannel | ThreadChannel;
 
-      // Discord has a 2000 character limit per message — split if needed
+      // Discord has a 2000 character limit per message — split if needed.
+      // Each sent message is recorded with is_from_me=1 so the bot's own
+      // replies land in the messages table (the single source of truth used
+      // for context, dedup, and the KB rule that every outbound message is
+      // logged). Discord was the only channel not doing this — Slack and
+      // Telegram already call storeOutboundMessage in their send paths — which
+      // left the table with zero outbound rows on Discord-only installs. The
+      // store is wrapped so a DB hiccup never blocks delivery.
       const MAX_LENGTH = 2000;
+      const storeSent = (id: string, chunk: string) => {
+        try {
+          storeOutboundMessage(jid, id, chunk, ASSISTANT_NAME);
+        } catch (err) {
+          logger.warn({ err, jid }, 'storeOutboundMessage failed (continuing)');
+        }
+      };
       if (text.length <= MAX_LENGTH) {
-        await textChannel.send(text);
+        const sent = await textChannel.send(text);
+        if (sent?.id) storeSent(sent.id, text);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await textChannel.send(text.slice(i, i + MAX_LENGTH));
+          const chunk = text.slice(i, i + MAX_LENGTH);
+          const sent = await textChannel.send(chunk);
+          if (sent?.id) storeSent(sent.id, chunk);
         }
       }
       // Clear the anchor so scheduled/proactive messages with no fresh
