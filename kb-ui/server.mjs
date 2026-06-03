@@ -17,7 +17,48 @@ const require = createRequire(import.meta.url);
 const app = express();
 app.use(express.json());
 const PORT = process.env.KB_PORT || 8080;
-const CONTEXT_DIR = process.env.CONTEXT_DIR || '/opt/breadbrich/groups/slack_main/context';
+
+// Resolve the active profile (mirrors src/profile.ts) so local-dev defaults
+// point at profiles/<name>/. In production CONTEXT_DIR / DB_PATH are set
+// explicitly via setup/breadbrich-deploy.env and take precedence.
+function resolveProfileDir() {
+  const cwd = process.cwd();
+  const profilesRoot = path.join(cwd, 'profiles');
+  const envName = (process.env.LABOR_PROFILE || '').trim();
+  if (envName) {
+    const dir = path.join(profilesRoot, envName);
+    if (fs.existsSync(dir)) return dir;
+  }
+  try {
+    const entries = fs.readdirSync(profilesRoot).filter(
+      (e) =>
+        e !== 'example' &&
+        !e.startsWith('.') &&
+        fs.existsSync(path.join(profilesRoot, e, 'profile.config.json')),
+    );
+    if (entries.length === 1) return path.join(profilesRoot, entries[0]);
+  } catch {
+    /* no profiles/ dir — fall back to cwd (legacy layout) */
+  }
+  return cwd;
+}
+const PROFILE_DIR = resolveProfileDir();
+function profileSharedKbGroup() {
+  if (process.env.SHARED_KB_GROUP) return process.env.SHARED_KB_GROUP;
+  try {
+    const cfg = JSON.parse(
+      fs.readFileSync(path.join(PROFILE_DIR, 'profile.config.json'), 'utf-8'),
+    );
+    if (cfg.sharedKbGroup) return cfg.sharedKbGroup;
+  } catch {
+    /* default below */
+  }
+  return 'slack_main';
+}
+const DEFAULT_DB_PATH = path.join(PROFILE_DIR, 'store', 'messages.db');
+const CONTEXT_DIR =
+  process.env.CONTEXT_DIR ||
+  path.join(PROFILE_DIR, 'groups', profileSharedKbGroup(), 'context');
 
 // File-prefix allow lists for the /projects + /tasks views. TASK-* /
 // PROJECT-* are hand-authored KB files; GH-* / GHD-* / GHP-* are written
@@ -1232,7 +1273,7 @@ app.patch('/api/tasks/:file', (req, res) => {
     // Audit log
     try {
       if (!Database) throw new Error('better-sqlite3 not available');
-      const auditDb = new Database(process.env.DB_PATH || '/opt/breadbrich/store/messages.db');
+      const auditDb = new Database(process.env.DB_PATH || DEFAULT_DB_PATH);
       auditDb.exec('CREATE TABLE IF NOT EXISTS kb_audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, file_path TEXT NOT NULL, action TEXT NOT NULL, changed_by TEXT NOT NULL, changes TEXT, timestamp TEXT NOT NULL)');
       auditDb.prepare('INSERT INTO kb_audit_log (file_path, action, changed_by, changes, timestamp) VALUES (?, ?, ?, ?, ?)').run(
         'tasks/' + file, 'update', username, JSON.stringify(req.body), new Date().toISOString()
@@ -1522,7 +1563,7 @@ app.get('/logs', (req, res) => {
   let dbStats = '';
   try {
     const Database = require('better-sqlite3');
-    const db = new Database('/opt/breadbrich/store/messages.db');
+    const db = new Database(process.env.DB_PATH || DEFAULT_DB_PATH);
 
     const totalMessages = db.prepare("SELECT COUNT(*) as c FROM messages WHERE is_from_me = 0 AND is_bot_message = 0").get();
     const byUser = db.prepare("SELECT sender_name, COUNT(*) as c FROM messages WHERE is_from_me = 0 AND is_bot_message = 0 GROUP BY sender_name ORDER BY c DESC").all();

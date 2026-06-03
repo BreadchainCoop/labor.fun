@@ -7,7 +7,12 @@
 import fs from 'fs';
 import path from 'path';
 
-import { STORE_DIR } from '../src/config.ts';
+import {
+  ASSISTANT_NAME,
+  DATA_DIR,
+  GROUPS_DIR,
+  STORE_DIR,
+} from '../src/config.ts';
 import { initDatabase, setRegisteredGroup } from '../src/db.ts';
 import { isValidGroupFolder } from '../src/group-folder.ts';
 import { logger } from '../src/logger.ts';
@@ -33,7 +38,7 @@ function parseArgs(args: string[]): RegisterArgs {
     channel: 'whatsapp', // backward-compat: pre-refactor installs omit --channel
     requiresTrigger: true,
     isMain: false,
-    assistantName: 'Breadbrich Engels',
+    assistantName: '', // empty = not provided; falls back to the profile's name
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -60,7 +65,7 @@ function parseArgs(args: string[]): RegisterArgs {
         result.isMain = true;
         break;
       case '--assistant-name':
-        result.assistantName = args[++i] || 'Breadbrich Engels';
+        result.assistantName = args[++i] || '';
         break;
     }
   }
@@ -90,11 +95,16 @@ export async function run(args: string[]): Promise<void> {
     process.exit(4);
   }
 
+  // The name used for {{ASSISTANT_NAME}} substitution: an explicit
+  // --assistant-name override, else the active profile's configured name.
+  const effectiveName = parsed.assistantName || ASSISTANT_NAME;
+
   logger.info(parsed, 'Registering channel');
 
   // Ensure data and store directories exist (store/ may not exist on
-  // fresh installs that skip WhatsApp auth, which normally creates it)
-  fs.mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
+  // fresh installs that skip WhatsApp auth, which normally creates it).
+  // These resolve under the active profile (profiles/<name>/) via config.
+  fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(STORE_DIR, { recursive: true });
 
   // Initialize database (creates schema + runs migrations)
@@ -111,8 +121,8 @@ export async function run(args: string[]): Promise<void> {
 
   logger.info('Wrote registration to SQLite');
 
-  // Create group folders
-  fs.mkdirSync(path.join(projectRoot, 'groups', parsed.folder, 'logs'), {
+  // Create group folders under the active profile (profiles/<name>/groups/).
+  fs.mkdirSync(path.join(GROUPS_DIR, parsed.folder, 'logs'), {
     recursive: true,
   });
 
@@ -121,18 +131,17 @@ export async function run(args: string[]): Promise<void> {
   // Never overwrite an existing CLAUDE.md — users customize these extensively
   // (persona, workspace structure, communication rules, family context, etc.)
   // and a stock template replacement would destroy that work.
-  const groupClaudeMdPath = path.join(
-    projectRoot,
-    'groups',
-    parsed.folder,
-    'CLAUDE.md',
-  );
+  const groupClaudeMdPath = path.join(GROUPS_DIR, parsed.folder, 'CLAUDE.md');
   if (!fs.existsSync(groupClaudeMdPath)) {
     const templatePath = parsed.isMain
-      ? path.join(projectRoot, 'groups', 'main', 'CLAUDE.md')
-      : path.join(projectRoot, 'groups', 'global', 'CLAUDE.md');
+      ? path.join(GROUPS_DIR, 'main', 'CLAUDE.md')
+      : path.join(GROUPS_DIR, 'global', 'CLAUDE.md');
     if (fs.existsSync(templatePath)) {
-      fs.copyFileSync(templatePath, groupClaudeMdPath);
+      // Substitute the {{ASSISTANT_NAME}} token so templates brand themselves.
+      const content = fs
+        .readFileSync(templatePath, 'utf-8')
+        .replaceAll('{{ASSISTANT_NAME}}', effectiveName);
+      fs.writeFileSync(groupClaudeMdPath, content);
       logger.info(
         { file: groupClaudeMdPath, template: templatePath },
         'Created CLAUDE.md from template',
@@ -140,51 +149,53 @@ export async function run(args: string[]): Promise<void> {
     }
   }
 
-  // Update assistant name in CLAUDE.md files if different from default
+  // Substitute the assistant-name token across all group CLAUDE.md files so
+  // template-based profiles brand themselves. Idempotent (a no-op once tokens
+  // are already substituted).
   let nameUpdated = false;
-  if (parsed.assistantName !== 'Breadbrich Engels') {
-    logger.info(
-      { from: 'Breadbrich Engels', to: parsed.assistantName },
-      'Updating assistant name',
-    );
-
-    const groupsDir = path.join(projectRoot, 'groups');
+  {
     const mdFiles = fs
-      .readdirSync(groupsDir)
-      .map((d) => path.join(groupsDir, d, 'CLAUDE.md'))
+      .readdirSync(GROUPS_DIR)
+      .map((d) => path.join(GROUPS_DIR, d, 'CLAUDE.md'))
       .filter((f) => fs.existsSync(f));
 
     for (const mdFile of mdFiles) {
-      if (fs.existsSync(mdFile)) {
-        let content = fs.readFileSync(mdFile, 'utf-8');
-        content = content.replace(/^# Breadbrich Engels$/m, `# ${parsed.assistantName}`);
-        content = content.replace(
-          /You are Breadbrich Engels/g,
-          `You are ${parsed.assistantName}`,
+      const content = fs.readFileSync(mdFile, 'utf-8');
+      if (content.includes('{{ASSISTANT_NAME}}')) {
+        fs.writeFileSync(
+          mdFile,
+          content.replaceAll('{{ASSISTANT_NAME}}', effectiveName),
         );
-        fs.writeFileSync(mdFile, content);
-        logger.info({ file: mdFile }, 'Updated CLAUDE.md');
+        nameUpdated = true;
+        logger.info(
+          { file: mdFile },
+          'Substituted assistant name in CLAUDE.md',
+        );
       }
     }
 
-    // Update .env
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      let envContent = fs.readFileSync(envFile, 'utf-8');
-      if (envContent.includes('ASSISTANT_NAME=')) {
-        envContent = envContent.replace(
-          /^ASSISTANT_NAME=.*$/m,
-          `ASSISTANT_NAME="${parsed.assistantName}"`,
-        );
+    // Persist an explicit --assistant-name override to .env so it survives
+    // restarts. When no override was given we leave .env alone — the profile's
+    // assistantName is the source of truth.
+    if (parsed.assistantName) {
+      const envFile = path.join(projectRoot, '.env');
+      if (fs.existsSync(envFile)) {
+        let envContent = fs.readFileSync(envFile, 'utf-8');
+        if (envContent.includes('ASSISTANT_NAME=')) {
+          envContent = envContent.replace(
+            /^ASSISTANT_NAME=.*$/m,
+            `ASSISTANT_NAME="${parsed.assistantName}"`,
+          );
+        } else {
+          envContent += `\nASSISTANT_NAME="${parsed.assistantName}"`;
+        }
+        fs.writeFileSync(envFile, envContent);
       } else {
-        envContent += `\nASSISTANT_NAME="${parsed.assistantName}"`;
+        fs.writeFileSync(envFile, `ASSISTANT_NAME="${parsed.assistantName}"\n`);
       }
-      fs.writeFileSync(envFile, envContent);
-    } else {
-      fs.writeFileSync(envFile, `ASSISTANT_NAME="${parsed.assistantName}"\n`);
+      logger.info('Set ASSISTANT_NAME in .env');
+      nameUpdated = true;
     }
-    logger.info('Set ASSISTANT_NAME in .env');
-    nameUpdated = true;
   }
 
   emitStatus('REGISTER_CHANNEL', {
@@ -194,7 +205,7 @@ export async function run(args: string[]): Promise<void> {
     CHANNEL: parsed.channel,
     TRIGGER: parsed.trigger,
     REQUIRES_TRIGGER: parsed.requiresTrigger,
-    ASSISTANT_NAME: parsed.assistantName,
+    ASSISTANT_NAME: effectiveName,
     NAME_UPDATED: nameUpdated,
     STATUS: 'success',
     LOG: 'logs/setup.log',
