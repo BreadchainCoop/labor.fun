@@ -500,10 +500,16 @@ async function runQuery(
           ? {
               gws: {
                 command: 'gws',
+                // --tool-mode compact: gws would otherwise expose ~214 raw
+                // Google API tools, flooding the agent's context. Compact mode
+                // collapses them to one tool per service plus a `gws_discover`
+                // meta-tool (~26 total); the agent drills in on demand.
                 args: [
                   'mcp',
                   '-s',
                   'drive,gmail,calendar,docs,sheets,tasks',
+                  '--tool-mode',
+                  'compact',
                 ],
                 env: {
                   GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:
