@@ -19,6 +19,7 @@ vi.mock('./config.js', () => ({
   NANOCLAW_SUBAGENT_MODEL: undefined,
   PROFILE_DIR: '/tmp/nanoclaw-test-profile',
   SHARED_KB_GROUP: 'slack_main',
+  STORE_DIR: '/tmp/nanoclaw-test-profile/store',
   TIMEZONE: 'America/Los_Angeles',
 }));
 
