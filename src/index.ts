@@ -682,20 +682,24 @@ async function main(): Promise<void> {
 
   // Graceful shutdown handlers
   //
-  // Order matters. Disconnect the channels FIRST so each gateway session is
-  // cleanly torn down (DiscordChannel.disconnect() → client.destroy()) before
-  // anything that can block. Previously channels were disconnected LAST, after
-  // proxyServer.close() + queue.shutdown(): proxyServer.close() waits for
-  // in-flight credential-proxy connections (a running agent container streaming
-  // a model response holds one open), which can outlast systemd's stop timeout.
-  // systemd then SIGKILLs the process before disconnect() ever runs, leaving the
-  // Discord gateway half-open — and the NEXT orchestrator inherits a "connected
-  // but receives no events" zombie session, so the bot silently stops
-  // responding until it is restarted again.
+  // Tear the channel gateways down FIRST and make sure that step actually
+  // completes. DiscordChannel.disconnect() calls client.destroy(), which is
+  // what cleanly ends the Discord gateway session. Previously this ran LAST,
+  // after proxyServer.close() and queue.shutdown(); the risk is that the
+  // process never reaches/finishes it. The unit logs around the observed
+  // failure showed "State 'final-sigterm' timed out. Killing." with detached
+  // agent `docker run` children keeping the cgroup alive past systemd's stop
+  // timeout — i.e. the process can be SIGKILLed mid-stop. If that happens
+  // before client.destroy() completes, the gateway is left half-open and the
+  // NEXT orchestrator inherits a "connected but receives no events" zombie
+  // session, so the bot silently stops responding until restarted again.
+  // Doing the teardown first (and bounding it) makes the one step that must
+  // happen the first thing that does.
   //
-  // A force-exit backstop guarantees we exit well within systemd's stop window
-  // even if a disconnect/close/drain hangs, so the process terminates cleanly
-  // rather than being SIGKILLed. `shuttingDown` guards a second racing signal.
+  // The force-exit backstop guarantees we terminate within systemd's stop
+  // window instead of being SIGKILLed; it exits non-zero so a genuine
+  // shutdown hang is still visible to systemd/monitoring. `shuttingDown`
+  // guards a second signal racing the first.
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
@@ -704,20 +708,24 @@ async function main(): Promise<void> {
 
     const force = setTimeout(() => {
       logger.warn('Graceful shutdown exceeded 8s — forcing exit');
-      process.exit(0);
+      process.exit(1);
     }, 8000);
     force.unref();
 
-    // 1. Close channel gateways first — bounded so a slow disconnect can't hang.
+    // 1. Destroy channel gateways first, bounded so a wedged socket can't hang
+    //    us; allSettled so one channel's failure doesn't skip the others.
     await Promise.race([
       Promise.allSettled(channels.map((ch) => ch.disconnect())),
       new Promise((resolve) => setTimeout(resolve, 4000)),
     ]);
 
-    // 2. Best-effort drain of everything else; none of it can resurrect the
-    //    gateway, so it's safe even if the force-exit fires mid-drain.
+    // 2. Best-effort cleanup of the rest — both return promptly and neither can
+    //    resurrect the gateway: proxyServer.close() just stops accepting new
+    //    connections, and GroupQueue.shutdown() only marks the queue closed and
+    //    detaches (does not kill) in-flight agent containers — it does not drain,
+    //    so it takes no grace period.
     proxyServer.close();
-    await queue.shutdown(3000);
+    await queue.shutdown(0);
 
     clearTimeout(force);
     process.exit(0);
