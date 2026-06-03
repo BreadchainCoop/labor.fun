@@ -23,6 +23,12 @@ export interface Integration {
 const registry = new Map<string, Integration>();
 
 export function registerIntegration(integration: Integration): void {
+  if (registry.has(integration.name)) {
+    logger.warn(
+      { integration: integration.name },
+      'Integration name already registered — overwriting the previous one',
+    );
+  }
   registry.set(integration.name, integration);
 }
 

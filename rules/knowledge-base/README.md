@@ -1,6 +1,6 @@
 # Knowledge Base Rules
 
-The assistant maintains a structured KB in `groups/slack_main/context/`. These rules govern how documents are created, updated, and organized.
+The assistant maintains a structured KB, mounted into every container at `/workspace/shared-kb` (use this path at runtime). On the host it lives under the active profile at `profiles/<name>/groups/<sharedKbGroup>/context/`. These rules govern how documents are created, updated, and organized.
 
 ## Directory Structure
 

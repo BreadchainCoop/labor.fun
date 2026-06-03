@@ -196,6 +196,9 @@ function buildVolumeMounts(
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
+      // Clear the destination first so a profile overlay fully replaces a
+      // same-named core skill (and stale files from a prior run never linger).
+      fs.rmSync(dstDir, { recursive: true, force: true });
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }

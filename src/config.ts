@@ -32,6 +32,8 @@ const envConfig = readEnvFile([
   'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
+  'GITHUB_ORG',
+  'SERVICE_USER',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */

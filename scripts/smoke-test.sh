@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Breadbrich Engels/Breadbrich Engels post-deploy smoke test
+# labor.fun post-deploy smoke test
 # Run locally — tests the remote droplet via SSH
 # Usage: bash scripts/smoke-test.sh
+#   LABOR_PROFILE selects which profile's DB to inspect (default: read from the
+#   droplet's deploy env, else "breadchain").
 
 set -uo pipefail
 
@@ -15,6 +17,15 @@ if [ -f "$REPO_ROOT/.env" ]; then
 fi
 HOST="${DROPLET_HOST:?Set DROPLET_HOST in .env or environment (e.g. root@your-droplet)}"
 
+# Resolve the active profile: explicit LABOR_PROFILE, else the droplet's
+# deploy env, else default. Its store/ holds the DB the smoke test inspects.
+PROFILE="${LABOR_PROFILE:-}"
+if [ -z "$PROFILE" ]; then
+  PROFILE="$(ssh "$HOST" "grep -E '^LABOR_PROFILE=' /opt/breadbrich/setup/breadbrich-deploy.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\"'" 2>/dev/null || true)"
+fi
+PROFILE="${PROFILE:-breadchain}"
+DB_REL="profiles/$PROFILE/store/messages.db"
+
 # Comma-separated list of JIDs the smoke test should assert are registered.
 # If unset, the per-JID assertions are skipped.
 IFS=',' read -ra EXPECTED_JIDS <<< "${EXPECTED_REGISTERED_JIDS:-}"
@@ -25,7 +36,7 @@ FAIL=0
 pass() { echo "  ✓ $1"; ((PASS++)); }
 fail() { echo "  ✗ $1"; ((FAIL++)); }
 
-echo "=== Breadbrich Engels/Breadbrich Engels Smoke Tests ==="
+echo "=== labor.fun Smoke Tests ==="
 echo ""
 
 # 1. Service is running
@@ -60,7 +71,7 @@ if [ "$EXPECTED_GROUPS" -gt 0 ]; then
   fi
 
   # 4. All expected JIDs registered
-  all_jids=$(ssh "$HOST" "su - breadbrich -c 'cd /opt/breadbrich && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"profiles/breadchain/store/messages.db\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
+  all_jids=$(ssh "$HOST" "su - breadbrich -c 'cd /opt/breadbrich && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"$DB_REL\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
   for jid in "${EXPECTED_JIDS[@]}"; do
     if echo "$all_jids" | grep -qF "$jid"; then
       pass "Registered: $jid"

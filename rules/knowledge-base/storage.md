@@ -5,7 +5,7 @@ The assistant uses **two distinct storage systems**. Knowing which one holds wha
 ## 1. Markdown Files (Knowledge Base)
 
 **What**: All organizational knowledge — people, tasks, calendar, artifacts.
-**Where**: `groups/slack_main/context/` on disk, mounted into containers.
+**Where**: mounted into containers at `/workspace/shared-kb` (use this at runtime). On the host it lives under the active profile at `profiles/<name>/groups/<sharedKbGroup>/context/`.
 **Format**: Markdown with YAML frontmatter (see [document-format.md](document-format.md)).
 **Managed by**: the assistant reads/writes these files directly via filesystem operations.
 
@@ -25,7 +25,7 @@ The assistant uses **two distinct storage systems**. Knowing which one holds wha
 ## 2. SQLite Database (System State)
 
 **What**: Message history, group registrations, scheduled tasks, identity mappings, RBAC tags.
-**Where**: `store/messages.db` (better-sqlite3).
+**Where**: queryable in containers at `/workspace/project/store/messages.db` (use this at runtime). On the host it lives under the active profile at `profiles/<name>/store/messages.db` (better-sqlite3).
 **Format**: Relational tables. Full schema in [../../schema/tables.md](../../schema/tables.md).
 **Managed by**: The NanoClaw orchestrator (Node.js process) reads/writes via `src/db.ts`. In **cooperative mode** (`FLAT_ACCESS`, the default — see [COOPERATIVE-MODE.md](../../docs/COOPERATIVE-MODE.md)) **every group** can query it directly via the `sqlite3` CLI at `/workspace/project/store/messages.db`. This includes reading the **full message history** of any chat — you are not limited to the handful of messages piped into the prompt.
 

@@ -26,8 +26,16 @@ function resolveProfileDir() {
   const profilesRoot = path.join(cwd, 'profiles');
   const envName = (process.env.LABOR_PROFILE || '').trim();
   if (envName) {
+    // An explicit selection wins even if the dir is missing — never silently
+    // fall through to a *different* profile (that would show the wrong KB).
+    // Matches src/profile.ts, which treats this as authoritative.
     const dir = path.join(profilesRoot, envName);
-    if (fs.existsSync(dir)) return dir;
+    if (!fs.existsSync(dir)) {
+      console.warn(
+        `[kb-ui] LABOR_PROFILE="${envName}" set but ${dir} does not exist`,
+      );
+    }
+    return dir;
   }
   try {
     const entries = fs.readdirSync(profilesRoot).filter(
