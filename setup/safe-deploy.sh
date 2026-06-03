@@ -169,10 +169,6 @@ render_unit() {
   # $1 = template basename, $2 = destination unit name (without dir)
   local src="$UNITS_DIR/$1" dst="/etc/systemd/system/$2"
   [ -f "$src" ] || return 0
-  if ! command -v envsubst >/dev/null 2>&1; then
-    log "envsubst not found (install gettext-base) — skipping unit render for $2"
-    return 0
-  fi
   local rendered
   rendered="$(DEPLOY_ROOT="$DEPLOY_ROOT" BACKUP_DIR="$BACKUP_DIR" \
     SERVICE_NAME="$SERVICE_NAME" KB_SERVICE_NAME="$KB_SERVICE_NAME" \
@@ -193,6 +189,10 @@ render_unit() {
   fi
 }
 if [ -d "$UNITS_DIR" ]; then
+  # Fail the deploy (→ ERR trap → rollback) rather than leaving units stale.
+  command -v envsubst >/dev/null 2>&1 || {
+    log "envsubst missing — install gettext-base, then redeploy"; false
+  }
   render_unit orchestrator.service.in "$SERVICE_NAME.service"
   render_unit kb.service.in           "$KB_SERVICE_NAME.service"
   render_unit auto-deploy.service.in  "$AUTO_DEPLOY_NAME.service"

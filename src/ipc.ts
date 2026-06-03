@@ -128,12 +128,14 @@ function getKbOwnerIds(): { uid: number; gid: number } | null {
   if (kbOwnerIdsCached !== undefined) return kbOwnerIdsCached;
   try {
     // execFileSync (no shell) with a literal username — no interpolation.
+    // `--` ends option parsing so a SERVICE_USER starting with `-` is treated
+    // as a username, not a flag.
     const uid = parseInt(
-      execFileSync('id', ['-u', SERVICE_USER]).toString().trim(),
+      execFileSync('id', ['-u', '--', SERVICE_USER]).toString().trim(),
       10,
     );
     const gid = parseInt(
-      execFileSync('id', ['-g', SERVICE_USER]).toString().trim(),
+      execFileSync('id', ['-g', '--', SERVICE_USER]).toString().trim(),
       10,
     );
     if (!Number.isFinite(uid) || !Number.isFinite(gid)) {

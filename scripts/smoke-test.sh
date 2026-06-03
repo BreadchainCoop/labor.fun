@@ -17,19 +17,21 @@ if [ -f "$REPO_ROOT/.env" ]; then
 fi
 HOST="${DROPLET_HOST:?Set DROPLET_HOST in .env or environment (e.g. root@your-droplet)}"
 
-# Resolve the active profile: explicit LABOR_PROFILE, else the droplet's
-# deploy env, else default. Its store/ holds the DB the smoke test inspects.
+# Resolve the active profile: explicit LABOR_PROFILE, else the single
+# non-example profile in this local checkout, else default. Its store/ holds the
+# DB the smoke test inspects.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROFILES_DIR="$SCRIPT_DIR/../profiles"
 PROFILE="${LABOR_PROFILE:-}"
-if [ -z "$PROFILE" ]; then
-  PROFILE="$(ssh "$HOST" "grep -E '^LABOR_PROFILE=' /opt/breadbrich/setup/breadbrich-deploy.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\"'" 2>/dev/null || true)"
+if [ -z "$PROFILE" ] && [ -d "$PROFILES_DIR" ]; then
+  PROFILE="$(ls "$PROFILES_DIR" 2>/dev/null | grep -vx example | head -n1 || true)"
 fi
 PROFILE="${PROFILE:-breadchain}"
 DB_REL="profiles/$PROFILE/store/messages.db"
 
 # Infra (DEPLOY_ROOT, SERVICE_USER) from the local profile config; defaults
 # preserve breadchain.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_CONFIG="$SCRIPT_DIR/../profiles/$PROFILE/deploy.config"
+DEPLOY_CONFIG="$PROFILES_DIR/$PROFILE/deploy.config"
 # shellcheck disable=SC1090
 [ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"

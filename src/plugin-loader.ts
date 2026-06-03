@@ -54,8 +54,10 @@ export async function loadProfilePlugins(opts?: {
   for (const entry of fs.readdirSync(pluginsDir).sort()) {
     if (!/\.(mjs|cjs|js)$/.test(entry)) continue;
     const full = path.join(pluginsDir, entry);
-    if (!fs.statSync(full).isFile()) continue;
     try {
+      // statSync inside the try: a broken symlink / permission error on one
+      // entry must be skipped, not crash startup.
+      if (!fs.statSync(full).isFile()) continue;
       const mod = await import(pathToFileURL(full).href);
       const register: unknown = mod.default ?? mod.register;
       if (typeof register !== 'function') {
