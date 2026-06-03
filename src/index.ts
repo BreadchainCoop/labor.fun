@@ -70,6 +70,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import './integrations/index.js';
 import { startRegisteredIntegrations } from './integrations/registry.js';
+import { loadProfilePlugins } from './plugin-loader.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 import {
@@ -801,6 +802,11 @@ async function main(): Promise<void> {
     registerGroup,
     deregisterGroup,
   };
+
+  // Load the active profile's plugins so org-specific channels/flows
+  // self-register before we wire channels and start integrations. (Core
+  // channels/flows are registered by the barrel imports at the top of file.)
+  await loadProfilePlugins();
 
   // Create and connect all registered channels.
   // Each channel self-registers via the barrel import above.

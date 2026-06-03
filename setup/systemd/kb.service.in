@@ -1,0 +1,22 @@
+[Unit]
+Description=labor.fun KB dashboard (${KB_SERVICE_NAME})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${DEPLOY_ROOT}
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# All non-secret config (NODE_ENV, KB_PORT, CONTEXT_DIR, USERS_FILE, KB_ADMINS,
+# KB_SUPERADMINS, DB_PATH, LABOR_PROFILE, ...) lives in the per-org deploy env.
+EnvironmentFile=-${DEPLOY_ENV_FILE}
+ExecStart=/usr/bin/node ${DEPLOY_ROOT}/kb-ui/server.mjs
+Restart=always
+RestartSec=5
+StandardOutput=append:${DEPLOY_ROOT}/logs/${KB_SERVICE_NAME}.log
+StandardError=append:${DEPLOY_ROOT}/logs/${KB_SERVICE_NAME}.error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -26,11 +26,21 @@
 # by safe-deploy's own flock at the top of the script.
 set -euo pipefail
 
-GIT_DIR=/opt/breadbrich-git
-DEPLOY_SH=/opt/breadbrich-backups/safe-deploy.sh
-APP_USER=breadbrich
-FORCE_FILE=/opt/breadbrich-backups/.deploy-force
-DEFER_STATE=/run/breadbrich-deploy-deferred-since
+# --- Resolve infra config (defaults preserve the breadchain droplet) ---
+GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
+PROFILE="${LABOR_PROFILE:-breadchain}"
+DEPLOY_CONFIG="$GIT_DIR/profiles/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/breadbrich-backups}"
+SERVICE_NAME="${SERVICE_NAME:-breadbrich}"
+SERVICE_USER="${SERVICE_USER:-breadbrich}"
+
+DEPLOY_SH="$BACKUP_DIR/safe-deploy.sh"
+APP_USER="$SERVICE_USER"
+FORCE_FILE="$BACKUP_DIR/.deploy-force"
+DEFER_STATE="/run/$SERVICE_NAME-deploy-deferred-since"
 MAX_DEFER_SECONDS="${MAX_DEFER_SECONDS:-900}"   # 15 min — override via env
 
 log() { echo "[auto-deploy $(date -u +%H:%M:%S)] $*"; }

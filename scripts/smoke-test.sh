@@ -26,6 +26,15 @@ fi
 PROFILE="${PROFILE:-breadchain}"
 DB_REL="profiles/$PROFILE/store/messages.db"
 
+# Infra (DEPLOY_ROOT, SERVICE_USER) from the local profile config; defaults
+# preserve breadchain.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_CONFIG="$SCRIPT_DIR/../profiles/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+SERVICE_USER="${SERVICE_USER:-breadbrich}"
+
 # Comma-separated list of JIDs the smoke test should assert are registered.
 # If unset, the per-JID assertions are skipped.
 IFS=',' read -ra EXPECTED_JIDS <<< "${EXPECTED_REGISTERED_JIDS:-}"
@@ -71,7 +80,7 @@ if [ "$EXPECTED_GROUPS" -gt 0 ]; then
   fi
 
   # 4. All expected JIDs registered
-  all_jids=$(ssh "$HOST" "su - breadbrich -c 'cd /opt/breadbrich && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"$DB_REL\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
+  all_jids=$(ssh "$HOST" "su - $SERVICE_USER -c 'cd $DEPLOY_ROOT && node -e \"const db = require(\\\"better-sqlite3\\\")(\\\"$DB_REL\\\"); db.prepare(\\\"SELECT jid FROM registered_groups\\\").all().forEach(r => console.log(r.jid))\"'" 2>/dev/null || echo "")
   for jid in "${EXPECTED_JIDS[@]}"; do
     if echo "$all_jids" | grep -qF "$jid"; then
       pass "Registered: $jid"

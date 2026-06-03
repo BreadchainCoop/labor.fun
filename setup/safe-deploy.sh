@@ -1,33 +1,48 @@
 #!/usr/bin/env bash
-# safe-deploy.sh — deploy labor.fun from GitHub main to /opt/breadbrich.
+# safe-deploy.sh — deploy labor.fun from GitHub main to this org's host.
 #
-# Source of truth is GitHub main, mirrored into /opt/breadbrich-git, then
-# synced into the live app dir preserving stateful paths. Honors the
+# Source of truth is GitHub main, mirrored into $GIT_DIR, then synced into the
+# live app dir ($DEPLOY_ROOT) preserving stateful paths. Honors the
 # push -> merge -> deploy rule. Run as root: takes a backup, rolls back on
 # any failure.
 #
-# Org-specific state (groups/, store/, data/) lives under
-# profiles/$PROFILE/ — see src/profile.ts. PROFILE defaults to the value in
-# breadbrich-deploy.env (LABOR_PROFILE), else "breadchain".
+# Infra (install paths, systemd service names, OS user) is parameterized via
+# profiles/$PROFILE/deploy.config; the defaults below reproduce the breadchain
+# droplet. Org-specific state (groups/, store/, data/) lives under
+# profiles/$PROFILE/ — see src/profile.ts.
 set -euo pipefail
 
-GIT_DIR=/opt/breadbrich-git
-APP_DIR=/opt/breadbrich
-BK_DIR=/opt/breadbrich-backups
-PRE="$BK_DIR/pre-deploy"
-TS="$(date -u +%Y%m%d-%H%M%S)"
-SNAP="$PRE/breadbrich-pre-deploy-$TS.tar.gz"
-APP_USER=breadbrich
-LOCK_FILE=/run/breadbrich-deploy.lock
-
-# Active profile — its groups/store/data are the stateful paths to preserve.
-# Sourced from the deploy env so it stays aligned with what the services use.
-DEPLOY_ENV="$APP_DIR/setup/breadbrich-deploy.env"
+# --- Resolve active profile + infra config ---------------------------------
+# Bootstrap the git mirror + profile so we can read the per-profile
+# deploy.config; override via env (GIT_DIR=..., LABOR_PROFILE=...) for a new org.
+GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
 PROFILE="${LABOR_PROFILE:-}"
-if [ -z "$PROFILE" ] && [ -f "$DEPLOY_ENV" ]; then
-  PROFILE="$(grep -E '^LABOR_PROFILE=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"'"'"'"' || true)"
+BOOT_DEPLOY_ENV="${DEPLOY_ROOT:-/opt/breadbrich}/setup/breadbrich-deploy.env"
+if [ -z "$PROFILE" ] && [ -f "$BOOT_DEPLOY_ENV" ]; then
+  PROFILE="$(grep -E '^LABOR_PROFILE=' "$BOOT_DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"'"'"'"' || true)"
 fi
 PROFILE="${PROFILE:-breadchain}"
+DEPLOY_CONFIG="$GIT_DIR/profiles/$PROFILE/deploy.config"
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_CONFIG" ] && . "$DEPLOY_CONFIG"
+
+# Infra vars — config wins, else breadchain-preserving defaults.
+DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/breadbrich}"
+GIT_DIR="${GIT_DIR:-/opt/breadbrich-git}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/breadbrich-backups}"
+SERVICE_NAME="${SERVICE_NAME:-breadbrich}"
+KB_SERVICE_NAME="${KB_SERVICE_NAME:-breadbrich-kb}"
+AUTO_DEPLOY_NAME="${AUTO_DEPLOY_NAME:-breadbrich-auto-deploy}"
+SERVICE_USER="${SERVICE_USER:-breadbrich}"
+DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-$DEPLOY_ROOT/setup/breadbrich-deploy.env}"
+
+APP_DIR="$DEPLOY_ROOT"
+BK_DIR="$BACKUP_DIR"
+APP_USER="$SERVICE_USER"
+PRE="$BK_DIR/pre-deploy"
+TS="$(date -u +%Y%m%d-%H%M%S)"
+SNAP="$PRE/$SERVICE_NAME-pre-deploy-$TS.tar.gz"
+LOCK_FILE="/run/$SERVICE_NAME-deploy.lock"
 PROFILE_REL="profiles/$PROFILE"
 
 log() { echo "[safe-deploy $(date -u +%H:%M:%S)] $*"; }
@@ -64,14 +79,14 @@ log "Backup -> $SNAP (profile: $PROFILE)"
 tar -czf "$SNAP" -C "$APP_DIR" \
   .env "$PROFILE_REL/store" "$PROFILE_REL/data" "$PROFILE_REL/groups" \
   kb-ui/users.json dist logs 2>/dev/null || true
-ln -sfn "$SNAP" "$PRE/breadbrich-pre-deploy-LATEST.tar.gz"
+ln -sfn "$SNAP" "$PRE/$SERVICE_NAME-pre-deploy-LATEST.tar.gz"
 
 rollback() {
   log "FAILURE during deploy — rolling back from $SNAP"
-  systemctl stop breadbrich breadbrich-kb || true
+  systemctl stop "$SERVICE_NAME" "$KB_SERVICE_NAME" || true
   tar -xzf "$SNAP" -C "$APP_DIR" || true
   chown -R "$APP_USER:$APP_USER" "$APP_DIR" || true
-  systemctl start breadbrich breadbrich-kb || true
+  systemctl start "$SERVICE_NAME" "$KB_SERVICE_NAME" || true
   log "Rollback complete — services restarted on previous state"
   exit 1
 }
@@ -135,31 +150,45 @@ else
   log "container/ unchanged -> skip image rebuild"
 fi
 
-# --- 7a. Install systemd unit changes from the repo (services + timers).
-# Newly-installed *.timer units are also `enable --now`-d so a fresh
-# bootstrap doesn't need a manual systemctl invocation.
+# --- 7a. Render + install systemd units from templates (services + timers).
+# Unit *.in templates carry ${DEPLOY_ROOT}/${SERVICE_NAME}/${SERVICE_USER}/…
+# placeholders; we render them with this deployment's infra config so each org
+# gets its own service names + paths. A newly-installed timer is enabled --now.
 UNITS_DIR="$GIT_DIR/setup/systemd"
 units_changed=0
 declare -a new_timers=()
-if [ -d "$UNITS_DIR" ]; then
-  shopt -s nullglob
-  for unit_src in "$UNITS_DIR"/*.service "$UNITS_DIR"/*.timer; do
-    unit_name="$(basename "$unit_src")"
-    unit_dst="/etc/systemd/system/$unit_name"
-    was_present=0
-    [ -e "$unit_dst" ] && was_present=1
-    if ! cmp -s "$unit_src" "$unit_dst" 2>/dev/null; then
-      log "Unit changed: $unit_name -> installing"
-      install -m 644 -o root -g root "$unit_src" "$unit_dst"
-      units_changed=1
-      # New timer that wasn't installed before — enable + start it after
-      # the upcoming daemon-reload.
-      if [ "$was_present" -eq 0 ] && [[ "$unit_name" == *.timer ]]; then
-        new_timers+=("$unit_name")
-      fi
+render_unit() {
+  # $1 = template basename, $2 = destination unit name (without dir)
+  local src="$UNITS_DIR/$1" dst="/etc/systemd/system/$2"
+  [ -f "$src" ] || return 0
+  if ! command -v envsubst >/dev/null 2>&1; then
+    log "envsubst not found (install gettext-base) — skipping unit render for $2"
+    return 0
+  fi
+  local rendered
+  rendered="$(DEPLOY_ROOT="$DEPLOY_ROOT" BACKUP_DIR="$BACKUP_DIR" \
+    SERVICE_NAME="$SERVICE_NAME" KB_SERVICE_NAME="$KB_SERVICE_NAME" \
+    AUTO_DEPLOY_NAME="$AUTO_DEPLOY_NAME" SERVICE_USER="$SERVICE_USER" \
+    DEPLOY_ENV_FILE="$DEPLOY_ENV_FILE" \
+    envsubst '${DEPLOY_ROOT} ${BACKUP_DIR} ${SERVICE_NAME} ${KB_SERVICE_NAME} ${AUTO_DEPLOY_NAME} ${SERVICE_USER} ${DEPLOY_ENV_FILE}' \
+    < "$src")"
+  local was_present=0
+  [ -e "$dst" ] && was_present=1
+  if ! printf '%s' "$rendered" | cmp -s - "$dst" 2>/dev/null; then
+    log "Unit changed: $2 -> installing"
+    printf '%s' "$rendered" > "$dst"
+    chmod 644 "$dst"; chown root:root "$dst"
+    units_changed=1
+    if [ "$was_present" -eq 0 ] && [[ "$2" == *.timer ]]; then
+      new_timers+=("$2")
     fi
-  done
-  shopt -u nullglob
+  fi
+}
+if [ -d "$UNITS_DIR" ]; then
+  render_unit orchestrator.service.in "$SERVICE_NAME.service"
+  render_unit kb.service.in           "$KB_SERVICE_NAME.service"
+  render_unit auto-deploy.service.in  "$AUTO_DEPLOY_NAME.service"
+  render_unit auto-deploy.timer.in    "$AUTO_DEPLOY_NAME.timer"
   if [ "$units_changed" -eq 1 ]; then
     log "systemctl daemon-reload"
     systemctl daemon-reload
@@ -181,12 +210,12 @@ fi
 
 # --- 7b. Restart services ---
 log "Restart services"
-systemctl restart breadbrich
-systemctl restart breadbrich-kb
+systemctl restart "$SERVICE_NAME"
+systemctl restart "$KB_SERVICE_NAME"
 
 # --- 8. Health check ---
 log "Health check (settle + retry up to 45s)"
-for s in breadbrich breadbrich-kb; do
+for s in "$SERVICE_NAME" "$KB_SERVICE_NAME"; do
   ok=0
   for _ in $(seq 1 9); do
     sleep 5
