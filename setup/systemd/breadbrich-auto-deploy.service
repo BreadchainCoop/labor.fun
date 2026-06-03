@@ -1,5 +1,5 @@
 [Unit]
-Description=Breadbrich Engels auto-deploy (poll origin/main and run safe-deploy when behind)
+Description=labor.fun auto-deploy (poll origin/main and run safe-deploy when behind)
 Wants=network-online.target
 After=network-online.target
 

@@ -47,29 +47,35 @@ else
   log "WARN: gh CLI not available, skipping PR check"
 fi
 
-# --- 2. Check recent TG messages for missed ingestion ---
-log "Checking TG message ingestion..."
-# Get @your_bot_username mentions from last 2 hours that should have been processed
-CUTOFF=$(date -u -d "2 hours ago" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "")
-if [ -n "$CUTOFF" ] && [ -f "$DB" ]; then
-  node --input-type=module -e "
-    import Database from 'better-sqlite3';
-    const db = new Database('$DB');
-
-    // Get recent @mentions
-    const mentions = db.prepare(
-      \"SELECT id, sender_name, content, timestamp FROM messages WHERE chat_jid = 'tg:-1001234567890' AND timestamp > ? AND (content LIKE '%@your_bot%' OR content LIKE '%@Breadbrich Engels%') AND is_from_me = 0 ORDER BY timestamp ASC\"
-    ).all('$CUTOFF');
-
-    // Get recent agent runs for this group
-    const runs = db.prepare(
-      \"SELECT trigger_content, status, started_at FROM agent_runs WHERE chat_jid = 'tg:-1001234567890' AND started_at > ? ORDER BY started_at ASC\"
-    ).all('$CUTOFF');
-
-    // Check for blocked KB writes
-    const results = { mentions: mentions.length, runs: runs.length, successRuns: runs.filter(r => r.status === 'success').length };
-    console.log(JSON.stringify(results));
-  " >> "$LOG" 2>/dev/null || log "WARN: TG ingestion check failed"
+# --- 2. Check recent messages for missed ingestion (opt-in) ---
+# Compares trigger mentions vs agent runs for one chat over the last 2 hours.
+# Org-specific, so it's off by default: set HOURLY_OPS_CHECK_JID to the chat JID
+# to watch (e.g. tg:-100123...). The mention pattern uses the configured trigger.
+CHECK_JID="${HOURLY_OPS_CHECK_JID:-}"
+if [ -z "$CHECK_JID" ]; then
+  log "Ingestion check skipped (HOURLY_OPS_CHECK_JID not set)"
+else
+  log "Checking message ingestion for $CHECK_JID..."
+  CUTOFF=$(date -u -d "2 hours ago" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "")
+  TRIGGER="${ASSISTANT_NAME:-}"
+  if [ -z "$TRIGGER" ] && [ -f "$DEPLOY_ENV" ]; then
+    TRIGGER="$(grep -E '^ASSISTANT_NAME=' "$DEPLOY_ENV" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  fi
+  if [ -n "$CUTOFF" ] && [ -f "$DB" ]; then
+    CHECK_JID="$CHECK_JID" TRIGGER="$TRIGGER" DB="$DB" CUTOFF="$CUTOFF" node --input-type=module -e "
+      import Database from 'better-sqlite3';
+      const db = new Database(process.env.DB);
+      const jid = process.env.CHECK_JID;
+      const like = '%@' + (process.env.TRIGGER || '') + '%';
+      const mentions = db.prepare(
+        \"SELECT id FROM messages WHERE chat_jid = ? AND timestamp > ? AND content LIKE ? AND is_from_me = 0\"
+      ).all(jid, process.env.CUTOFF, like);
+      const runs = db.prepare(
+        \"SELECT status FROM agent_runs WHERE chat_jid = ? AND started_at > ?\"
+      ).all(jid, process.env.CUTOFF);
+      console.log(JSON.stringify({ mentions: mentions.length, runs: runs.length, successRuns: runs.filter(r => r.status === 'success').length }));
+    " >> "$LOG" 2>/dev/null || log "WARN: ingestion check failed"
+  fi
 fi
 
 # --- 3. Compact group memory (except active sessions) ---

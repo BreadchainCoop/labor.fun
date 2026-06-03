@@ -1,5 +1,5 @@
 [Unit]
-Description=Breadbrich Engels orchestrator
+Description=labor.fun orchestrator
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
