@@ -681,11 +681,53 @@ async function main(): Promise<void> {
   );
 
   // Graceful shutdown handlers
+  //
+  // Tear the channel gateways down FIRST and make sure that step actually
+  // completes. DiscordChannel.disconnect() calls client.destroy(), which is
+  // what cleanly ends the Discord gateway session. Previously this ran LAST,
+  // after proxyServer.close() and queue.shutdown(); the risk is that the
+  // process never reaches/finishes it. The unit logs around the observed
+  // failure showed "State 'final-sigterm' timed out. Killing." with detached
+  // agent `docker run` children keeping the cgroup alive past systemd's stop
+  // timeout — i.e. the process can be SIGKILLed mid-stop. If that happens
+  // before client.destroy() completes, the gateway is left half-open and the
+  // NEXT orchestrator inherits a "connected but receives no events" zombie
+  // session, so the bot silently stops responding until restarted again.
+  // Doing the teardown first (and bounding it) makes the one step that must
+  // happen the first thing that does.
+  //
+  // The force-exit backstop guarantees we terminate within systemd's stop
+  // window instead of being SIGKILLed; it exits non-zero so a genuine
+  // shutdown hang is still visible to systemd/monitoring. `shuttingDown`
+  // guards a second signal racing the first.
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info({ signal }, 'Shutdown signal received');
+
+    const force = setTimeout(() => {
+      logger.warn('Graceful shutdown exceeded 8s — forcing exit');
+      process.exit(1);
+    }, 8000);
+    force.unref();
+
+    // 1. Destroy channel gateways first, bounded so a wedged socket can't hang
+    //    us; allSettled so one channel's failure doesn't skip the others.
+    await Promise.race([
+      Promise.allSettled(channels.map((ch) => ch.disconnect())),
+      new Promise((resolve) => setTimeout(resolve, 4000)),
+    ]);
+
+    // 2. Best-effort cleanup of the rest — both return promptly and neither can
+    //    resurrect the gateway: proxyServer.close() just stops accepting new
+    //    connections, and GroupQueue.shutdown() only marks the queue closed and
+    //    detaches (does not kill) in-flight agent containers — it does not drain,
+    //    so it takes no grace period.
     proxyServer.close();
-    await queue.shutdown(10000);
-    for (const ch of channels) await ch.disconnect();
+    await queue.shutdown(0);
+
+    clearTimeout(force);
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
