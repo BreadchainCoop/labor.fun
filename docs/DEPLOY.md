@@ -244,8 +244,26 @@ Each deploy is a timestamped directory under `/opt/breadbrich/releases/`; `/opt/
 ### D. DO Spaces for off-site backups
 `rclone` on droplet pushes to DigitalOcean Spaces nightly. Benefits: Mac-independent off-site, 11 9s durability. Drawbacks: $5/mo base + IAM setup. **Effort: 1 hour. Impact: medium** (depends on how often Mac is off).
 
-### E. Docker image deployment
-Build image locally or in CI, push to DigitalOcean Container Registry, droplet pulls. Benefits: reproducible, rollback by tag. Drawbacks: 2.4GB agent image already; builds become part of CI; overkill for a Node.js app that's already small. **Effort: 1-2 days. Impact: low (for current scale).**
+### E. Docker image deployment — **available (opt-in)**
+The agent container is built in CI (`.github/workflows/container.yml`), but only
+when `container/**` (or the workflow file) changes: such a PR build-checks the
+Dockerfile, and such a push to main publishes a SHA-pinned image to GHCR
+(`ghcr.io/<org>/nanoclaw-agent:<sha>` + `:latest`, linux/amd64). Commits that
+don't touch `container/**` produce no new image, so the deploy keeps using the
+existing one. To make the host pull it instead of building locally, set in the
+profile's `deploy.config`:
+
+```
+CONTAINER_REGISTRY_IMAGE=ghcr.io/<org>/nanoclaw-agent
+# plus REGISTRY_TOKEN/REGISTRY_USER if the GHCR package is private
+```
+
+The deploy then pulls `<image>:<deployed-sha>` and retags it to
+`nanoclaw-agent:latest` (the app's `CONTAINER_IMAGE` default — no app change).
+Benefits: the ~10-min chromium build moves off the host, the image is provably
+built from a main SHA, and rollback is a re-pull. If `CONTAINER_REGISTRY_IMAGE`
+is unset the deploy keeps the legacy host-build behavior. Local macOS (arm64)
+dev still uses `container/build.sh`.
 
 ### F. Kamal
 37signals' zero-downtime container deployer. Good if we containerize the orchestrator itself. **Effort: days. Impact: low unless we add more hosts.**
