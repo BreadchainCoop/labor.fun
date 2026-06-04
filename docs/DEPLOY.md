@@ -245,10 +245,12 @@ Each deploy is a timestamped directory under `/opt/breadbrich/releases/`; `/opt/
 `rclone` on droplet pushes to DigitalOcean Spaces nightly. Benefits: Mac-independent off-site, 11 9s durability. Drawbacks: $5/mo base + IAM setup. **Effort: 1 hour. Impact: medium** (depends on how often Mac is off).
 
 ### E. Docker image deployment — **available (opt-in)**
-The agent container is built in CI (`.github/workflows/container.yml`): every PR
-that touches `container/**` build-checks the Dockerfile, and merges to main push a
-SHA-pinned image to GHCR (`ghcr.io/<org>/nanoclaw-agent:<sha>` + `:latest`,
-linux/amd64). To make the host pull it instead of building locally, set in the
+The agent container is built in CI (`.github/workflows/container.yml`), but only
+when `container/**` (or the workflow file) changes: such a PR build-checks the
+Dockerfile, and such a push to main publishes a SHA-pinned image to GHCR
+(`ghcr.io/<org>/nanoclaw-agent:<sha>` + `:latest`, linux/amd64). Commits that
+don't touch `container/**` produce no new image, so the deploy keeps using the
+existing one. To make the host pull it instead of building locally, set in the
 profile's `deploy.config`:
 
 ```

@@ -24,6 +24,7 @@ Breadbrich Engels's behavior is defined by structured rule files in [`rules/`](r
 | [Transcripts](rules/transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction |
 | [GitHub Integration](rules/integrations/github.md) | `rules/integrations/` | GitHub issues/PRs/code/Actions on the org's GitHub org (`githubOrg` in the active profile) |
 | [Linear Integration](rules/integrations/linear.md) | `rules/integrations/` | Linear issues/projects/comments in the org's Linear workspace (`LINEAR_API_KEY`) |
+| [Notion Integration](rules/integrations/notion.md) | `rules/integrations/` | Reading/writing Notion pages and databases shared with the assistant's integration (`mcp__notion__*`) |
 
 Read `rules/INDEX.md` for the full cross-linked index. When modifying the assistant's behavior — update the relevant rule file, not ad-hoc code. Rules are framework-wide and org-agnostic; reference the profile's config (`orgName`, `githubOrg`) rather than hardcoding an org.
 
