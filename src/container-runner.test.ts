@@ -325,6 +325,97 @@ describe('container-runner GitHub PAT injection', () => {
   });
 });
 
+describe('container-runner Notion token injection', () => {
+  const SECRET = 'ntn_TESTSECRET_do_not_log_0123456789abcdef';
+  let savedToken: string | undefined;
+  let savedGithub: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.debug).mockClear();
+    vi.mocked(logger.info).mockClear();
+    savedToken = process.env.NOTION_TOKEN;
+    savedGithub = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    delete process.env.NOTION_TOKEN;
+    // Clear the GitHub PAT too so the spawn env reflects Notion alone.
+    delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedToken === undefined) {
+      delete process.env.NOTION_TOKEN;
+    } else {
+      process.env.NOTION_TOKEN = savedToken;
+    }
+    if (savedGithub === undefined) {
+      delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    } else {
+      process.env.GITHUB_PERSONAL_ACCESS_TOKEN = savedGithub;
+    }
+  });
+
+  // Run to completion so the returned promise resolves (no open handles).
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnCall() {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1] as unknown as [
+      string,
+      string[],
+      { stdio: unknown; env?: NodeJS.ProcessEnv },
+    ];
+  }
+
+  it('passes the token via the runtime env, never in argv, when set', async () => {
+    process.env.NOTION_TOKEN = SECRET;
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+
+    // Passthrough flag present as name only (no `=value`)
+    expect(args).toContain('NOTION_TOKEN');
+    expect(args.some((a) => a.includes(`NOTION_TOKEN=`))).toBe(false);
+
+    // The secret value must not appear anywhere in argv
+    expect(args.some((a) => a.includes(SECRET))).toBe(false);
+    expect(args.join(' ')).not.toContain(SECRET);
+
+    // The secret is delivered only through the spawned runtime's env
+    expect(opts.env?.NOTION_TOKEN).toBe(SECRET);
+
+    // And it must not have leaked into any log line
+    const logged = JSON.stringify([
+      ...vi.mocked(logger.debug).mock.calls,
+      ...vi.mocked(logger.info).mock.calls,
+    ]);
+    expect(logged).not.toContain(SECRET);
+  });
+
+  it('omits the Notion env entirely when no token is set', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+
+    expect(args).not.toContain('NOTION_TOKEN');
+    // No env override is applied at all when neither token is present
+    expect(opts.env).toBeUndefined();
+  });
+});
+
 describe('container-runner Google Workspace credentials mount', () => {
   const HOST_CREDS_PATH = '/home/test/.config/gws/credentials.json';
   const CONTAINER_CREDS_PATH = '/run/secrets/gws-credentials.json';
