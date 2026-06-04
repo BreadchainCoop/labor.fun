@@ -310,6 +310,20 @@ function getGithubToken(): string | undefined {
   );
 }
 
+/**
+ * Linear API key for the remote Linear MCP server, read from .env (with
+ * process.env fallback). Returns undefined when unset, which leaves the
+ * Linear MCP server unloaded inside the container.
+ *
+ * Like the GitHub PAT, the value is NEVER placed in the container argv — it
+ * is passed through the spawned runtime's process environment instead.
+ */
+function getLinearToken(): string | undefined {
+  return (
+    readEnvFile(['LINEAR_API_KEY']).LINEAR_API_KEY || process.env.LINEAR_API_KEY
+  );
+}
+
 // Fixed in-container path for the mounted gws credentials file. The host
 // path comes from GOOGLE_WORKSPACE_CREDENTIALS_FILE (.env or process.env).
 const CONTAINER_GWS_CREDS_PATH = '/run/secrets/gws-credentials.json';
@@ -436,6 +450,12 @@ function buildContainerArgs(
     args.push('-e', 'GH_TOKEN');
   }
 
+  // Linear API key for the remote Linear MCP server. Passthrough flag only —
+  // the value is injected via the runtime's process env, never argv.
+  if (getLinearToken()) {
+    args.push('-e', 'LINEAR_API_KEY');
+  }
+
   // Google Workspace MCP: only the in-container path goes in argv (not a
   // secret); actual credentials live in the read-only mounted file. The
   // env var presence is what flips hasGoogleWorkspace inside agent-runner.
@@ -525,17 +545,24 @@ export async function runContainerAgent(
     // GH_TOKEN                     — used by the gh CLI (different name,
     //                                same value). Without this, `gh api`
     //                                calls in task script gates fail silently.
+    //
+    // LINEAR_API_KEY — used by the remote Linear MCP server (Authorization
+    //                  header), gated identically.
     const githubToken = getGithubToken();
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
+    const linearToken = getLinearToken();
+    const extraEnv = {
       ...(githubToken
         ? {
-            env: {
-              ...process.env,
-              GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
-              GH_TOKEN: githubToken,
-            },
+            GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
+            GH_TOKEN: githubToken,
           }
+        : {}),
+      ...(linearToken ? { LINEAR_API_KEY: linearToken } : {}),
+    };
+    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...(Object.keys(extraEnv).length
+        ? { env: { ...process.env, ...extraEnv } }
         : {}),
     });
 
