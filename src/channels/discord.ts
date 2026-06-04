@@ -243,19 +243,23 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
+      // Handle attachments — include the CDN URL alongside the filename so
+      // the agent can fetch and read file contents (RTF, TXT, PDF, CSV, etc.)
+      // via WebFetch. Images include the URL for potential vision processing.
+      // Video and audio are noted by name only since they cannot be fetched
+      // and processed as text.
       if (message.attachments.size > 0) {
         const attachmentDescriptions = [...message.attachments.values()].map(
           (att) => {
             const contentType = att.contentType || '';
             if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'}]`;
+              return `[Image: ${att.name || 'image'} | ${att.url}]`;
             } else if (contentType.startsWith('video/')) {
               return `[Video: ${att.name || 'video'}]`;
             } else if (contentType.startsWith('audio/')) {
               return `[Audio: ${att.name || 'audio'}]`;
             } else {
-              return `[File: ${att.name || 'file'}]`;
+              return `[File: ${att.name || 'file'} | ${att.url}]`;
             }
           },
         );
