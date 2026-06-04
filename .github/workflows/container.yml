@@ -1,9 +1,12 @@
 name: Container Image
 
 # Build the agent container in CI so a broken Dockerfile fails the PR instead of
-# the production deploy. On merge to main, publish the image to GHCR so the host
-# pulls a pre-built, SHA-pinned image (seconds) instead of building locally (~10
-# min). The deploy scripts (setup/safe-deploy.sh, scripts/safe-deploy.sh) pull
+# the production deploy. This workflow only runs when container/** (or this file)
+# changes — see the `paths` filters below. On such a push to main it publishes a
+# SHA-pinned image to GHCR so the host pulls a pre-built image (seconds) instead
+# of building locally (~10 min); commits that don't touch container/** produce no
+# new image (the deploy falls back to the existing image). The deploy scripts
+# (setup/safe-deploy.sh, scripts/safe-deploy.sh) pull
 # `<CONTAINER_REGISTRY_IMAGE>:<sha>` when CONTAINER_REGISTRY_IMAGE is set in the
 # profile's deploy.config; otherwise they fall back to building on the host.
 #
