@@ -325,6 +325,91 @@ describe('container-runner GitHub PAT injection', () => {
   });
 });
 
+describe('container-runner Linear API key injection', () => {
+  const SECRET = 'lin_api_TESTSECRET_do_not_log_0123456789abcdef';
+  let savedLinear: string | undefined;
+  let savedGithub: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.debug).mockClear();
+    vi.mocked(logger.info).mockClear();
+    savedLinear = process.env.LINEAR_API_KEY;
+    savedGithub = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    delete process.env.LINEAR_API_KEY;
+    delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedLinear === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = savedLinear;
+    if (savedGithub === undefined)
+      delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    else process.env.GITHUB_PERSONAL_ACCESS_TOKEN = savedGithub;
+  });
+
+  // Run to completion so the returned promise resolves (no open handles).
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnCall() {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1] as unknown as [
+      string,
+      string[],
+      { stdio: unknown; env?: NodeJS.ProcessEnv },
+    ];
+  }
+
+  it('passes the API key via the runtime env, never in argv, when set', async () => {
+    process.env.LINEAR_API_KEY = SECRET;
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+
+    // Passthrough flag present as name only (no `=value`)
+    expect(args).toContain('LINEAR_API_KEY');
+    expect(args.some((a) => a.includes(`LINEAR_API_KEY=`))).toBe(false);
+
+    // The secret value must not appear anywhere in argv
+    expect(args.some((a) => a.includes(SECRET))).toBe(false);
+    expect(args.join(' ')).not.toContain(SECRET);
+
+    // The secret is delivered only through the spawned runtime's env
+    expect(opts.env?.LINEAR_API_KEY).toBe(SECRET);
+
+    // And it must not have leaked into any log line
+    const logged = JSON.stringify([
+      ...vi.mocked(logger.debug).mock.calls,
+      ...vi.mocked(logger.info).mock.calls,
+    ]);
+    expect(logged).not.toContain(SECRET);
+  });
+
+  it('omits the Linear env entirely when no API key is set', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+
+    expect(args).not.toContain('LINEAR_API_KEY');
+    // No env override is applied at all when neither token is set
+    expect(opts.env).toBeUndefined();
+  });
+});
+
 describe('container-runner Google Workspace credentials mount', () => {
   const HOST_CREDS_PATH = '/home/test/.config/gws/credentials.json';
   const CONTAINER_CREDS_PATH = '/run/secrets/gws-credentials.json';
