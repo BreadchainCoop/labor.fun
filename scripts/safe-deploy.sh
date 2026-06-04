@@ -96,6 +96,7 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$PROFILE_ABS" 2>/dev/null || true
 log "git fetch + reset --hard origin/main..."
 su - "$SERVICE_USER" -c "cd $SOURCE && git fetch origin main && git reset --hard origin/main" >> "$LOG" 2>&1 || { log "git fetch/reset failed"; exit 1; }
 CURRENT_SHA=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse --short HEAD")
+CURRENT_SHA_FULL=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse HEAD")
 log "HEAD now at: $CURRENT_SHA"
 
 # Pre-deploy snapshot
@@ -133,7 +134,30 @@ fi
 log "npm run build..."
 su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && npm run build" >> "$LOG" 2>&1 || rollback "build failed"
 
-if [ "$CONTAINER_CHANGED" = "1" ]; then
+# Container image: pull CI-built SHA-pinned image from the registry if
+# CONTAINER_REGISTRY_IMAGE is set (in deploy.config), retagging it to the local
+# tag the app expects (CONTAINER_IMAGE default = nanoclaw-agent:latest). Keeps
+# the ~10-min chromium build off the host. Falls back to a host build when no
+# registry is configured (legacy) or the pull fails with no local image.
+LOCAL_IMAGE="${CONTAINER_IMAGE_TAG:-nanoclaw-agent:latest}"
+if [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ]; then
+  REGISTRY_HOST="${REGISTRY_HOST:-ghcr.io}"
+  if [ -n "${REGISTRY_TOKEN:-}" ]; then
+    echo "$REGISTRY_TOKEN" | docker login "$REGISTRY_HOST" -u "${REGISTRY_USER:-x}" --password-stdin >/dev/null 2>&1 \
+      || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
+  fi
+  REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$CURRENT_SHA_FULL"
+  log "Pulling agent image $REMOTE_REF"
+  if docker pull "$REMOTE_REF" >> "$LOG" 2>&1; then
+    docker tag "$REMOTE_REF" "$LOCAL_IMAGE"
+    log "Tagged $REMOTE_REF -> $LOCAL_IMAGE"
+  elif docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
+    log "WARN: pull failed for $REMOTE_REF — keeping existing $LOCAL_IMAGE"
+  else
+    log "WARN: pull failed and no local $LOCAL_IMAGE — building on host as fallback"
+    su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && ./container/build.sh" >> "$LOG" 2>&1 || rollback "container build failed"
+  fi
+elif [ "$CONTAINER_CHANGED" = "1" ]; then
   log "Rebuilding container..."
   su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && ./container/build.sh" >> "$LOG" 2>&1 || rollback "container build failed"
 fi

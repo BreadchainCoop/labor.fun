@@ -1,0 +1,69 @@
+name: Container Image
+
+# Build the agent container in CI so a broken Dockerfile fails the PR instead of
+# the production deploy. On merge to main, publish the image to GHCR so the host
+# pulls a pre-built, SHA-pinned image (seconds) instead of building locally (~10
+# min). The deploy scripts (setup/safe-deploy.sh, scripts/safe-deploy.sh) pull
+# `<CONTAINER_REGISTRY_IMAGE>:<sha>` when CONTAINER_REGISTRY_IMAGE is set in the
+# profile's deploy.config; otherwise they fall back to building on the host.
+#
+# Build context is ./container (matches container/build.sh): the Dockerfile
+# COPYs agent-runner/ and scripts/ relative to that dir. linux/amd64 only — the
+# droplet is amd64 and CI runners build it natively. Local macOS (arm64) dev
+# keeps using container/build.sh.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'container/**'
+      - '.github/workflows/container.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'container/**'
+      - '.github/workflows/container.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only needed to push (merge to main). PRs build-only, so skip login —
+      # this also keeps fork PRs (read-only GITHUB_TOKEN) from failing here.
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # repository_owner is lowercased by the action (GHCR requires it).
+          images: ghcr.io/${{ github.repository_owner }}/nanoclaw-agent
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=long,prefix=
+
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container
+          file: ./container/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
