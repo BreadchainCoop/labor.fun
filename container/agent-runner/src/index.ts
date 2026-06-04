@@ -66,6 +66,7 @@ const IPC_POLL_MS = 500;
 
 const hasGoogleWorkspace = !!process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
 const hasGithub = !!process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+const hasNotion = !!process.env.NOTION_TOKEN;
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -481,6 +482,7 @@ async function runQuery(
         'mcp__nanoclaw__*',
         ...(hasGoogleWorkspace ? ['mcp__gws__*'] : []),
         ...(hasGithub ? ['mcp__github__*'] : []),
+        ...(hasNotion ? ['mcp__notion__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -532,6 +534,25 @@ async function runQuery(
                 env: {
                   GITHUB_PERSONAL_ACCESS_TOKEN:
                     process.env.GITHUB_PERSONAL_ACCESS_TOKEN!,
+                },
+              },
+            }
+          : {}),
+        ...(hasNotion
+          ? {
+              notion: {
+                command: 'notion-mcp-server',
+                // notion-mcp-server reads NOTION_TOKEN directly (>=2.x).
+                // OPENAPI_MCP_HEADERS is the universal fallback and pins the
+                // Notion API version; set both for forward-compat. The token
+                // is the assistant's internal integration token — its reach is
+                // limited to the pages/databases shared with the integration.
+                env: {
+                  NOTION_TOKEN: process.env.NOTION_TOKEN!,
+                  OPENAPI_MCP_HEADERS: JSON.stringify({
+                    Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+                    'Notion-Version': '2022-06-28',
+                  }),
                 },
               },
             }

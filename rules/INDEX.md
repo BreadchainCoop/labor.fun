@@ -12,6 +12,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
 - **GitHub operations**: [GitHub Integration](integrations/github.md)
+- **Notion operations**: [Notion Integration](integrations/notion.md)
 
 ## Directory
 
@@ -36,3 +37,4 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Approval gate for tasks proposed from meeting transcripts |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
 | [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on the org's GitHub org (`githubOrg`) |
+| [Notion Integration](integrations/notion.md) | `rules/integrations/` | Any Notion operation — reading/writing pages and databases shared with the assistant's integration |
