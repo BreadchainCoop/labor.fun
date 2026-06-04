@@ -135,16 +135,23 @@ log "npm run build..."
 su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && npm run build" >> "$LOG" 2>&1 || rollback "build failed"
 
 # Container image: pull CI-built SHA-pinned image from the registry if
-# CONTAINER_REGISTRY_IMAGE is set (in deploy.config), retagging it to the local
-# tag the app expects (CONTAINER_IMAGE default = nanoclaw-agent:latest). Keeps
-# the ~10-min chromium build off the host. Falls back to a host build when no
-# registry is configured (legacy) or the pull fails with no local image.
-LOCAL_IMAGE="${CONTAINER_IMAGE_TAG:-nanoclaw-agent:latest}"
+# CONTAINER_REGISTRY_IMAGE is set (in deploy.config), retagging it to
+# nanoclaw-agent:latest — the tag the app expects (CONTAINER_IMAGE default in
+# src/config.ts) and that container/build.sh produces. Keeps the ~10-min
+# chromium build off the host. Falls back to a host build when no registry is
+# configured (legacy) or the pull fails with no local image.
+LOCAL_IMAGE="nanoclaw-agent:latest"
 if [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ]; then
   REGISTRY_HOST="${REGISTRY_HOST:-ghcr.io}"
+  # A token requires the matching REGISTRY_USER (the PAT owner) — GHCR rejects a
+  # placeholder username — so skip login with a clear warning if it's missing.
   if [ -n "${REGISTRY_TOKEN:-}" ]; then
-    echo "$REGISTRY_TOKEN" | docker login "$REGISTRY_HOST" -u "${REGISTRY_USER:-x}" --password-stdin >/dev/null 2>&1 \
-      || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
+    if [ -z "${REGISTRY_USER:-}" ]; then
+      log "WARN: REGISTRY_TOKEN set but REGISTRY_USER is not — skipping docker login (set REGISTRY_USER to the PAT owner, or make the package public)"
+    else
+      echo "$REGISTRY_TOKEN" | docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1 \
+        || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
+    fi
   fi
   REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$CURRENT_SHA_FULL"
   log "Pulling agent image $REMOTE_REF"

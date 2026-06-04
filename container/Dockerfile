@@ -57,7 +57,10 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # plain REST CLI with no MCP mode, and the agent-runner's `gws mcp -s …`
 # launch fails with "Unknown service 'mcp'". Revisit if/when an official
 # Google Workspace MCP server returns as a supported package.
-RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli@0.7.0
+# notion-mcp-server (mcp__notion__*) — pure-JS stdio MCP server, gated at
+# runtime on NOTION_TOKEN (see container/agent-runner/src/index.ts). Pinned
+# for supply-chain reproducibility; binary is `notion-mcp-server`.
+RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli@0.7.0 @notionhq/notion-mcp-server@2.2.1
 
 # Install the official GitHub MCP server (pinned + checksum-verified).
 # Arch-matched to the container so it works whether built on amd64 or

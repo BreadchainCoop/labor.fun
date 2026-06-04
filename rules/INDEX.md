@@ -13,6 +13,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
 - **GitHub operations**: [GitHub Integration](integrations/github.md)
 - **Linear operations**: [Linear Integration](integrations/linear.md)
+- **Notion operations**: [Notion Integration](integrations/notion.md)
 
 ## Directory
 
@@ -38,3 +39,4 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
 | [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on the org's GitHub org (`githubOrg`) |
 | [Linear Integration](integrations/linear.md) | `rules/integrations/` | Any Linear operation — issues, projects, comments in the org's Linear workspace |
+| [Notion Integration](integrations/notion.md) | `rules/integrations/` | Any Notion operation — reading/writing pages and databases shared with the assistant's integration |

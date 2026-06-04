@@ -152,18 +152,24 @@ as_app "cd '$APP_DIR' && npm run build"
 
 # --- 6. Container image ---
 # If CONTAINER_REGISTRY_IMAGE is set (in deploy.config), pull the CI-built,
-# SHA-pinned image from the registry and retag it to the local tag the app
-# expects (CONTAINER_IMAGE default = nanoclaw-agent:latest). Pulling guarantees
-# image==deployed-code and keeps the ~10-min chromium build off the host.
-# If unset, fall back to the legacy behavior: build on the host when container/
-# sources changed.
-LOCAL_IMAGE="${CONTAINER_IMAGE_TAG:-nanoclaw-agent:latest}"
+# SHA-pinned image from the registry and retag it to nanoclaw-agent:latest —
+# the tag the app expects (CONTAINER_IMAGE default in src/config.ts) and that
+# container/build.sh produces. Pulling guarantees image==deployed-code and keeps
+# the ~10-min chromium build off the host. If unset, fall back to the legacy
+# behavior: build on the host when container/ sources changed.
+LOCAL_IMAGE="nanoclaw-agent:latest"
 if [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ]; then
   REGISTRY_HOST="${REGISTRY_HOST:-ghcr.io}"
-  # Optional auth for a private package. Public packages need none.
+  # Optional auth for a private package. Public packages need none. A token
+  # requires the matching REGISTRY_USER (the PAT owner) — GHCR rejects a
+  # placeholder username — so skip login with a clear warning if it's missing.
   if [ -n "${REGISTRY_TOKEN:-}" ]; then
-    echo "$REGISTRY_TOKEN" | docker login "$REGISTRY_HOST" -u "${REGISTRY_USER:-x}" --password-stdin >/dev/null 2>&1 \
-      || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
+    if [ -z "${REGISTRY_USER:-}" ]; then
+      log "WARN: REGISTRY_TOKEN set but REGISTRY_USER is not — skipping docker login (set REGISTRY_USER to the PAT owner, or make the package public)"
+    else
+      echo "$REGISTRY_TOKEN" | docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1 \
+        || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
+    fi
   fi
   REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$NEW"
   log "Pull agent image $REMOTE_REF"

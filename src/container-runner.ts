@@ -324,6 +324,17 @@ function getLinearToken(): string | undefined {
   );
 }
 
+/**
+ * Resolve the Notion internal-integration token, read from .env (with
+ * process.env fallback). When set, it enables the bundled notion-mcp-server
+ * (mcp__notion__*) inside the container; when absent the server is not loaded.
+ * Like the GitHub PAT, the value is NEVER placed in the container argv — it is
+ * passed through the spawned runtime's process environment instead.
+ */
+function getNotionToken(): string | undefined {
+  return readEnvFile(['NOTION_TOKEN']).NOTION_TOKEN || process.env.NOTION_TOKEN;
+}
+
 // Fixed in-container path for the mounted gws credentials file. The host
 // path comes from GOOGLE_WORKSPACE_CREDENTIALS_FILE (.env or process.env).
 const CONTAINER_GWS_CREDS_PATH = '/run/secrets/gws-credentials.json';
@@ -456,6 +467,14 @@ function buildContainerArgs(
     args.push('-e', 'LINEAR_API_KEY');
   }
 
+  // Notion MCP server: same secret-handling discipline as the GitHub PAT —
+  // `-e NOTION_TOKEN` (no value) makes the runtime read it from its own
+  // process environment (populated below in the spawn call), keeping the
+  // token out of argv. Presence flips hasNotion inside agent-runner.
+  if (getNotionToken()) {
+    args.push('-e', 'NOTION_TOKEN');
+  }
+
   // Google Workspace MCP: only the in-container path goes in argv (not a
   // secret); actual credentials live in the read-only mounted file. The
   // env var presence is what flips hasGoogleWorkspace inside agent-runner.
@@ -537,9 +556,8 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    // Inject the GitHub PAT into the runtime's process environment (never
-    // argv), matching the `-e GITHUB_PERSONAL_ACCESS_TOKEN` and `-e GH_TOKEN`
-    // passthrough flags added in buildContainerArgs.
+    // Inject secrets into the runtime's process environment (never argv),
+    // matching the bare `-e NAME` passthrough flags added in buildContainerArgs.
     //
     // GITHUB_PERSONAL_ACCESS_TOKEN — used by the GitHub MCP server.
     // GH_TOKEN                     — used by the gh CLI (different name,
@@ -548,9 +566,11 @@ export async function runContainerAgent(
     //
     // LINEAR_API_KEY — used by the remote Linear MCP server (Authorization
     //                  header), gated identically.
+    // NOTION_TOKEN   — used by the Notion MCP server.
     const githubToken = getGithubToken();
     const linearToken = getLinearToken();
-    const extraEnv = {
+    const notionToken = getNotionToken();
+    const extraEnv: Record<string, string> = {
       ...(githubToken
         ? {
             GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
@@ -558,6 +578,7 @@ export async function runContainerAgent(
           }
         : {}),
       ...(linearToken ? { LINEAR_API_KEY: linearToken } : {}),
+      ...(notionToken ? { NOTION_TOKEN: notionToken } : {}),
     };
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
