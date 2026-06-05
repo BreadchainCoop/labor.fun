@@ -311,6 +311,20 @@ function getGithubToken(): string | undefined {
 }
 
 /**
+ * Linear API key for the remote Linear MCP server, read from .env (with
+ * process.env fallback). Returns undefined when unset, which leaves the
+ * Linear MCP server unloaded inside the container.
+ *
+ * Like the GitHub PAT, the value is NEVER placed in the container argv — it
+ * is passed through the spawned runtime's process environment instead.
+ */
+function getLinearToken(): string | undefined {
+  return (
+    readEnvFile(['LINEAR_API_KEY']).LINEAR_API_KEY || process.env.LINEAR_API_KEY
+  );
+}
+
+/**
  * Resolve the Notion internal-integration token, read from .env (with
  * process.env fallback). When set, it enables the bundled notion-mcp-server
  * (mcp__notion__*) inside the container; when absent the server is not loaded.
@@ -447,6 +461,12 @@ function buildContainerArgs(
     args.push('-e', 'GH_TOKEN');
   }
 
+  // Linear API key for the remote Linear MCP server. Passthrough flag only —
+  // the value is injected via the runtime's process env, never argv.
+  if (getLinearToken()) {
+    args.push('-e', 'LINEAR_API_KEY');
+  }
+
   // Notion MCP server: same secret-handling discipline as the GitHub PAT —
   // `-e NOTION_TOKEN` (no value) makes the runtime read it from its own
   // process environment (populated below in the spawn call), keeping the
@@ -543,8 +563,12 @@ export async function runContainerAgent(
     // GH_TOKEN                     — used by the gh CLI (different name,
     //                                same value). Without this, `gh api`
     //                                calls in task script gates fail silently.
-    // NOTION_TOKEN                 — used by the Notion MCP server.
+    //
+    // LINEAR_API_KEY — used by the remote Linear MCP server (Authorization
+    //                  header), gated identically.
+    // NOTION_TOKEN   — used by the Notion MCP server.
     const githubToken = getGithubToken();
+    const linearToken = getLinearToken();
     const notionToken = getNotionToken();
     const extraEnv: Record<string, string> = {
       ...(githubToken
@@ -553,6 +577,7 @@ export async function runContainerAgent(
             GH_TOKEN: githubToken,
           }
         : {}),
+      ...(linearToken ? { LINEAR_API_KEY: linearToken } : {}),
       ...(notionToken ? { NOTION_TOKEN: notionToken } : {}),
     };
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {

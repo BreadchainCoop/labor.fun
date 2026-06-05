@@ -252,14 +252,17 @@ export class DiscordChannel implements Channel {
         const attachmentDescriptions = [...message.attachments.values()].map(
           (att) => {
             const contentType = att.contentType || '';
+            // Append the CDN URL only when present so the agent can fetch the
+            // file via WebFetch; never render a dangling "| undefined".
+            const urlSuffix = att.url ? ` | ${att.url}` : '';
             if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'} | ${att.url}]`;
+              return `[Image: ${att.name || 'image'}${urlSuffix}]`;
             } else if (contentType.startsWith('video/')) {
               return `[Video: ${att.name || 'video'}]`;
             } else if (contentType.startsWith('audio/')) {
               return `[Audio: ${att.name || 'audio'}]`;
             } else {
-              return `[File: ${att.name || 'file'} | ${att.url}]`;
+              return `[File: ${att.name || 'file'}${urlSuffix}]`;
             }
           },
         );
