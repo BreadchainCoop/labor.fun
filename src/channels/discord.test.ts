@@ -656,6 +656,37 @@ describe('DiscordChannel', () => {
       );
     });
 
+    it('includes the CDN URL in the placeholder when present', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const attachments = new Map([
+        [
+          'att1',
+          {
+            name: 'photo.png',
+            contentType: 'image/png',
+            url: 'https://cdn.discordapp.com/attachments/1/2/photo.png',
+          },
+        ],
+      ]);
+      const msg = createMessage({
+        content: '',
+        attachments,
+        guildName: 'Server',
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content:
+            '[Image: photo.png | https://cdn.discordapp.com/attachments/1/2/photo.png]',
+        }),
+      );
+    });
+
     it('stores video attachment with placeholder', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
