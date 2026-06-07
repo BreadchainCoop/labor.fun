@@ -21,6 +21,7 @@ import {
   isPrivilegedGroup,
   PM_DM_COOLDOWN_MS,
   PM_DUE_SOON_DAYS,
+  PM_LEAD,
   PM_ORCHESTRATION_INTERVAL_MS,
   PM_ORCHESTRATION_TARGET_GROUP,
   SHARED_KB_GROUP,
@@ -73,6 +74,40 @@ function buildPrompt(brief: string): string {
   ].join('\n');
 }
 
+const DUE_SOON_MS = PM_DUE_SOON_DAYS * DAY_MS;
+
+/**
+ * Build a PM run from the current task list: classify, split DM candidates into
+ * fresh vs. cooldown-suppressed, and compose the agent prompt + brief. Shared by
+ * the scheduled loop and the chat trigger. Does not enqueue or record anything.
+ */
+export function buildPmRun(
+  tasks: PmTask[],
+  nowMs: number,
+): { prompt: string; fresh: DmCandidate[]; isEmpty: boolean } {
+  const c = classify(tasks, nowMs, DUE_SOON_MS);
+  const all = dmCandidates(c);
+  const recentKeys = new Set(
+    getRecentPmDms(new Date(nowMs - PM_DM_COOLDOWN_MS).toISOString()).map((r) =>
+      candidateKey({
+        person: r.person,
+        taskId: r.task_id,
+        reason: r.reason as DmCandidate['reason'],
+      }),
+    ),
+  );
+  const fresh = all.filter((d) => !recentKeys.has(candidateKey(d)));
+  const recentlyNotified = all.filter((d) => recentKeys.has(candidateKey(d)));
+  const brief = buildPmBrief(
+    c,
+    fresh,
+    recentlyNotified,
+    nowMs,
+    PM_LEAD || undefined,
+  );
+  return { prompt: buildPrompt(brief), fresh, isEmpty: isBriefEmpty(c) };
+}
+
 /** Resolve the group whose chat the PM run targets (PM target → shared KB). */
 function resolveTargetGroup(
   groups: Record<string, RegisteredGroup>,
@@ -87,29 +122,12 @@ export async function runPmOrchestrationTick(
   deps: PmOrchestrationDeps,
 ): Promise<{ enqueued: boolean }> {
   const nowMs = (deps.now ?? Date.now)();
-  const tasks = deps.loadTasks();
-  const classification = classify(tasks, nowMs, PM_DUE_SOON_DAYS * DAY_MS);
+  const run = buildPmRun(deps.loadTasks(), nowMs);
 
-  if (isBriefEmpty(classification)) {
+  if (run.isEmpty) {
     logger.info('PM: nothing blocked/overdue/due-soon — skipping agent run');
     return { enqueued: false };
   }
-
-  // Split candidates into "act now" vs "recently followed up" (cooldown).
-  const allCandidates = dmCandidates(classification);
-  const recentKeys = new Set(
-    getRecentPmDms(new Date(nowMs - PM_DM_COOLDOWN_MS).toISOString()).map((r) =>
-      candidateKey({
-        person: r.person,
-        taskId: r.task_id,
-        reason: r.reason as DmCandidate['reason'],
-      }),
-    ),
-  );
-  const fresh = allCandidates.filter((c) => !recentKeys.has(candidateKey(c)));
-  const recentlyNotified = allCandidates.filter((c) =>
-    recentKeys.has(candidateKey(c)),
-  );
 
   const target = resolveTargetGroup(deps.registeredGroups());
   if (!target) {
@@ -120,8 +138,7 @@ export async function runPmOrchestrationTick(
     return { enqueued: false };
   }
 
-  const brief = buildPmBrief(classification, fresh, recentlyNotified, nowMs);
-  const prompt = buildPrompt(brief);
+  const { prompt, fresh } = run;
   const { jid, group } = target;
   const isMain = isPrivilegedGroup(group);
   const sessionId = deps.getSessions()[group.folder];
@@ -170,10 +187,7 @@ export async function runPmOrchestrationTick(
   // Record the fresh follow-ups so they're suppressed within the cooldown.
   for (const c of fresh) recordPmDm(c.person, c.taskId, c.reason);
 
-  logger.info(
-    { candidates: fresh.length, suppressed: recentlyNotified.length },
-    'PM orchestration run enqueued',
-  );
+  logger.info({ candidates: fresh.length }, 'PM orchestration run enqueued');
   return { enqueued: true };
 }
 
