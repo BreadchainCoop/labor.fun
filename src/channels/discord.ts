@@ -38,6 +38,40 @@ export interface DiscordChannelOpts {
 const DM_FOLDER_PREFIX = 'discord_dm_';
 
 /**
+ * A single historical Discord message, flattened to the fields the agent
+ * needs to read/tally a channel's backlog. Author display name is resolved
+ * with the same precedence as inbound live messages (guild nick → global
+ * display name → username) so attribution matches what users see in chat.
+ */
+export interface DiscordHistoryMessage {
+  id: string;
+  authorId: string;
+  authorName: string;
+  authorIsBot: boolean;
+  content: string;
+  timestamp: string; // ISO 8601
+  attachments: string[]; // filename | url, one per attachment
+}
+
+export interface FetchChannelHistoryOpts {
+  /** Total messages to return. Default 200, hard-capped at 2000. */
+  limit?: number;
+  /** Message ID — fetch only messages older than this one (pagination). */
+  before?: string;
+  /**
+   * ISO date/datetime. Pagination stops once messages predate this instant,
+   * and older messages are excluded. Lets the agent bound a fetch by
+   * quarter/month without knowing a message ID.
+   */
+  sinceIso?: string;
+}
+
+/** Hard ceiling on a single history fetch — bounds API calls and memory. */
+const HISTORY_HARD_MAX = 2000;
+/** Discord's per-request page size limit for channel.messages.fetch. */
+const HISTORY_PAGE_SIZE = 100;
+
+/**
  * JID prefix for sending a Discord DM directly to a user by their Discord
  * user ID. Use `dc-dm:<userId>` (e.g. `"dc-dm:123456789"`) to reach a
  * specific user's DM channel without needing their DM channel ID.
@@ -112,6 +146,42 @@ export async function userHasAllowedRole(
     }
   }
   return false;
+}
+
+/**
+ * Flatten a discord.js Message into a DiscordHistoryMessage. Tolerant of the
+ * partial shapes returned by `messages.fetch` (and easy to construct in
+ * tests) — every field has a safe fallback.
+ */
+export function toHistoryMessage(m: {
+  id: string;
+  content?: string | null;
+  createdTimestamp?: number;
+  author?: {
+    id?: string;
+    bot?: boolean;
+    username?: string;
+    displayName?: string;
+  } | null;
+  member?: { displayName?: string } | null;
+  attachments?: { values(): Iterable<{ name?: string | null; url?: string }> };
+}): DiscordHistoryMessage {
+  const attachments = m.attachments
+    ? [...m.attachments.values()].map((a) => a.name || a.url || 'attachment')
+    : [];
+  return {
+    id: m.id,
+    authorId: m.author?.id ?? '',
+    authorName:
+      m.member?.displayName ||
+      m.author?.displayName ||
+      m.author?.username ||
+      'unknown',
+    authorIsBot: Boolean(m.author?.bot),
+    content: m.content ?? '',
+    timestamp: new Date(m.createdTimestamp ?? 0).toISOString(),
+    attachments,
+  };
 }
 
 export class DiscordChannel implements Channel {
@@ -628,6 +698,80 @@ export class DiscordChannel implements Channel {
     }
     const channelId = jid.replace(/^dc:/, '');
     return await this.client!.channels.fetch(channelId);
+  }
+
+  /**
+   * Fetch a channel's recent message history, paginating backward from the
+   * newest message (or from `before`). Returns oldest-first so a reader can
+   * scan chronologically. Bounded by `limit` (hard cap {@link HISTORY_HARD_MAX})
+   * and, optionally, by `sinceIso` (stop once messages predate that instant).
+   *
+   * The bot must be able to see the channel (be in the guild and hold Read
+   * Message History permission); otherwise discord.js throws and the caller
+   * surfaces the error. Works on channels that are NOT registered groups —
+   * this is the one read path that reaches beyond live, registered traffic.
+   */
+  async fetchChannelHistory(
+    channelId: string,
+    opts: FetchChannelHistoryOpts = {},
+  ): Promise<DiscordHistoryMessage[]> {
+    if (!this.client) throw new Error('Discord client not initialized');
+    const limit = Math.min(
+      Math.max(Math.floor(opts.limit ?? 200), 1),
+      HISTORY_HARD_MAX,
+    );
+    const sinceMs = opts.sinceIso ? Date.parse(opts.sinceIso) : NaN;
+    if (opts.sinceIso && Number.isNaN(sinceMs)) {
+      throw new Error(`Invalid "since" date: ${opts.sinceIso}`);
+    }
+
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !('messages' in channel)) {
+      throw new Error(
+        `Channel ${channelId} not found or has no readable message history`,
+      );
+    }
+    const messages = (
+      channel as unknown as {
+        messages: {
+          fetch: (q: {
+            limit: number;
+            before?: string;
+          }) => Promise<Map<string, Parameters<typeof toHistoryMessage>[0]>>;
+        };
+      }
+    ).messages;
+
+    const out: DiscordHistoryMessage[] = [];
+    let before = opts.before;
+    let reachedSince = false;
+
+    while (out.length < limit && !reachedSince) {
+      const pageSize = Math.min(HISTORY_PAGE_SIZE, limit - out.length);
+      const batch = await messages.fetch({ limit: pageSize, before });
+      // discord.js returns a Collection (Map subclass), newest-first.
+      const page = [...batch.values()];
+      if (page.length === 0) break;
+      for (const m of page) {
+        const ts = m.createdTimestamp ?? 0;
+        if (!Number.isNaN(sinceMs) && ts < sinceMs) {
+          reachedSince = true;
+          break;
+        }
+        out.push(toHistoryMessage(m));
+      }
+      before = page[page.length - 1]?.id;
+      // A short page means we've exhausted the channel.
+      if (page.length < pageSize) break;
+    }
+
+    // Collected newest-first across pages; hand back oldest-first.
+    out.reverse();
+    logger.info(
+      { channelId, count: out.length, limit, since: opts.sinceIso },
+      'Discord channel history fetched',
+    );
+    return out;
   }
 
   isConnected(): boolean {
