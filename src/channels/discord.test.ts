@@ -123,6 +123,7 @@ import {
   DiscordChannel,
   DiscordChannelOpts,
   threadNameFromMessage,
+  toHistoryMessage,
   userHasAllowedRole,
 } from './discord.js';
 
@@ -1638,6 +1639,168 @@ describe('DiscordChannel', () => {
         member: { displayName: 'Alice in Server' },
       } as any);
       expect(name).toBe('Reply to Alice in Server');
+    });
+  });
+
+  // --- Channel history fetch ---
+
+  describe('fetchChannelHistory', () => {
+    // Build a fake guild-text channel whose messages.fetch paginates a fixed
+    // set of messages newest-first, honouring `limit` and `before` the way
+    // discord.js does.
+    function makeHistoryChannel(
+      msgs: Array<{
+        id: string;
+        ts: number;
+        author?: string;
+        authorId?: string;
+        content?: string;
+        bot?: boolean;
+      }>,
+    ) {
+      const fetch = vi.fn(
+        async ({ limit, before }: { limit: number; before?: string }) => {
+          const newestFirst = [...msgs].sort((a, b) => b.ts - a.ts);
+          let start = 0;
+          if (before) {
+            const idx = newestFirst.findIndex((m) => m.id === before);
+            start = idx === -1 ? newestFirst.length : idx + 1;
+          }
+          const page = newestFirst.slice(start, start + limit);
+          return new Map(
+            page.map((m) => [
+              m.id,
+              {
+                id: m.id,
+                content: m.content ?? `msg ${m.id}`,
+                createdTimestamp: m.ts,
+                author: {
+                  id: m.authorId ?? 'u1',
+                  bot: m.bot ?? false,
+                  username: m.author ?? 'alice',
+                  displayName: m.author ?? 'Alice',
+                },
+                member: { displayName: m.author ?? 'Alice' },
+                attachments: undefined,
+              },
+            ]),
+          );
+        },
+      );
+      return { messages: { fetch } };
+    }
+
+    async function connectedChannel() {
+      const channel = new DiscordChannel('test-token', createTestOpts());
+      await channel.connect();
+      return channel;
+    }
+
+    it('returns messages oldest-first', async () => {
+      const channel = await connectedChannel();
+      const fake = makeHistoryChannel([
+        { id: 'a', ts: 1000 },
+        { id: 'b', ts: 2000 },
+        { id: 'c', ts: 3000 },
+      ]);
+      currentClient().channels.fetch = vi.fn().mockResolvedValue(fake);
+
+      const result = await channel.fetchChannelHistory('chan-1');
+      expect(result.map((m) => m.id)).toEqual(['a', 'b', 'c']);
+      expect(result[0].timestamp).toBe(new Date(1000).toISOString());
+    });
+
+    it('paginates across pages up to the limit', async () => {
+      const channel = await connectedChannel();
+      const many = Array.from({ length: 250 }, (_, i) => ({
+        id: `m${i}`,
+        ts: i + 1,
+      }));
+      const fake = makeHistoryChannel(many);
+      currentClient().channels.fetch = vi.fn().mockResolvedValue(fake);
+
+      const result = await channel.fetchChannelHistory('chan-1', {
+        limit: 250,
+      });
+      expect(result).toHaveLength(250);
+      // 100 + 100 + 50 → three pages
+      expect(fake.messages.fetch).toHaveBeenCalledTimes(3);
+      // Oldest-first: m0 (ts 1) is first, m249 (ts 250) last
+      expect(result[0].id).toBe('m0');
+      expect(result[249].id).toBe('m249');
+    });
+
+    it('stops at the `since` cutoff and excludes older messages', async () => {
+      const channel = await connectedChannel();
+      const fake = makeHistoryChannel([
+        { id: 'old1', ts: 1000 },
+        { id: 'old2', ts: 2000 },
+        { id: 'keep1', ts: 3000 },
+        { id: 'keep2', ts: 4000 },
+        { id: 'keep3', ts: 5000 },
+      ]);
+      currentClient().channels.fetch = vi.fn().mockResolvedValue(fake);
+
+      const result = await channel.fetchChannelHistory('chan-1', {
+        sinceIso: new Date(3000).toISOString(),
+      });
+      expect(result.map((m) => m.id)).toEqual(['keep1', 'keep2', 'keep3']);
+    });
+
+    it('throws a clear error for an invalid `since` date', async () => {
+      const channel = await connectedChannel();
+      currentClient().channels.fetch = vi
+        .fn()
+        .mockResolvedValue(makeHistoryChannel([]));
+      await expect(
+        channel.fetchChannelHistory('chan-1', { sinceIso: 'not-a-date' }),
+      ).rejects.toThrow(/Invalid "since" date/);
+    });
+
+    it('throws when the channel has no readable message history', async () => {
+      const channel = await connectedChannel();
+      // A voice channel / unknown id resolves to an object without `messages`.
+      currentClient().channels.fetch = vi.fn().mockResolvedValue({});
+      await expect(channel.fetchChannelHistory('chan-1')).rejects.toThrow(
+        /no readable message history/,
+      );
+    });
+  });
+
+  // --- History message flattening ---
+
+  describe('toHistoryMessage', () => {
+    it('prefers guild nick, then global name, then username', () => {
+      expect(
+        toHistoryMessage({
+          id: '1',
+          member: { displayName: 'Nick' },
+          author: { displayName: 'Global', username: 'uname' },
+        }).authorName,
+      ).toBe('Nick');
+      expect(
+        toHistoryMessage({
+          id: '2',
+          author: { displayName: 'Global', username: 'uname' },
+        }).authorName,
+      ).toBe('Global');
+      expect(
+        toHistoryMessage({ id: '3', author: { username: 'uname' } }).authorName,
+      ).toBe('uname');
+      expect(toHistoryMessage({ id: '4' }).authorName).toBe('unknown');
+    });
+
+    it('flattens attachments to name-or-url', () => {
+      const out = toHistoryMessage({
+        id: '5',
+        attachments: {
+          values: () => [
+            { name: 'report.csv' },
+            { name: null, url: 'http://x/y' },
+          ],
+        },
+      });
+      expect(out.attachments).toEqual(['report.csv', 'http://x/y']);
     });
   });
 });
