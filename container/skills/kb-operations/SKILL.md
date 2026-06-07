@@ -9,18 +9,37 @@ Reference for how Breadbrich Engels manages the structured KB.
 
 ## Directory Structure
 
-The canonical KB lives in `slack_main/context/`. Every container can read it via the `/workspace/shared-kb/` mount (read-only); main containers can additionally write through `/workspace/project/groups/slack_main/context/`.
+The canonical KB lives in `slack_main/context/`. Every container reads it via the `/workspace/shared-kb/` mount (read-only) and **writes through the `modify_kb_file` tool** (the mount itself is read-only by design — never edit files under `/workspace/shared-kb/` directly). The orchestrator applies the write to the canonical location and enforces access control.
 
-| Category | Read path (any container) | Write path (main only) | Default Visibility | Description |
-|----------|---------------------------|------------------------|--------------------|-------------|
-| People | `/workspace/shared-kb/people/` | `/workspace/project/groups/slack_main/context/people/` | private | One file per person |
-| Tasks | `/workspace/shared-kb/tasks/` | …/`tasks/` | open | Structured task tracking (TASK-NNN) |
-| Calendar | `/workspace/shared-kb/calendar/` | …/`calendar/` | open | Events, schedules, deadlines |
-| Artifacts | `/workspace/shared-kb/artifacts/` | …/`artifacts/` | open | Documents, creative works, equipment |
-| Financials | `/workspace/shared-kb/financials/` | …/`financials/` | restricted | Budget, expenses, invoices |
-| Dashboards | `/workspace/shared-kb/dashboards/` | …/`dashboards/` | restricted | Visual reports, HTML dashboards |
+| Category | Read path (any container) | Write via `modify_kb_file` (relative path) | Default Visibility | Description |
+|----------|---------------------------|---------------------------------------------|--------------------|-------------|
+| People | `/workspace/shared-kb/people/` | `people/` | private | One file per person |
+| Tasks | `/workspace/shared-kb/tasks/` | `tasks/` | open | Structured task tracking (TASK-NNN) |
+| Calendar | `/workspace/shared-kb/calendar/` | `calendar/` | open | Events, schedules, deadlines |
+| Artifacts | `/workspace/shared-kb/artifacts/` | `artifacts/` | open | Documents, creative works, equipment |
+| Financials | `/workspace/shared-kb/financials/` | `financials/` | restricted | Budget, expenses, invoices |
+| Dashboards | `/workspace/shared-kb/dashboards/` | `dashboards/` | restricted | Visual reports, HTML dashboards |
 
-**Non-main containers** (e.g. `telegram_<user>` DMs) cannot write to the shared KB. If you need to add a person card or task from a non-main context, route the request through the main group container.
+### Writing the KB (any container, including DMs)
+
+KB writes are **not** restricted to the main group. Any container — including
+`telegram_<user>` / `slack_<user>` DMs and other non-main groups — can create
+or update KB files by calling the **`modify_kb_file`** tool with a path relative
+to the KB context dir (e.g. `tasks/TASK-001.md`). The orchestrator gates the
+write on the **sender**, not the channel:
+
+- **Allowlisted sender** (anyone who resolves to a KB people file + identity
+  mapping) → full read/write from any group, including DMs. This is the default
+  cooperative model — see `docs/COOPERATIVE-MODE.md` and
+  `rules/access-control/README.md`. Do **not** decline a KB write just because
+  the request came from a DM; if the requester is allowlisted, write it.
+- **Unknown sender** (no identity mapping) → reads of open-visibility content
+  only; KB writes are rejected by the orchestrator.
+
+When the install runs in sandboxed mode (`FLAT_ACCESS=false`), writes still flow
+through `modify_kb_file`; the orchestrator additionally restricts them to
+main-group origin or RBAC-tagged senders. You don't need to special-case this in
+the agent — just attempt the write and let the orchestrator authorize it.
 
 ## Document Format
 
