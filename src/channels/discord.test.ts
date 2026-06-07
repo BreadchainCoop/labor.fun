@@ -109,6 +109,13 @@ vi.mock('discord.js', () => {
 
   const Partials = { Channel: 1, Message: 2, Reaction: 3 };
 
+  const ChannelType = {
+    GuildText: 0,
+    PublicThread: 11,
+    GuildForum: 15,
+    GuildMedia: 16,
+  };
+
   return {
     Client: MockClient,
     Events,
@@ -116,6 +123,7 @@ vi.mock('discord.js', () => {
     Partials,
     TextChannel,
     ThreadChannel,
+    ChannelType,
   };
 });
 
@@ -1764,6 +1772,104 @@ describe('DiscordChannel', () => {
       await expect(channel.fetchChannelHistory('chan-1')).rejects.toThrow(
         /no readable message history/,
       );
+    });
+
+    // --- Forum channels (type 15): aggregate across threads ---
+
+    function makeThread(
+      id: string,
+      name: string,
+      msgs: Array<{ id: string; ts: number; author?: string }>,
+      archiveTimestamp?: number,
+    ) {
+      return {
+        id,
+        name,
+        parentId: 'forum-1',
+        archiveTimestamp,
+        messages: makeHistoryChannel(msgs).messages,
+      };
+    }
+
+    function makeForum(opts: {
+      active: ReturnType<typeof makeThread>[];
+      archivedPages?: ReturnType<typeof makeThread>[][];
+    }) {
+      const pages = opts.archivedPages ?? [];
+      let call = 0;
+      return {
+        id: 'forum-1',
+        type: 15, // ChannelType.GuildForum
+        threads: {
+          fetchActive: vi.fn().mockResolvedValue({
+            threads: new Map(opts.active.map((t) => [t.id, t])),
+          }),
+          fetchArchived: vi.fn(async () => {
+            const page = pages[call] ?? [];
+            call += 1;
+            return {
+              threads: new Map(page.map((t) => [t.id, t])),
+              hasMore: call < pages.length,
+            };
+          }),
+        },
+      };
+    }
+
+    it('aggregates a forum across active + archived threads, tagged and chronological', async () => {
+      const channel = await connectedChannel();
+      const active = makeThread('t-active', 'Active Post', [
+        { id: 'a1', ts: 5000, author: 'Ron' },
+        { id: 'a2', ts: 6000, author: 'Josh' },
+      ]);
+      const archived = makeThread(
+        't-arch',
+        'Archived Post',
+        [{ id: 'b1', ts: 1000, author: 'Marv' }],
+        2000,
+      );
+      currentClient().channels.fetch = vi
+        .fn()
+        .mockResolvedValue(
+          makeForum({ active: [active], archivedPages: [[archived]] }),
+        );
+
+      const result = await channel.fetchChannelHistory('forum-1');
+
+      // All three messages, sorted oldest-first across threads.
+      expect(result.map((m) => m.id)).toEqual(['b1', 'a1', 'a2']);
+      // Each message carries its originating thread.
+      expect(result[0].thread).toEqual({ id: 't-arch', name: 'Archived Post' });
+      expect(result[1].thread).toEqual({ id: 't-active', name: 'Active Post' });
+      expect(result.map((m) => m.authorName)).toEqual(['Marv', 'Ron', 'Josh']);
+    });
+
+    it('honours the per-fetch limit budget across forum threads', async () => {
+      const channel = await connectedChannel();
+      const t1 = makeThread('t1', 'One', [
+        { id: 'm1', ts: 1000 },
+        { id: 'm2', ts: 2000 },
+      ]);
+      const t2 = makeThread('t2', 'Two', [{ id: 'm3', ts: 3000 }]);
+      currentClient().channels.fetch = vi
+        .fn()
+        .mockResolvedValue(makeForum({ active: [t1, t2] }));
+
+      const result = await channel.fetchChannelHistory('forum-1', { limit: 2 });
+      expect(result).toHaveLength(2);
+    });
+
+    it('treats a media channel (type 16) as a forum', async () => {
+      const channel = await connectedChannel();
+      const forum = makeForum({
+        active: [makeThread('t', 'Post', [{ id: 'x', ts: 1000 }])],
+      });
+      forum.type = 16; // ChannelType.GuildMedia
+      currentClient().channels.fetch = vi.fn().mockResolvedValue(forum);
+
+      const result = await channel.fetchChannelHistory('media-1');
+      expect(result.map((m) => m.id)).toEqual(['x']);
+      expect(result[0].thread?.name).toBe('Post');
     });
   });
 

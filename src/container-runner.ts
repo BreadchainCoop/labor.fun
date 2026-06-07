@@ -39,6 +39,35 @@ import { RegisteredGroup } from './types.js';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
+/**
+ * Newest file mtime (ms) anywhere under `dir`, recursively; 0 if the dir is
+ * missing/empty. Used to decide whether the per-group agent-runner source
+ * cache is stale against the live source — comparing whole trees rather than a
+ * single sentinel file so a change to any file invalidates the cache.
+ */
+function latestMtimeMs(dir: string): number {
+  let latest = 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return latest;
+  }
+  for (const entry of entries) {
+    const p = path.join(dir, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        latest = Math.max(latest, latestMtimeMs(p));
+      } else {
+        latest = Math.max(latest, fs.statSync(p).mtimeMs);
+      }
+    } catch {
+      // Skip files that vanish mid-scan; they don't affect staleness.
+    }
+  }
+  return latest;
+}
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -255,13 +284,16 @@ function buildVolumeMounts(
     'agent-runner-src',
   );
   if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
-    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+    // Re-copy when ANY source file is newer than the cached copy — not just
+    // index.ts. Keying only on index.ts (the previous behavior) meant a change
+    // to e.g. ipc-mcp-stdio.ts (an MCP tool) deployed to the host but never
+    // reached running containers, because index.ts's mtime hadn't moved. We
+    // compare the newest mtime across each tree instead. cpSync stamps the
+    // cache files at copy time, so right after a copy the cache is newer and
+    // no redundant re-copy happens.
     const needsCopy =
       !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+      latestMtimeMs(agentRunnerSrc) > latestMtimeMs(groupAgentRunnerDir);
     if (needsCopy) {
       fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
     }

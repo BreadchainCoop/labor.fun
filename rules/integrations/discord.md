@@ -25,7 +25,18 @@ reaches beyond live, registered traffic.
 | `before` | Message ID — return only messages older than this. For manual pagination beyond the cap. |
 
 Returns messages **oldest-first** as JSON, each with `id`, `authorId`,
-`authorName`, `authorIsBot`, `content`, `timestamp`, and `attachments`.
+`authorName`, `authorIsBot`, `content`, `timestamp`, and `attachments` — plus
+`thread` `{id,name}` when the message came from a forum post / thread.
+
+### Forum channels
+
+Discord **forum** (and **media**) channels hold no messages of their own —
+each post is a separate thread. Passing a forum's channel ID is handled
+transparently: the tool enumerates the forum's threads (all active + archived
+public, capped at 2000 archived threads) and aggregates their messages,
+tagging each with its `thread`. Bound forums with `since`/`limit`, since a
+quarter of an active forum can be large. This is what makes
+"everyone's hours from #core-team-forum this quarter" work.
 
 ### How it works (request/response IPC)
 
@@ -55,10 +66,12 @@ call it. Unauthorized callers get an error back, and nothing is fetched. See
 - The bot must be a **member of the channel's server** and hold **Read Message
   History** permission. Otherwise Discord returns "Missing Access" and the tool
   surfaces that error.
-- Threads are not walked — the tool reads the channel's own messages. Fetch a
-  thread directly by passing the **thread's** channel ID.
-- Very large channels: bound with `since` and/or page with `before` rather than
-  raising `limit` past the 2000 cap.
+- For a regular text channel the tool reads that channel's own messages. A
+  single thread can be read directly by passing the **thread's** channel ID.
+  A **forum** is enumerated across its threads (see above).
+- Very large channels/forums: bound with `since` and/or page with `before`
+  rather than raising `limit` past the 2000 cap. A forum's archived-thread
+  enumeration is itself capped (2000 threads); a warning is logged if hit.
 
 ## Registering a channel vs. reading its history
 

@@ -176,6 +176,10 @@ server.tool(
     'content, timestamp, and attachments. Bound the fetch with `since` (an ' +
     'ISO date) for a time window, and/or `limit`. For very active channels, ' +
     'page backward by passing the oldest returned message id as `before`.\n\n' +
+    'FORUM channels are handled automatically: pass the forum channel id and ' +
+    'the tool enumerates its posts (threads, active + archived) and returns ' +
+    'their messages, each tagged with a `thread` {id,name}. Bound forums with ' +
+    '`since`/`limit` since they can be large.\n\n' +
     'Authorization: only an allowlisted sender (or the main group) may call ' +
     'this; unauthorized callers get an error back.',
   {
