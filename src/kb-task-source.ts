@@ -19,6 +19,7 @@ import matter from 'gray-matter';
 import { GROUPS_DIR, SHARED_KB_GROUP } from './config.js';
 import { logger } from './logger.js';
 import type { DeadlineItem } from './reminder-engine.js';
+import type { PmTask } from './pm-orchestration.js';
 
 /** Coerce a frontmatter value that may be a YAML list or a scalar into string[]. */
 function toStringArray(value: unknown): string[] {
@@ -86,6 +87,48 @@ export function loadDeadlineItemsFromKb(
         { file, err },
         'Reminder: skipping unparseable KB task file',
       );
+    }
+  }
+  return items;
+}
+
+/**
+ * Parse every `*.md` in `tasksDir` into a `PmTask` for the PM orchestrator —
+ * like the deadline reader but also pulls dependency edges (`upstream` /
+ * `downstream`) and `estimate`. Tasks need no deadline to be included (the PM
+ * graph cares about blocked/blocking regardless of dates). Tolerant of missing
+ * fields, so it degrades gracefully against hand-authored tasks that predate
+ * the GitHub edge sync.
+ */
+export function loadPmTasksFromKb(
+  tasksDir: string = sharedKbTasksDir(),
+): PmTask[] {
+  let files: string[];
+  try {
+    files = fs.readdirSync(tasksDir).filter((f) => f.endsWith('.md'));
+  } catch {
+    return [];
+  }
+
+  const items: PmTask[] = [];
+  for (const file of files) {
+    try {
+      const fm = matter(fs.readFileSync(path.join(tasksDir, file), 'utf-8'))
+        .data as Record<string, unknown>;
+      const id = firstString(fm.id) || file.replace(/\.md$/, '');
+      items.push({
+        id,
+        title: firstString(fm.title) || id,
+        deadline: firstString(fm.deadline, fm.end_date, fm.due_date),
+        owners: toStringArray(fm.owners),
+        status: firstString(fm.status),
+        estimate: firstString(fm.estimate),
+        upstream: toStringArray(fm.upstream),
+        downstream: toStringArray(fm.downstream),
+        ref: `tasks/${file}`,
+      });
+    } catch (err) {
+      logger.debug({ file, err }, 'PM: skipping unparseable KB task file');
     }
   }
   return items;
