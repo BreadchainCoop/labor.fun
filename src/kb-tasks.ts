@@ -9,6 +9,7 @@ export interface ApprovalOverrides {
   title?: string;
   assignee?: string;
   due_date?: string;
+  escalation_contact?: string;
   approved_by: string;
 }
 
@@ -89,6 +90,11 @@ export function writeApprovedTaskFile(
     `created_at: ${today}`,
     `last_edited: ${today}`,
     `owners: ${yamlList(owners.map(escapeYamlScalar))}`,
+    // Machine-readable deadline consumed by the reminder engine (#25). Empty
+    // when no due date is known. `escalation_contact` is who gets looped in at
+    // the final tick / when overdue; blank falls back to the engine default.
+    `deadline: ${dueDate ? escapeYamlScalar(dueDate) : ''}`,
+    `escalation_contact: ${overrides.escalation_contact ? escapeYamlScalar(overrides.escalation_contact) : ''}`,
     'stakeholders: []',
     'upstream: []',
     'downstream: []',
