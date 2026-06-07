@@ -14,6 +14,8 @@ created_by: Person Name
 created_at: YYYY-MM-DD
 last_edited: YYYY-MM-DD
 owners: [Person Name]
+deadline: YYYY-MM-DD          # optional — drives the reminder engine
+escalation_contact: Person    # optional — looped in at the final tick / overdue
 stakeholders: [Person Name]
 upstream: [TASK-XXX]
 downstream: [TASK-XXX]
@@ -80,6 +82,24 @@ Format:
 - `upstream`: Task IDs that must complete before this task can start
 - `downstream`: Task IDs that depend on this task completing
 - **When adding a dependency, update BOTH tasks**
+
+## Deadlines & Reminders
+
+Any task with a machine-readable `deadline:` (an ISO `YYYY-MM-DD`) is picked up
+by the **escalating-deadline reminder engine**. As the deadline approaches the
+engine posts reminders to the team channel on a tightening ladder (default
+T-3 weeks → T-1 week → T-3 days → T-1 day), naming the `owners`. The final rung
+(and an overdue notice) loops in the `escalation_contact` (or the org-wide
+default). Tasks whose `status` is `done`/`cancelled` are never reminded about.
+
+- Set `deadline` to enable reminders; omit it for tasks without a hard date.
+- `escalation_contact` is optional — it falls back to the engine default.
+- Each rung is sent at most once; moving the `deadline` re-arms the ladder.
+- A rolling "everything with a deadline" digest (grouped by week and by owner)
+  is written to `context/deadline-digest.md`.
+
+The ladder/cadence/target channel are operator-tunable via `REMINDER_*` env
+vars (see `.env.example`). Implementation: `src/reminder-engine.ts`.
 
 ## Related Rules
 
