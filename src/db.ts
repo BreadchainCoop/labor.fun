@@ -372,6 +372,22 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
+  // --- PM orchestration ---
+
+  // Throttle ledger for the PM-orchestration loop (#31): one row per
+  // (person, task, reason) the loop has asked the agent to follow up on, so a
+  // person isn't re-pinged about the same blocked/overdue item within the
+  // cooldown window. See src/integrations/pm-orchestration.ts.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS pm_dm_log (
+      person  TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      reason  TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      PRIMARY KEY (person, task_id, reason)
+    )
+  `);
+
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:ops","platform":"cli","kb_person":"ops"}]'
@@ -1150,6 +1166,37 @@ export function resetRemindersOnDeadlineChange(
     return true;
   }
   return false;
+}
+
+// --- PM orchestration DM throttle ---
+
+/** Record that a PM follow-up for (person, task, reason) was raised now. */
+export function recordPmDm(
+  person: string,
+  taskId: string,
+  reason: string,
+): void {
+  db.prepare(
+    `INSERT INTO pm_dm_log (person, task_id, reason, sent_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(person, task_id, reason) DO UPDATE SET sent_at = excluded.sent_at`,
+  ).run(person, taskId, reason, new Date().toISOString());
+}
+
+/** PM follow-ups raised since `sinceIso` (used to suppress re-pings). */
+export function getRecentPmDms(
+  sinceIso: string,
+): Array<{ person: string; task_id: string; reason: string; sent_at: string }> {
+  return db
+    .prepare(
+      `SELECT person, task_id, reason, sent_at FROM pm_dm_log WHERE sent_at >= ?`,
+    )
+    .all(sinceIso) as Array<{
+    person: string;
+    task_id: string;
+    reason: string;
+    sent_at: string;
+  }>;
 }
 
 // --- Meeting summary accessors ---

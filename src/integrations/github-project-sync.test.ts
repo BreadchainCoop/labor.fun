@@ -18,6 +18,7 @@ const configMock = vi.hoisted(() => ({
   GITHUB_PROJECT_SYNC_ORGS: [] as string[],
   GITHUB_PROJECT_SYNC_INTERVAL_MS: 0,
   GITHUB_PROJECT_HIDE_TITLE_PATTERNS: [] as string[],
+  GITHUB_SYNC_ISSUE_DEPS: true,
   GROUPS_DIR: '',
   SHARED_KB_GROUP: 'slack_main',
 }));
@@ -146,6 +147,101 @@ describe('normalizeItem', () => {
     expect(norm.endDate).toBe('2026-05-26');
   });
 
+  it('maps blockedBy/blocking issue relations to upstream/downstream KB ids', () => {
+    const raw = makeIssueItem({
+      content: {
+        ...makeIssueItem().content,
+        blockedBy: {
+          totalCount: 1,
+          nodes: [{ number: 7, repository: { nameWithOwner: 'Org/repo' } }],
+        },
+        blocking: {
+          totalCount: 1,
+          nodes: [{ number: 9, repository: { nameWithOwner: 'Org/repo' } }],
+        },
+      },
+    });
+    const norm = normalizeItem('Org', makeRawProject(), raw)!;
+    expect(norm.blockedBy).toEqual(['GH-Org-repo-7']);
+    expect(norm.blocks).toEqual(['GH-Org-repo-9']);
+  });
+
+  it('derives edge ids from the TARGET repo (cross-repo / cross-org)', () => {
+    const raw = makeIssueItem({
+      content: {
+        ...makeIssueItem().content,
+        blockedBy: {
+          totalCount: 2,
+          nodes: [
+            { number: 5, repository: { nameWithOwner: 'Org/other' } },
+            { number: 3, repository: { nameWithOwner: 'OtherOrg/repo' } },
+          ],
+        },
+      },
+    });
+    const norm = normalizeItem('Org', makeRawProject(), raw)!;
+    expect(norm.blockedBy).toEqual(['GH-Org-other-5', 'GH-OtherOrg-repo-3']);
+  });
+
+  it('drops edges whose target repo is unreadable, and dedupes/self-refs', () => {
+    const raw = makeIssueItem({
+      content: {
+        ...makeIssueItem().content,
+        blockedBy: {
+          totalCount: 3,
+          nodes: [
+            { number: 8 }, // no repository → dropped
+            { number: 7, repository: { nameWithOwner: 'Org/repo' } },
+            { number: 7, repository: { nameWithOwner: 'Org/repo' } }, // dup
+            { number: 42, repository: { nameWithOwner: 'Org/repo' } }, // self
+          ],
+        },
+      },
+    });
+    const norm = normalizeItem('Org', makeRawProject(), raw)!;
+    expect(norm.blockedBy).toEqual(['GH-Org-repo-7']);
+  });
+
+  it('maps parent and subIssues hierarchy edges', () => {
+    const raw = makeIssueItem({
+      content: {
+        ...makeIssueItem().content,
+        parent: { number: 1, repository: { nameWithOwner: 'Org/repo' } },
+        subIssues: {
+          totalCount: 1,
+          nodes: [{ number: 50, repository: { nameWithOwner: 'Org/repo' } }],
+        },
+      },
+    });
+    const norm = normalizeItem('Org', makeRawProject(), raw)!;
+    expect(norm.parent).toBe('GH-Org-repo-1');
+    expect(norm.subIssues).toEqual(['GH-Org-repo-50']);
+  });
+
+  it('defaults edges to empty/null when absent', () => {
+    const norm = normalizeItem('Org', makeRawProject(), makeIssueItem())!;
+    expect(norm.blockedBy).toEqual([]);
+    expect(norm.blocks).toEqual([]);
+    expect(norm.subIssues).toEqual([]);
+    expect(norm.parent).toBeNull();
+  });
+
+  it('picks a numeric estimate from a custom number field (case-insensitive)', () => {
+    const raw = makeIssueItem({
+      fieldValues: {
+        nodes: [
+          {
+            __typename: 'ProjectV2ItemFieldNumberValue',
+            number: 5,
+            field: { name: 'Story Points' },
+          },
+        ],
+      },
+    });
+    const norm = normalizeItem('Org', makeRawProject(), raw)!;
+    expect(norm.estimate).toBe(5);
+  });
+
   it('returns null for REDACTED items (private repos the PAT cannot see)', () => {
     const raw = {
       id: 'X',
@@ -202,6 +298,50 @@ describe('frontmatter shape', () => {
     expect(fm.tags).toContain('bug');
     expect(fm.gh_synced_at).toBe('2026-05-20T10:00:00Z');
     expect(fm.gh_url).toBe('https://github.com/Org/repo/issues/42');
+  });
+
+  it('emits dependency edges as upstream/downstream + estimate (#31)', () => {
+    const raw = makeIssueItem({
+      content: {
+        ...makeIssueItem().content,
+        blockedBy: {
+          totalCount: 1,
+          nodes: [{ number: 7, repository: { nameWithOwner: 'Org/repo' } }],
+        },
+        blocking: {
+          totalCount: 1,
+          nodes: [{ number: 9, repository: { nameWithOwner: 'Org/repo' } }],
+        },
+        parent: { number: 1, repository: { nameWithOwner: 'Org/repo' } },
+      },
+      fieldValues: {
+        nodes: [
+          {
+            __typename: 'ProjectV2ItemFieldNumberValue',
+            number: 3,
+            field: { name: 'Estimate' },
+          },
+        ],
+      },
+    });
+    const fm = itemFrontmatter(
+      normalizeItem('Org', makeRawProject(), raw)!,
+      '2026-05-20T10:00:00Z',
+    );
+    expect(fm.upstream).toEqual(['GH-Org-repo-7']);
+    expect(fm.downstream).toEqual(['GH-Org-repo-9']);
+    expect(fm.estimate).toBe(3);
+    expect(fm.gh_parent).toBe('GH-Org-repo-1');
+  });
+
+  it('emits empty edge arrays when there are no dependencies', () => {
+    const fm = itemFrontmatter(
+      normalizeItem('Org', makeRawProject(), makeIssueItem())!,
+      '2026-05-20T10:00:00Z',
+    );
+    expect(fm.upstream).toEqual([]);
+    expect(fm.downstream).toEqual([]);
+    expect(fm.estimate).toBe('');
   });
 
   it('project frontmatter marks closed projects correctly', () => {

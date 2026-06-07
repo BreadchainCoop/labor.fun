@@ -107,6 +107,14 @@ export function itemFrontmatter(
     created_at: item.createdAt ?? '',
     start_date: item.startDate ?? '',
     end_date: item.endDate ?? '',
+    // Dependency edges mapped onto the hand-authored task schema's keys so the
+    // PM orchestrator sees one unified graph across synced + hand-authored
+    // tasks (#31). upstream = "blocked by" (must finish first); downstream =
+    // "blocks" (others depend on this). `estimate` surfaces a ProjectV2 number
+    // field (Estimate / Story Points / ...).
+    upstream: item.blockedBy,
+    downstream: item.blocks,
+    estimate: item.estimate ?? '',
     visibility: 'open',
     // GitHub-specific. Used by the upcoming kanban/swimlane/gantt views and
     // by the reconcile-on-stale deletion logic.
@@ -120,6 +128,8 @@ export function itemFrontmatter(
     gh_state: item.state ?? '',
     gh_iteration: item.iteration ?? '',
     gh_iteration_start: item.iterationStartDate ?? '',
+    gh_parent: item.parent ?? '',
+    gh_sub_issues: item.subIssues,
     gh_synced_at: syncedAt,
   };
 }

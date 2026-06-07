@@ -38,6 +38,11 @@ const envConfig = readEnvFile([
   'REMINDER_SWEEP_INTERVAL_MS',
   'REMINDER_TARGET_JID',
   'REMINDER_ESCALATION_CONTACT',
+  'GITHUB_SYNC_ISSUE_DEPS',
+  'PM_ORCHESTRATION_INTERVAL_MS',
+  'PM_ORCHESTRATION_TARGET_GROUP',
+  'PM_DUE_SOON_DAYS',
+  'PM_DM_COOLDOWN_MS',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -192,6 +197,37 @@ export const GITHUB_PROJECT_HIDE_TITLE_PATTERNS = (
 export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
   0,
   parseInt(envVal('GITHUB_PROJECT_SYNC_INTERVAL_MS') || '900000', 10) || 900000,
+);
+
+// Whether the GitHub sync pulls issue dependency (blocked-by/blocking) and
+// sub-issue (parent/child) edges into synced task frontmatter (#31). Default on;
+// the sync degrades gracefully (retries without edges) if an instance lacks the
+// GraphQL fields, but this lets an operator disable the attempt entirely.
+export const GITHUB_SYNC_ISSUE_DEPS =
+  (envVal('GITHUB_SYNC_ISSUE_DEPS') ?? 'true') !== 'false';
+
+// --- PM orchestration (#31) ---
+// Periodic loop that reviews the GitHub-synced + hand-authored task graph and
+// wakes the agent to re-estimate/re-plan and DM blockers/overdue owners.
+// Default weekly; 0 disables the loop entirely.
+export const PM_ORCHESTRATION_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('PM_ORCHESTRATION_INTERVAL_MS') || '604800000', 10) ||
+    604800000,
+);
+// Group whose chat receives the PM run / agent context. Empty → SHARED_KB_GROUP.
+export const PM_ORCHESTRATION_TARGET_GROUP =
+  envVal('PM_ORCHESTRATION_TARGET_GROUP') || '';
+// A task is "due soon" (flagged in the brief) within this many days of its deadline.
+export const PM_DUE_SOON_DAYS = Math.max(
+  0,
+  parseInt(envVal('PM_DUE_SOON_DAYS') || '7', 10) || 7,
+);
+// Don't re-DM the same person about the same task+reason within this window.
+// Default ~6 days (shorter than the weekly cadence).
+export const PM_DM_COOLDOWN_MS = Math.max(
+  0,
+  parseInt(envVal('PM_DM_COOLDOWN_MS') || '518400000', 10) || 518400000,
 );
 
 // Source group whose `context/` directory holds the canonical shared KB
