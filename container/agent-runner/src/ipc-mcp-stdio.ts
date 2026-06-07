@@ -14,6 +14,10 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const REQUESTS_DIR = path.join(IPC_DIR, 'requests');
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -43,9 +47,20 @@ server.tool(
   'modify_kb_file',
   "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, or other KB files. The orchestrator enforces access control — allowlisted senders (anyone with a sender_context) have full read/write access; unknown senders are rejected. Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md').",
   {
-    file_path: z.string().describe('Relative path within the KB context directory (e.g. "tasks/TASK-001.md", "calendar/2026-04-09-event.md")'),
-    content: z.string().describe('Full file content to write (including YAML frontmatter)'),
-    action: z.enum(['write', 'delete']).optional().describe('Action: "write" (default) to create/overwrite, "delete" to remove the file'),
+    file_path: z
+      .string()
+      .describe(
+        'Relative path within the KB context directory (e.g. "tasks/TASK-001.md", "calendar/2026-04-09-event.md")',
+      ),
+    content: z
+      .string()
+      .describe('Full file content to write (including YAML frontmatter)'),
+    action: z
+      .enum(['write', 'delete'])
+      .optional()
+      .describe(
+        'Action: "write" (default) to create/overwrite, "delete" to remove the file',
+      ),
   },
   async (args) => {
     const data = {
@@ -59,7 +74,14 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `KB file modification queued: ${args.action || 'write'} ${args.file_path}` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `KB file modification queued: ${args.action || 'write'} ${args.file_path}`,
+        },
+      ],
+    };
   },
 );
 
@@ -67,7 +89,11 @@ server.tool(
   'send_email',
   'Send an email from the configured Breadbrich Engels address. RESTRICTED: can only send to addresses in the orchestrator-configured whitelist (EMAIL_WHITELIST env var). Sends to any other address will be rejected by the orchestrator. The orchestrator handles SMTP.',
   {
-    to: z.string().describe('Recipient email address. Must be on the orchestrator whitelist.'),
+    to: z
+      .string()
+      .describe(
+        'Recipient email address. Must be on the orchestrator whitelist.',
+      ),
     subject: z.string().describe('Email subject line'),
     body: z.string().describe('Email body text (plain text)'),
   },
@@ -83,36 +109,38 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Email queued to ${args.to}.` }] };
+    return {
+      content: [{ type: 'text' as const, text: `Email queued to ${args.to}.` }],
+    };
   },
 );
 
 server.tool(
   'dm_user',
-  "USE THIS whenever the user asks you to DM, message, tell, contact, ping, " +
-    "or send a private message to a *named person* in the org. You do NOT " +
-    "need their numeric Discord ID — pass the name or handle and the tool " +
-    "resolves it from the KB people files. Example invocations:\n" +
+  'USE THIS whenever the user asks you to DM, message, tell, contact, ping, ' +
+    'or send a private message to a *named person* in the org. You do NOT ' +
+    'need their numeric Discord ID — pass the name or handle and the tool ' +
+    'resolves it from the KB people files. Example invocations:\n' +
     "  • \"DM Josh and tell him X\"          → dm_user(target='Josh', text='X')\n" +
     "  • \"let hunter know Y\"               → dm_user(target='hunter', text='Y')\n" +
     "  • \"tell ramgos he's a goober\"       → dm_user(target='ramgos', text='ron says you're a goober')\n" +
     "  • \"message bren about Z\"            → dm_user(target='bren', text='...')\n" +
-    "\n" +
-    "Accepts any of: first name / KB title (recommended), KB slug " +
+    '\n' +
+    'Accepts any of: first name / KB title (recommended), KB slug ' +
     "('josh-tbs'), Discord username ('theblockchainsocialist'), Discord " +
     "display name ('Josh | TBS'), or numeric Discord ID. Case-insensitive. " +
     "Resolution scans the shared-KB `people/*.md` files (that's the " +
     "allowlist — only members with a people file can be DM'd). On a miss " +
     "you'll get fuzzy suggestions back; on ambiguity you'll get the list " +
     "of candidates. Long messages auto-split at Discord's 2000-char " +
-    "limit. **Do not ask the user for a numeric ID — just call the tool " +
-    "with the name they gave you.**",
+    'limit. **Do not ask the user for a numeric ID — just call the tool ' +
+    'with the name they gave you.**',
   {
     target: z
       .string()
       .describe(
-        "Recipient — slug, Discord ID, username, display name, or title. " +
-          "Use a slug or ID when the display name is ambiguous.",
+        'Recipient — slug, Discord ID, username, display name, or title. ' +
+          'Use a slug or ID when the display name is ambiguous.',
       ),
     text: z.string().describe('Message body to send.'),
   },
@@ -133,6 +161,126 @@ server.tool(
           text: `DM to "${args.target}" queued. If it fails (ambiguous, unknown, blocked), you'll see an error message in this chat.`,
         },
       ],
+    };
+  },
+);
+
+server.tool(
+  'fetch_discord_history',
+  'Read past messages from a Discord channel by its channel ID — including ' +
+    'channels that are NOT registered with the bot. USE THIS when asked to ' +
+    "summarize, tally, audit, or 'go through' a Discord channel's history " +
+    "(e.g. 'get everyone's hours from #standup this quarter'). The bot must " +
+    "be a member of the channel's server and able to read it.\n\n" +
+    'Returns messages oldest-first as JSON, each with author, authorId, ' +
+    'content, timestamp, and attachments. Bound the fetch with `since` (an ' +
+    'ISO date) for a time window, and/or `limit`. For very active channels, ' +
+    'page backward by passing the oldest returned message id as `before`.\n\n' +
+    'Authorization: only an allowlisted sender (or the main group) may call ' +
+    'this; unauthorized callers get an error back.',
+  {
+    channel_id: z
+      .string()
+      .describe(
+        'Discord channel ID, e.g. "1291129091440902165". A "dc:" prefix is tolerated.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .max(2000)
+      .optional()
+      .describe('Max messages to return. Default 200, hard cap 2000.'),
+    since: z
+      .string()
+      .optional()
+      .describe(
+        'ISO date/datetime (e.g. "2026-04-01"). Only messages at or after this instant are returned. Use for "this quarter/month".',
+      ),
+    before: z
+      .string()
+      .optional()
+      .describe(
+        'Message ID — return only messages older than this. For manual pagination beyond the cap.',
+      ),
+  },
+  async (args) => {
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const data = {
+      type: 'fetch_discord_history',
+      requestId,
+      channelId: args.channel_id,
+      limit: args.limit,
+      sinceIso: args.since,
+      before: args.before,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(REQUESTS_DIR, data);
+
+    // Poll for the orchestrator's response. Atomic writes on the host side
+    // mean a present file is always complete; the parse-retry is belt-and-
+    // suspenders against a torn read.
+    const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+    const deadline = Date.now() + 120_000; // 2 minutes
+    while (Date.now() < deadline) {
+      if (fs.existsSync(responsePath)) {
+        let payload: {
+          ok?: boolean;
+          error?: string;
+          channelId?: string;
+          count?: number;
+          messages?: unknown;
+        };
+        try {
+          payload = JSON.parse(fs.readFileSync(responsePath, 'utf-8'));
+        } catch {
+          await sleep(100);
+          continue;
+        }
+        try {
+          fs.unlinkSync(responsePath);
+        } catch {
+          /* best-effort cleanup */
+        }
+        if (!payload.ok) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `fetch_discord_history failed: ${payload.error || 'unknown error'}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  channelId: payload.channelId,
+                  count: payload.count,
+                  messages: payload.messages,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+      await sleep(250);
+    }
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: 'fetch_discord_history timed out after 120s waiting for the orchestrator. The channel may be very large or Discord may be slow — retry with a smaller `limit` or a tighter `since`.',
+        },
+      ],
+      isError: true,
     };
   },
 );
@@ -265,9 +413,7 @@ server.tool(
       }>;
       if (messages.length === 0) {
         return {
-          content: [
-            { type: 'text' as const, text: 'No recent bot messages.' },
-          ],
+          content: [{ type: 'text' as const, text: 'No recent bot messages.' }],
         };
       }
       const formatted = messages
@@ -750,15 +896,50 @@ Call this AFTER you have:
 
 The extracted fields (action_items, extracted_events, etc.) are JSON strings. The summary_html is a complete HTML document with inline CSS for the slideshow.`,
   {
-    title: z.string().describe('Meeting title (e.g. "Weekly Standup 2026-04-14")'),
-    transcript_text: z.string().describe('The raw transcript text that was processed'),
-    summary_html: z.string().describe('Self-contained HTML slideshow summarizing the meeting. Must include inline CSS and JS for slide navigation.'),
-    action_items: z.string().describe('JSON array of action items: [{description, assignee, due_date, priority, status}]'),
-    extracted_events: z.string().optional().describe('JSON array of new events to create: [{title, date, time, location, description}]'),
-    extracted_people: z.string().optional().describe('JSON array of new people mentioned: [{name, role, context}]'),
-    extracted_tasks: z.string().optional().describe('JSON array of tasks (new or updates to existing): [{task_id?, title, description, assignee, priority, status}]'),
-    extracted_documents: z.string().optional().describe('JSON array of documents to gather: [{title, description, owner, type}]'),
-    clarification_questions: z.string().optional().describe('JSON array of questions for unclear items: [{item_type, item_description, questions: string[]}]'),
+    title: z
+      .string()
+      .describe('Meeting title (e.g. "Weekly Standup 2026-04-14")'),
+    transcript_text: z
+      .string()
+      .describe('The raw transcript text that was processed'),
+    summary_html: z
+      .string()
+      .describe(
+        'Self-contained HTML slideshow summarizing the meeting. Must include inline CSS and JS for slide navigation.',
+      ),
+    action_items: z
+      .string()
+      .describe(
+        'JSON array of action items: [{description, assignee, due_date, priority, status}]',
+      ),
+    extracted_events: z
+      .string()
+      .optional()
+      .describe(
+        'JSON array of new events to create: [{title, date, time, location, description}]',
+      ),
+    extracted_people: z
+      .string()
+      .optional()
+      .describe('JSON array of new people mentioned: [{name, role, context}]'),
+    extracted_tasks: z
+      .string()
+      .optional()
+      .describe(
+        'JSON array of tasks (new or updates to existing): [{task_id?, title, description, assignee, priority, status}]',
+      ),
+    extracted_documents: z
+      .string()
+      .optional()
+      .describe(
+        'JSON array of documents to gather: [{title, description, owner, type}]',
+      ),
+    clarification_questions: z
+      .string()
+      .optional()
+      .describe(
+        'JSON array of questions for unclear items: [{item_type, item_description, questions: string[]}]',
+      ),
   },
   async (args) => {
     const summaryId = `mtg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -783,10 +964,12 @@ The extracted fields (action_items, extracted_events, etc.) are JSON strings. Th
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{
-        type: 'text' as const,
-        text: `Meeting summary "${args.title}" saved (ID: ${summaryId}). HTML slideshow stored.`,
-      }],
+      content: [
+        {
+          type: 'text' as const,
+          text: `Meeting summary "${args.title}" saved (ID: ${summaryId}). HTML slideshow stored.`,
+        },
+      ],
     };
   },
 );
@@ -871,10 +1054,7 @@ Pass an array of items even when approving just one. Use overrides only when the
             .string()
             .optional()
             .describe('Override title if the user requested a refinement'),
-          final_assignee: z
-            .string()
-            .optional()
-            .describe('Override assignee'),
+          final_assignee: z.string().optional().describe('Override assignee'),
           final_due_date: z
             .string()
             .optional()
@@ -943,14 +1123,26 @@ server.tool(
   'request_expense',
   'Submit a PROSPECTIVE expense request — use when a user wants approval BEFORE spending money. This is the preferred path. Always prefer this over submit_retrospective_expense.',
   {
-    amount_cents: z.number().int().positive().describe('Amount in cents, e.g. 4500 for $45.00'),
+    amount_cents: z
+      .number()
+      .int()
+      .positive()
+      .describe('Amount in cents, e.g. 4500 for $45.00'),
     currency: z.string().length(3).optional().default('USD'),
     description: z.string().min(3).describe('What the money is for'),
-    category: z.enum(['supplies', 'travel', 'food', 'av', 'cleaning', 'other']).optional(),
+    category: z
+      .enum(['supplies', 'travel', 'food', 'av', 'cleaning', 'other'])
+      .optional(),
     vendor: z.string().optional().describe('Who is being paid'),
     justification: z.string().optional().describe('Why this expense is needed'),
-    expected_date: z.string().optional().describe('ISO date (YYYY-MM-DD) when the spend will occur'),
-    event_id: z.string().optional().describe('Link to an event if this expense is part of one'),
+    expected_date: z
+      .string()
+      .optional()
+      .describe('ISO date (YYYY-MM-DD) when the spend will occur'),
+    event_id: z
+      .string()
+      .optional()
+      .describe('Link to an event if this expense is part of one'),
   },
   async (args) => {
     const data = {
@@ -969,7 +1161,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Expense request submitted for approval. I'll notify you once it's reviewed.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Expense request submitted for approval. I'll notify you once it's reviewed.`,
+        },
+      ],
+    };
   },
 );
 
@@ -980,11 +1179,20 @@ server.tool(
     amount_cents: z.number().int().positive().describe('Amount in cents'),
     currency: z.string().length(3).optional().default('USD'),
     description: z.string().min(3),
-    category: z.enum(['supplies', 'travel', 'food', 'av', 'cleaning', 'other']).optional(),
+    category: z
+      .enum(['supplies', 'travel', 'food', 'av', 'cleaning', 'other'])
+      .optional(),
     vendor: z.string().optional(),
-    justification: z.string().min(3).describe('Required — why was this spent without approval?'),
-    incurred_date: z.string().describe('ISO date (YYYY-MM-DD) the spend actually happened'),
-    receipt_path: z.string().describe('Receipt must be attached at submission time (KB path or URL)'),
+    justification: z
+      .string()
+      .min(3)
+      .describe('Required — why was this spent without approval?'),
+    incurred_date: z
+      .string()
+      .describe('ISO date (YYYY-MM-DD) the spend actually happened'),
+    receipt_path: z
+      .string()
+      .describe('Receipt must be attached at submission time (KB path or URL)'),
     event_id: z.string().optional(),
   },
   async (args) => {
@@ -1005,7 +1213,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Retrospective expense submitted. Note: prospective requests are preferred — please loop in the approver before spending next time.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Retrospective expense submitted. Note: prospective requests are preferred — please loop in the approver before spending next time.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1026,7 +1241,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Expense ${args.expense_id} approval submitted.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Expense ${args.expense_id} approval submitted.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1047,7 +1269,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Expense ${args.expense_id} denial submitted.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Expense ${args.expense_id} denial submitted.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1057,7 +1286,9 @@ server.tool(
   {
     expense_id: z.string(),
     approved_amount_cents: z.number().int().positive(),
-    approver_notes: z.string().describe('Explain the modification — visible to requester'),
+    approver_notes: z
+      .string()
+      .describe('Explain the modification — visible to requester'),
   },
   async (args) => {
     const data = {
@@ -1070,7 +1301,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Expense ${args.expense_id} modification submitted.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Expense ${args.expense_id} modification submitted.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1079,8 +1317,17 @@ server.tool(
   'Attach a receipt to an approved prospective expense. Transitions status from receipt_pending to receipt_submitted. Only the original requester can submit.',
   {
     expense_id: z.string(),
-    receipt_path: z.string().describe('KB path or URL where the receipt is stored'),
-    actual_amount_cents: z.number().int().positive().optional().describe('If the final cost differed from approved, provide it here for reconciliation'),
+    receipt_path: z
+      .string()
+      .describe('KB path or URL where the receipt is stored'),
+    actual_amount_cents: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'If the final cost differed from approved, provide it here for reconciliation',
+      ),
   },
   async (args) => {
     const data = {
@@ -1092,7 +1339,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Receipt submitted for expense ${args.expense_id}.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Receipt submitted for expense ${args.expense_id}.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1112,7 +1366,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Reimbursement submitted for expense ${args.expense_id} via ${args.reimbursement_method}.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Reimbursement submitted for expense ${args.expense_id} via ${args.reimbursement_method}.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1132,7 +1393,14 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(TASKS_DIR, data);
-    return { content: [{ type: 'text' as const, text: `Cancellation submitted for expense ${args.expense_id}.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Cancellation submitted for expense ${args.expense_id}.`,
+        },
+      ],
+    };
   },
 );
 
@@ -1142,10 +1410,14 @@ server.tool(
   {
     username: z
       .string()
-      .describe('Lowercase username for KB UI auth (e.g. "kai"). Must match /^[a-z][a-z0-9_-]{0,31}$/.'),
+      .describe(
+        'Lowercase username for KB UI auth (e.g. "kai"). Must match /^[a-z][a-z0-9_-]{0,31}$/.',
+      ),
     target_telegram_jid: z
       .string()
-      .describe('Telegram JID to DM the credentials to (format: "tg:<chat_id>", e.g. "tg:459838633").'),
+      .describe(
+        'Telegram JID to DM the credentials to (format: "tg:<chat_id>", e.g. "tg:459838633").',
+      ),
   },
   async (args) => {
     const data = {
@@ -1169,18 +1441,24 @@ server.tool(
 
 server.tool(
   'modify_group_claude_md',
-  'Rewrite another group\'s CLAUDE.md (per-group memory file). Requires an allowlisted caller (sender_context present). The write is silent — no notification to the target group\'s members — and audited (kb_audit_log row inserted). Full-replace, not patch: pass the entire new file contents. Use sparingly; this changes how the target group\'s personal assistant behaves.',
+  "Rewrite another group's CLAUDE.md (per-group memory file). Requires an allowlisted caller (sender_context present). The write is silent — no notification to the target group's members — and audited (kb_audit_log row inserted). Full-replace, not patch: pass the entire new file contents. Use sparingly; this changes how the target group's personal assistant behaves.",
   {
     target_folder: z
       .string()
-      .describe('Group folder name to modify (e.g. "telegram_emma", "slack_main"). Must pass isValidGroupFolder validation — no slashes, no path traversal.'),
+      .describe(
+        'Group folder name to modify (e.g. "telegram_emma", "slack_main"). Must pass isValidGroupFolder validation — no slashes, no path traversal.',
+      ),
     new_content: z
       .string()
-      .describe('Full new contents of the target CLAUDE.md, in markdown. Replaces the existing file entirely. Hard cap of 200 KB.'),
+      .describe(
+        'Full new contents of the target CLAUDE.md, in markdown. Replaces the existing file entirely. Hard cap of 200 KB.',
+      ),
     summary: z
       .string()
       .optional()
-      .describe('Short human-readable description of the change for the audit log (e.g. "Update reminder cadence"). Optional but recommended.'),
+      .describe(
+        'Short human-readable description of the change for the audit log (e.g. "Update reminder cadence"). Optional but recommended.',
+      ),
   },
   async (args) => {
     const data = {

@@ -24,6 +24,10 @@ import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
+import type {
+  DiscordHistoryMessage,
+  FetchChannelHistoryOpts,
+} from './channels/discord.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -995,6 +999,27 @@ async function main(): Promise<void> {
         | undefined;
       if (!discord) return null;
       return discord.dmUser(userId, text);
+    },
+    fetchDiscordHistory: async (channelId, opts) => {
+      // Mirror of dmDiscordUser: locate the Discord channel by name and the
+      // presence of its fetchChannelHistory primitive. Returns null when
+      // Discord isn't wired up so the IPC handler renders a clear "not
+      // connected" message instead of an opaque failure.
+      const discord = channels.find(
+        (c) =>
+          c.name === 'discord' &&
+          (c as unknown as { fetchChannelHistory?: unknown })
+            .fetchChannelHistory !== undefined,
+      ) as unknown as
+        | {
+            fetchChannelHistory: (
+              channelId: string,
+              opts: FetchChannelHistoryOpts,
+            ) => Promise<DiscordHistoryMessage[]>;
+          }
+        | undefined;
+      if (!discord) return null;
+      return discord.fetchChannelHistory(channelId, opts);
     },
     syncGroups: async (force: boolean) => {
       await Promise.all(

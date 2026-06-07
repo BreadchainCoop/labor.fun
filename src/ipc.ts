@@ -46,6 +46,7 @@ import { writeApprovedTaskFile } from './kb-tasks.js';
 import { writeOutboundSnapshot } from './container-runner.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import type { DiscordHistoryMessage } from './channels/discord.js';
 import { RegisteredGroup } from './types.js';
 
 // --- Email whitelist and transporter ---
@@ -246,6 +247,16 @@ export interface IpcDeps {
    * surfaced with their underlying message.
    */
   dmDiscordUser?: (userId: string, text: string) => Promise<string | null>;
+  /**
+   * Fetch a Discord channel's message history (request/response IPC, unlike
+   * the fire-and-forget ops above). Returns the messages, or `null` when the
+   * Discord channel isn't wired up so the handler can render a clear "not
+   * connected" message. Used by the `fetch_discord_history` request op.
+   */
+  fetchDiscordHistory?: (
+    channelId: string,
+    opts: { limit?: number; before?: string; sinceIso?: string },
+  ) => Promise<DiscordHistoryMessage[] | null>;
   onTasksChanged: () => void;
 }
 
@@ -650,6 +661,60 @@ export function startIpcWatcher(deps: IpcDeps): void {
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
+
+      // Process request/response ops from this group's IPC directory. Unlike
+      // messages/tasks (fire-and-forget), a request expects a reply written
+      // back to `responses/<requestId>.json` for the agent to read. Each
+      // request file is consumed (deleted) on read, then handled
+      // asynchronously so a slow fetch never blocks the watcher loop.
+      const requestsDir = path.join(ipcBaseDir, sourceGroup, 'requests');
+      try {
+        if (fs.existsSync(requestsDir)) {
+          const requestFiles = fs
+            .readdirSync(requestsDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of requestFiles) {
+            const filePath = path.join(requestsDir, file);
+            let data: Record<string, unknown>;
+            try {
+              data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error parsing IPC request — moving to errors',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
+              continue;
+            }
+            // Consume immediately so the next tick can't reprocess it.
+            try {
+              fs.unlinkSync(filePath);
+            } catch {
+              /* already gone */
+            }
+            // Fire-and-forget the handler; it writes its own response file.
+            void handleRequestIpc(
+              data,
+              {
+                sourceGroup,
+                isMain,
+                ipcBaseDir,
+              },
+              deps,
+            );
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC requests directory',
+        );
+      }
     }
 
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
@@ -657,6 +722,149 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+}
+
+// --- Request/response IPC ---
+//
+// The request/response channel is the read-direction counterpart to the
+// fire-and-forget message/task ops. The agent writes a request to
+// `<group>/requests/`, the orchestrator handles it and writes the reply to
+// `<group>/responses/<requestId>.json`, which the agent polls and reads.
+// Response files are written atomically (tmp + rename) so the agent never
+// observes a partial JSON.
+
+/** Max messages a single fetch_discord_history request may return. */
+const DISCORD_HISTORY_MAX = 2000;
+
+/**
+ * Write a request's response into the group's `responses/` dir, atomically.
+ * Best-effort chowns to the service user (mirrors the KB-write path) so the
+ * container — which may run under a different uid — can read it back.
+ */
+function writeIpcResponse(
+  ipcBaseDir: string,
+  sourceGroup: string,
+  requestId: string,
+  payload: unknown,
+): void {
+  const responsesDir = path.join(ipcBaseDir, sourceGroup, 'responses');
+  fs.mkdirSync(responsesDir, { recursive: true });
+  const outPath = path.join(responsesDir, `${requestId}.json`);
+  const tmpPath = `${outPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(payload));
+  fs.renameSync(tmpPath, outPath);
+  const ids = getKbOwnerIds();
+  if (ids && process.getuid?.() !== ids.uid) {
+    try {
+      fs.chownSync(outPath, ids.uid, ids.gid);
+    } catch {
+      /* best-effort; same uid in prod, so usually a no-op */
+    }
+  }
+}
+
+/**
+ * Handle a single request-op IPC file. Always writes exactly one response
+ * (success or error) keyed by `requestId` so the agent's poll terminates.
+ * Authorization follows the flat model used elsewhere: main-group origin or
+ * an allowlisted sender (validated sender_context with a user_id).
+ */
+export async function handleRequestIpc(
+  data: Record<string, unknown>,
+  ctx: { sourceGroup: string; isMain: boolean; ipcBaseDir: string },
+  deps: IpcDeps,
+): Promise<void> {
+  const requestId =
+    typeof data.requestId === 'string' && data.requestId.trim() !== ''
+      ? data.requestId
+      : null;
+  if (!requestId) {
+    logger.warn(
+      { sourceGroup: ctx.sourceGroup, type: data.type },
+      'Request IPC missing requestId — cannot respond, dropping',
+    );
+    return;
+  }
+
+  const respond = (payload: Record<string, unknown>) =>
+    writeIpcResponse(ctx.ipcBaseDir, ctx.sourceGroup, requestId, payload);
+
+  try {
+    if (data.type !== 'fetch_discord_history') {
+      respond({ ok: false, error: `Unknown request type: ${data.type}` });
+      return;
+    }
+
+    // Authorization: allowlisted sender OR main-group origin. Reading a
+    // channel's backlog is privacy-sensitive, so unauthenticated scheduled
+    // runs in a non-main group are rejected.
+    const senderCtx = readSenderCtxFromDir(ctx.ipcBaseDir, ctx.sourceGroup);
+    if (!ctx.isMain && senderCtx === null) {
+      logger.warn(
+        { sourceGroup: ctx.sourceGroup },
+        'fetch_discord_history blocked — requires allowlisted sender or main group',
+      );
+      respond({
+        ok: false,
+        error:
+          'Unauthorized: fetching channel history requires an allowlisted sender or the main group.',
+      });
+      return;
+    }
+
+    if (!deps.fetchDiscordHistory) {
+      respond({ ok: false, error: 'Discord channel is not connected.' });
+      return;
+    }
+
+    const channelId = String(data.channelId ?? '')
+      .replace(/^dc:/, '')
+      .trim();
+    if (!channelId) {
+      respond({ ok: false, error: '`channel_id` is required.' });
+      return;
+    }
+
+    const rawLimit =
+      typeof data.limit === 'number' && Number.isFinite(data.limit)
+        ? Math.floor(data.limit)
+        : undefined;
+    const limit =
+      rawLimit !== undefined
+        ? Math.min(Math.max(rawLimit, 1), DISCORD_HISTORY_MAX)
+        : undefined;
+    const before = typeof data.before === 'string' ? data.before : undefined;
+    const sinceIso =
+      typeof data.sinceIso === 'string' ? data.sinceIso : undefined;
+
+    const messages = await deps.fetchDiscordHistory(channelId, {
+      limit,
+      before,
+      sinceIso,
+    });
+    if (messages === null) {
+      respond({ ok: false, error: 'Discord channel is not connected.' });
+      return;
+    }
+
+    respond({ ok: true, channelId, count: messages.length, messages });
+    logger.info(
+      {
+        channelId,
+        count: messages.length,
+        sourceGroup: ctx.sourceGroup,
+        authedBy: senderCtx?.user_id ?? 'main',
+      },
+      'fetch_discord_history served',
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      { sourceGroup: ctx.sourceGroup, requestId, err: msg },
+      'fetch_discord_history failed',
+    );
+    respond({ ok: false, error: msg });
+  }
 }
 
 // --- Cross-group CLAUDE.md modification ---
