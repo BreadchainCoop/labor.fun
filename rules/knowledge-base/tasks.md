@@ -95,7 +95,11 @@ A weekly background loop reviews this task graph (#31). It flags what's **blocke
 and **due soon**, plus per-owner load, then wakes the assistant to re-estimate /
 re-plan and DM the people on the critical path. The assistant **acts optimistically**
 (applies the estimate/deadline/status change) and then asks the owner to confirm —
-it does not ask first. Tunable via `PM_*` env vars; see `.env.example`.
+it does not ask first. Overdue/blocking work with **no assignee** is surfaced too:
+the assistant finds/assigns an owner or raises it to the PM lead (`PM_LEAD`) and
+the channel rather than dropping it. The routine also runs **on demand from chat** —
+an allowlisted user can say "run pm orchestration" or "/pm". Tunable via `PM_*`
+env vars; see `.env.example`.
 
 ## Deadlines & Reminders
 
