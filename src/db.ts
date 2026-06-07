@@ -356,6 +356,22 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
+  // --- Reminder engine ---
+
+  // Records which escalation-ladder rungs have already fired for a
+  // deadline-bearing item, so the periodic reminder sweep is idempotent (a
+  // rung is sent at most once). `deadline` is stored so a moved deadline can be
+  // detected and the item's rungs reset. See src/reminder-engine.ts.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS reminder_log (
+      item_id TEXT NOT NULL,
+      rung TEXT NOT NULL,
+      deadline TEXT NOT NULL,
+      fired_at TEXT NOT NULL,
+      PRIMARY KEY (item_id, rung)
+    )
+  `);
+
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:ops","platform":"cli","kb_person":"ops"}]'
@@ -1093,6 +1109,47 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     };
   }
   return result;
+}
+
+// --- Reminder log accessors ---
+
+/** Whether a given ladder rung has already fired for an item. */
+export function hasReminderFired(itemId: string, rung: string): boolean {
+  const row = db
+    .prepare('SELECT 1 FROM reminder_log WHERE item_id = ? AND rung = ?')
+    .get(itemId, rung);
+  return row !== undefined;
+}
+
+/** Record that a ladder rung fired for an item (idempotent on item_id+rung). */
+export function recordReminderFired(
+  itemId: string,
+  rung: string,
+  deadline: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO reminder_log (item_id, rung, deadline, fired_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(itemId, rung, deadline, new Date().toISOString());
+}
+
+/**
+ * Reset an item's fired rungs if its deadline has moved. Returns true when a
+ * reset happened. Lets the ladder re-fire against the new schedule instead of
+ * staying silent because earlier rungs were already logged for the old date.
+ */
+export function resetRemindersOnDeadlineChange(
+  itemId: string,
+  deadline: string,
+): boolean {
+  const rows = db
+    .prepare('SELECT DISTINCT deadline FROM reminder_log WHERE item_id = ?')
+    .all(itemId) as Array<{ deadline: string }>;
+  if (rows.length > 0 && rows.some((r) => r.deadline !== deadline)) {
+    db.prepare('DELETE FROM reminder_log WHERE item_id = ?').run(itemId);
+    return true;
+  }
+  return false;
 }
 
 // --- Meeting summary accessors ---

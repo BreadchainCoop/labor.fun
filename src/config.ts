@@ -34,6 +34,10 @@ const envConfig = readEnvFile([
   'LABOR_PROFILE',
   'GITHUB_ORG',
   'SERVICE_USER',
+  'REMINDER_LADDER',
+  'REMINDER_SWEEP_INTERVAL_MS',
+  'REMINDER_TARGET_JID',
+  'REMINDER_ESCALATION_CONTACT',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -216,6 +220,32 @@ export const DISCORD_DM_ROLE_REFRESH_INTERVAL = Math.max(
   parseInt(envVal('DISCORD_DM_ROLE_REFRESH_INTERVAL') || '600000', 10) ||
     600000,
 );
+
+// --- Escalating-deadline reminder engine (#25) ---
+// The escalation ladder: offsets-before-deadline at which a reminder fires,
+// each as a duration string (`w`/`d`/`h`/`m`). The closest (smallest) rung is
+// the "final tick" that loops in the escalation contact; an OVERDUE rung fires
+// once the deadline passes if the item still isn't done. Comma-separated;
+// default T-3w → T-1w → T-3d → T-1d.
+export const REMINDER_LADDER = (envVal('REMINDER_LADDER') || '3w,1w,3d,1d')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+// How often the reminder sweep runs. Rungs are day-scale, so 1h is plenty.
+// Set to 0 to disable the engine entirely.
+export const REMINDER_SWEEP_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('REMINDER_SWEEP_INTERVAL_MS') || '3600000', 10) || 3600000,
+);
+// Where reminders are delivered. Defaults to the shared-KB group's chat (the
+// channel the team already watches) when unset; set to a specific `slack:` /
+// `dc:` / `tg:` JID to override. Owners/escalation contacts are named in the
+// message text since per-person DM isn't available on every channel.
+export const REMINDER_TARGET_JID = envVal('REMINDER_TARGET_JID') || '';
+// Org-wide fallback escalation contact, used for items that don't declare an
+// `escalation_contact` of their own.
+export const REMINDER_ESCALATION_CONTACT =
+  envVal('REMINDER_ESCALATION_CONTACT') || '';
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

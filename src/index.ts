@@ -11,6 +11,11 @@ import {
   isPrivilegedGroup,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
+  REMINDER_ESCALATION_CONTACT,
+  REMINDER_LADDER,
+  REMINDER_SWEEP_INTERVAL_MS,
+  REMINDER_TARGET_JID,
+  SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
@@ -68,6 +73,8 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { startReminderEngine } from './reminder-engine.js';
+import { loadDeadlineItemsFromKb, sharedKbTasksDir } from './kb-task-source.js';
 import './integrations/index.js';
 import { startRegisteredIntegrations } from './integrations/registry.js';
 import { loadProfilePlugins } from './plugin-loader.js';
@@ -904,6 +911,43 @@ async function main(): Promise<void> {
   // Background flows self-register via ./integrations/index.js (mirrors the
   // channel registry). Each checks its own config and no-ops when disabled.
   startRegisteredIntegrations();
+
+  // Escalating-deadline reminder engine (#25). Sweeps the shared KB tasks for
+  // approaching deadlines and posts escalating reminders to the team channel.
+  // Disabled when the sweep interval or ladder is empty.
+  startReminderEngine({
+    intervalMs: REMINDER_SWEEP_INTERVAL_MS,
+    ladderSpecs: REMINDER_LADDER,
+    escalationDefault: REMINDER_ESCALATION_CONTACT || undefined,
+    loadItems: () => loadDeadlineItemsFromKb(),
+    resolveTargetJid: () => {
+      if (REMINDER_TARGET_JID) return REMINDER_TARGET_JID;
+      // Default to the shared-KB group's chat — the channel the team watches.
+      const entry = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === SHARED_KB_GROUP,
+      );
+      return entry?.[0] ?? null;
+    },
+    sendMessage: async (jid, rawText) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'Reminder: no channel owns JID, cannot send');
+        return;
+      }
+      const text = formatOutbound(rawText);
+      if (text) await channel.sendMessage(jid, text);
+    },
+    writeDigest: (markdown) => {
+      const digestPath = path.join(
+        path.dirname(sharedKbTasksDir()),
+        'deadline-digest.md',
+      );
+      const tmp = `${digestPath}.tmp`;
+      fs.mkdirSync(path.dirname(digestPath), { recursive: true });
+      fs.writeFileSync(tmp, markdown);
+      fs.renameSync(tmp, digestPath);
+    },
+  });
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);
