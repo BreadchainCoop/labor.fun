@@ -15,7 +15,9 @@
  * deployment actually hits those limits.
  */
 
+import { GITHUB_SYNC_ISSUE_DEPS } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { logger } from '../logger.js';
 
 const GH_API = 'https://api.github.com/graphql';
 
@@ -55,6 +57,16 @@ export interface NormalizedProjectItem {
   closedAt: string | null;
   /** All custom field values keyed by field name (for future use). */
   extraFields: Record<string, string | number>;
+  /** Dependency edges — issues that block this one (KB ids). → `upstream`. */
+  blockedBy: string[];
+  /** Dependency edges — issues this one blocks (KB ids). → `downstream`. */
+  blocks: string[];
+  /** Parent issue KB id (sub-issue hierarchy), or null. */
+  parent: string | null;
+  /** Child issue KB ids (sub-issue hierarchy). */
+  subIssues: string[];
+  /** Numeric estimate / story points, surfaced from extraFields. */
+  estimate: number | null;
 }
 
 /** Project board metadata, written as `context/projects/GHP-<org>-<n>.md`. */
@@ -97,7 +109,26 @@ export class GitHubProjectsError extends Error {
   }
 }
 
-const PROJECTS_QUERY = `
+// Issue dependency + sub-issue edges (issue #31). `blockedBy`/`blocking` are GA
+// in GitHub's GraphQL; `subIssues`/`parent` need the `GraphQL-Features: sub_issues`
+// request header. Interpolated so we can drop them for the degrade path on
+// instances (older GHES) that lack the fields.
+const ISSUE_EDGES_FRAGMENT = `
+                parent { number repository { nameWithOwner } }
+                subIssues(first: 20) {
+                  totalCount
+                  nodes { number repository { nameWithOwner } }
+                }
+                blockedBy(first: 20) {
+                  totalCount
+                  nodes { number repository { nameWithOwner } }
+                }
+                blocking(first: 20) {
+                  totalCount
+                  nodes { number repository { nameWithOwner } }
+                }`;
+
+const buildProjectsQuery = (includeEdges: boolean): string => `
 query OrgProjects($org: String!) {
   organization(login: $org) {
     projectsV2(first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
@@ -125,7 +156,7 @@ query OrgProjects($org: String!) {
                 closedAt
                 repository { nameWithOwner }
                 assignees(first: 10) { nodes { login } }
-                labels(first: 20) { nodes { name } }
+                labels(first: 20) { nodes { name } }${includeEdges ? ISSUE_EDGES_FRAGMENT : ''}
               }
               ... on PullRequest {
                 number
@@ -181,6 +212,9 @@ query OrgProjects($org: String!) {
 }
 `;
 
+const PROJECTS_QUERY = buildProjectsQuery(true);
+const PROJECTS_QUERY_NO_DEPS = buildProjectsQuery(false);
+
 interface RawFieldValue {
   __typename: string;
   name?: string;
@@ -191,6 +225,11 @@ interface RawFieldValue {
   startDate?: string;
   duration?: number;
   field?: { name?: string };
+}
+
+interface RawIssueRef {
+  number?: number;
+  repository?: { nameWithOwner?: string };
 }
 
 interface RawContent {
@@ -205,6 +244,10 @@ interface RawContent {
   repository?: { nameWithOwner: string };
   assignees?: { nodes: Array<{ login: string }> };
   labels?: { nodes: Array<{ name: string }> };
+  parent?: RawIssueRef | null;
+  subIssues?: { totalCount?: number; nodes: RawIssueRef[] };
+  blockedBy?: { totalCount?: number; nodes: RawIssueRef[] };
+  blocking?: { totalCount?: number; nodes: RawIssueRef[] };
 }
 
 interface RawItem {
@@ -256,6 +299,53 @@ function itemId(
   // raw node id (last segment) so the file is stable across syncs.
   const tail = itemNodeId.split('_').pop() || itemNodeId;
   return `GHD-${slug(org)}-${projectNumber}-${slug(tail)}`;
+}
+
+/**
+ * Build the KB id for a *referenced* issue (a dependency / sub-issue edge),
+ * which only carries `number` + `repository.nameWithOwner`. Uses the TARGET's
+ * own owner/repo so the id matches that issue's own synced file (cross-repo /
+ * cross-org edges line up). Returns null when the target repo is unreadable
+ * (private/redacted) — we have no context to disambiguate, so we drop it.
+ */
+function issueRefId(ref: RawIssueRef | null | undefined): string | null {
+  if (!ref || ref.number == null) return null;
+  const owner = ref.repository?.nameWithOwner;
+  if (!owner || !owner.includes('/')) return null;
+  const [targetOrg, repo] = owner.split('/');
+  return `GH-${slug(targetOrg)}-${slug(repo)}-${ref.number}`;
+}
+
+/** Map an edge connection to deduped KB ids, dropping self-references. */
+function edgeIds(
+  selfId: string,
+  conn: { nodes: RawIssueRef[] } | undefined,
+): string[] {
+  const ids = (conn?.nodes ?? [])
+    .map(issueRefId)
+    .filter((x): x is string => !!x && x !== selfId);
+  return [...new Set(ids)];
+}
+
+const ESTIMATE_FIELD_NAMES = [
+  'estimate',
+  'story points',
+  'points',
+  'sp',
+  'size',
+];
+
+/** Pick a numeric estimate from the captured custom fields (case-insensitive). */
+function pickEstimate(extra: Record<string, string | number>): number | null {
+  for (const [k, v] of Object.entries(extra)) {
+    if (
+      typeof v === 'number' &&
+      ESTIMATE_FIELD_NAMES.includes(k.toLowerCase())
+    ) {
+      return v;
+    }
+  }
+  return null;
 }
 
 interface FlattenedFields {
@@ -409,25 +499,32 @@ export function normalizeItem(
     createdAt: content?.createdAt ?? null,
     closedAt: content?.closedAt ?? null,
     extraFields,
+    blockedBy: edgeIds(id, content?.blockedBy),
+    blocks: edgeIds(id, content?.blocking),
+    parent: issueRefId(content?.parent),
+    subIssues: edgeIds(id, content?.subIssues),
+    estimate: pickEstimate(extraFields),
   };
 }
 
-export async function fetchOrgProjects(
+/** Run the projects query once; returns parsed data or throws on HTTP/GraphQL error. */
+async function runProjectsQuery(
   org: string,
   token: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<OrgSyncResult> {
+  query: string,
+  withEdges: boolean,
+  fetchImpl: typeof fetch,
+): Promise<RawData> {
   const res = await fetchImpl(GH_API, {
     method: 'POST',
     headers: {
       Authorization: `bearer ${token}`,
       'Content-Type': 'application/json',
       'User-Agent': 'breadbrich-engels-project-sync',
+      // sub-issue fields require this opt-in header (harmless once GA).
+      ...(withEdges ? { 'GraphQL-Features': 'sub_issues' } : {}),
     },
-    body: JSON.stringify({
-      query: PROJECTS_QUERY,
-      variables: { org },
-    }),
+    body: JSON.stringify({ query, variables: { org } }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -444,7 +541,58 @@ export async function fetchOrgProjects(
       json.errors,
     );
   }
-  const raw = json.data?.organization?.projectsV2.nodes ?? [];
+  return json.data as RawData;
+}
+
+/** True when a GraphQL error looks like the instance lacks the edge fields. */
+function isEdgeFieldError(err: unknown): boolean {
+  if (!(err instanceof GitHubProjectsError) || !err.graphqlErrors) return false;
+  return err.graphqlErrors.some((e) =>
+    /blockedBy|blocking|subIssues|parent|sub_issues/i.test(e.message),
+  );
+}
+
+export async function fetchOrgProjects(
+  org: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+  includeEdges: boolean = GITHUB_SYNC_ISSUE_DEPS,
+): Promise<OrgSyncResult> {
+  let data: RawData;
+  if (includeEdges) {
+    try {
+      data = await runProjectsQuery(
+        org,
+        token,
+        PROJECTS_QUERY,
+        true,
+        fetchImpl,
+      );
+    } catch (err) {
+      if (!isEdgeFieldError(err)) throw err;
+      // Instance lacks issue dependency / sub-issue fields — degrade gracefully.
+      logger.warn(
+        { org },
+        'GH sync: issue dependency/sub-issue fields unavailable, retrying without edges',
+      );
+      data = await runProjectsQuery(
+        org,
+        token,
+        PROJECTS_QUERY_NO_DEPS,
+        false,
+        fetchImpl,
+      );
+    }
+  } else {
+    data = await runProjectsQuery(
+      org,
+      token,
+      PROJECTS_QUERY_NO_DEPS,
+      false,
+      fetchImpl,
+    );
+  }
+  const raw = data?.organization?.projectsV2.nodes ?? [];
   const projects: NormalizedProject[] = [];
   const items: NormalizedProjectItem[] = [];
   for (const rp of raw) {

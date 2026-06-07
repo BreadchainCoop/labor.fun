@@ -74,7 +74,12 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startReminderEngine } from './reminder-engine.js';
-import { loadDeadlineItemsFromKb, sharedKbTasksDir } from './kb-task-source.js';
+import { startPmOrchestration } from './integrations/pm-orchestration.js';
+import {
+  loadDeadlineItemsFromKb,
+  loadPmTasksFromKb,
+  sharedKbTasksDir,
+} from './kb-task-source.js';
 import './integrations/index.js';
 import { startRegisteredIntegrations } from './integrations/registry.js';
 import { loadProfilePlugins } from './plugin-loader.js';
@@ -947,6 +952,28 @@ async function main(): Promise<void> {
       fs.writeFileSync(tmp, markdown);
       fs.renameSync(tmp, digestPath);
     },
+  });
+
+  // PM orchestration (#31): weekly review of the GitHub-synced + hand-authored
+  // task graph that wakes the agent to re-estimate/re-plan and DM blockers /
+  // overdue owners. Disabled when PM_ORCHESTRATION_INTERVAL_MS=0. Reuses the
+  // scheduler's agent-run closures.
+  startPmOrchestration({
+    registeredGroups: () => registeredGroups,
+    getSessions: () => sessions,
+    queue,
+    onProcess: (groupJid, proc, containerName, groupFolder) =>
+      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    sendMessage: async (jid, rawText) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'PM: no channel owns JID, cannot send');
+        return;
+      }
+      const text = formatOutbound(rawText);
+      if (text) await channel.sendMessage(jid, text);
+    },
+    loadTasks: () => loadPmTasksFromKb(),
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {

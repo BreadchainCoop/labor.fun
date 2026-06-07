@@ -79,9 +79,23 @@ Format:
 
 ## Dependencies
 
-- `upstream`: Task IDs that must complete before this task can start
-- `downstream`: Task IDs that depend on this task completing
+- `upstream`: Task IDs that must complete before this task can start (blocked by)
+- `downstream`: Task IDs that depend on this task completing (this task blocks)
 - **When adding a dependency, update BOTH tasks**
+- GitHub-synced tasks (`GH-*`) populate `upstream`/`downstream` automatically from
+  GitHub issue **blocked-by / blocking** relations, and `estimate` from a ProjectV2
+  number field — so the dependency graph spans hand-authored + synced tasks. Sub-issue
+  hierarchy is captured separately as `gh_parent` / `gh_sub_issues`. Cross-source
+  edges may be one-directional unless mirrored by hand.
+
+## PM orchestration
+
+A weekly background loop reviews this task graph (#31). It flags what's **blocked**
+(an upstream isn't done), **blocking** others (a downstream is still open), **overdue**,
+and **due soon**, plus per-owner load, then wakes the assistant to re-estimate /
+re-plan and DM the people on the critical path. The assistant **acts optimistically**
+(applies the estimate/deadline/status change) and then asks the owner to confirm —
+it does not ask first. Tunable via `PM_*` env vars; see `.env.example`.
 
 ## Deadlines & Reminders
 

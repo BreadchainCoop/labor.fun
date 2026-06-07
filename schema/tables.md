@@ -222,6 +222,17 @@ Idempotency ledger for the escalating-deadline reminder engine (`src/reminder-en
 
 Primary key `(item_id, rung)` is the dedup guarantee.
 
+### pm_dm_log
+
+Throttle ledger for the PM-orchestration loop (`src/integrations/pm-orchestration.ts`, #31). One row per (person, task, reason) the loop has asked the agent to follow up on, so a person isn't re-pinged about the same blocked/overdue item within the cooldown window (`PM_DM_COOLDOWN_MS`).
+
+| Column | Type | Notes |
+|---|---|---|
+| **person** | TEXT PK | KB person name the follow-up targets |
+| **task_id** | TEXT PK | Task the follow-up is about |
+| **reason** | TEXT PK | `blocking` or `overdue` |
+| sent_at | TEXT | ISO timestamp the follow-up was raised |
+
 ## Indices
 
 | Index | Columns | Purpose |
