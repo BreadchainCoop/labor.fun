@@ -888,6 +888,44 @@ describe('SlackChannel', () => {
         text: 'Response',
       });
     });
+
+    // Regression for #46: a reply must land in the thread of the message it
+    // answers, even when a later message in a *different* thread arrived first
+    // and overwrote the per-channel "last thread" anchor.
+    it('replies in the triggering message thread, not the last-seen one', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // First request, in thread A
+      await triggerMessageEvent(
+        createMessageEvent({
+          ts: '1704067201.000000',
+          threadTs: '1704067200.000000', // thread A
+          text: '@Jonesy question A',
+        }),
+      );
+      // Second request arrives in thread B before A is answered — this
+      // overwrites lastThreadTs for the channel.
+      await triggerMessageEvent(
+        createMessageEvent({
+          ts: '1704067301.000000',
+          threadTs: '1704067300.000000', // thread B
+          text: '@Jonesy question B',
+        }),
+      );
+
+      // Reply to request A — must go to thread A despite B being most recent.
+      await channel.sendMessage('slack:C0123456789', 'Answer to A', {
+        replyToMessageId: '1704067201.000000',
+      });
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'Answer to A',
+        thread_ts: '1704067200.000000', // thread A, not B
+      });
+    });
   });
 
   // --- ownsJid ---
