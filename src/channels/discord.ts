@@ -24,6 +24,7 @@ import {
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
+  SendMessageOpts,
 } from '../types.js';
 
 export interface DiscordChannelOpts {
@@ -123,6 +124,13 @@ export class DiscordChannel implements Channel {
   // Latest inbound message per chatJid — used to anchor a thread on the
   // next outbound reply, so every bot response goes into a thread.
   private lastReplyAnchor = new Map<string, Message>();
+  // messageId → inbound Message, so a reply can be anchored to the exact
+  // message that triggered the agent run rather than whatever arrived last
+  // on this jid. Under concurrent traffic (e.g. a second question in another
+  // thread while the agent is still working) the per-jid lastReplyAnchor gets
+  // overwritten, which posted replies in the wrong thread (#46). Capped LRU.
+  private inboundById = new Map<string, Message>();
+  private static readonly INBOUND_BY_ID_MAX = 500;
   // messageId → actual Discord channel id, populated when we route a
   // thread-originated inbound under its parent's jid. Reactions and other
   // per-message operations need the real channel that owns the message,
@@ -338,6 +346,13 @@ export class DiscordChannel implements Channel {
       // Remember this message so the next outbound reply lands in a thread:
       // either the thread it already lives in, or a new thread started on it.
       this.lastReplyAnchor.set(chatJid, message);
+      // Also index by message id so a reply can be pinned to the exact
+      // triggering message (concurrency-safe), with simple LRU eviction.
+      this.inboundById.set(msgId, message);
+      if (this.inboundById.size > DiscordChannel.INBOUND_BY_ID_MAX) {
+        const oldestKey = this.inboundById.keys().next().value;
+        if (oldestKey !== undefined) this.inboundById.delete(oldestKey);
+      }
       // If we re-routed this thread message under its parent's jid, record
       // the message's real channel so reactions/typing target the thread,
       // not the parent. (Map.set re-inserts to the end, giving us oldest-
@@ -498,7 +513,11 @@ export class DiscordChannel implements Channel {
     return dm.id;
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+    opts?: SendMessageOpts,
+  ): Promise<void> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
       return;
@@ -519,7 +538,12 @@ export class DiscordChannel implements Channel {
     }
 
     try {
-      const target = await this.resolveReplyTarget(jid);
+      // Prefer the exact message that triggered this reply (concurrency-safe);
+      // fall back to the per-jid anchor for proactive/agent-initiated sends.
+      const anchorMessage = opts?.replyToMessageId
+        ? this.inboundById.get(opts.replyToMessageId)
+        : undefined;
+      const target = await this.resolveReplyTarget(jid, anchorMessage);
       if (!target || typeof target !== 'object' || !('send' in target)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
         return;
@@ -569,9 +593,17 @@ export class DiscordChannel implements Channel {
    *      thread channel directly.
    *   2. Otherwise, start a new thread on that message (guild text only).
    *   3. Fall back to the parent channel for DMs or when (2) fails.
+   *
+   * `anchorMessage`, when provided, pins resolution to that specific inbound
+   * message (the one being replied to) instead of the per-jid last-inbound
+   * anchor — concurrency-safe so a reply isn't routed into an unrelated
+   * thread that arrived mid-run.
    */
-  private async resolveReplyTarget(jid: string): Promise<unknown> {
-    const anchor = this.lastReplyAnchor.get(jid);
+  private async resolveReplyTarget(
+    jid: string,
+    anchorMessage?: Message,
+  ): Promise<unknown> {
+    const anchor = anchorMessage ?? this.lastReplyAnchor.get(jid);
     if (anchor) {
       const anchorChannel = anchor.channel as { isThread?: () => boolean };
       const anchorIsThread =
