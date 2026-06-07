@@ -4,10 +4,12 @@ import { _initTestDatabase, recordPmDm, getRecentPmDms } from './db.js';
 import {
   classify,
   isBriefEmpty,
+  isPmCommand,
   dmCandidates,
   buildPmBrief,
   type PmTask,
 } from './pm-orchestration.js';
+import { buildPmRun } from './integrations/pm-orchestration.js';
 
 const DAY = 86_400_000;
 const DUE_SOON = 7 * DAY;
@@ -134,6 +136,60 @@ describe('dmCandidates', () => {
       taskId: 'C',
       reason: 'overdue',
     });
+  });
+});
+
+describe('isPmCommand', () => {
+  it('matches PM trigger phrases', () => {
+    for (const s of [
+      '/pm',
+      '@Bot /pm please',
+      'run pm orchestration',
+      'kick off the PM routine',
+    ]) {
+      expect(isPmCommand(s)).toBe(true);
+    }
+  });
+  it('does not match unrelated messages', () => {
+    for (const s of ['what is the pmf?', 'compute the sum', 'ping me', '']) {
+      expect(isPmCommand(s)).toBe(false);
+    }
+  });
+});
+
+describe('buildPmBrief — unassigned handling', () => {
+  it('surfaces unowned overdue/blocking items and names the PM lead', () => {
+    const tasks = [
+      task({ id: 'U', owners: [], deadline: '2026-06-01' }), // overdue, no owner
+    ];
+    const c = classify(tasks, NOW, DUE_SOON);
+    const md = buildPmBrief(c, [], [], NOW, 'Dana');
+    expect(md).toContain('Unassigned — needs an owner');
+    expect(md).toContain('- U');
+    expect(md).toContain('Dana');
+  });
+});
+
+describe('buildPmRun (integration)', () => {
+  beforeEach(() => _initTestDatabase());
+
+  it('composes a prompt and fresh candidates from the task list', () => {
+    const tasks = [
+      task({ id: 'A', owners: ['Alice'], downstream: ['B'] }),
+      task({ id: 'B', owners: ['Bob'], status: 'open' }),
+    ];
+    const run = buildPmRun(tasks, NOW);
+    expect(run.isEmpty).toBe(false);
+    expect(run.prompt).toContain('PM brief');
+    expect(run.fresh).toContainEqual({
+      person: 'Alice',
+      taskId: 'A',
+      reason: 'blocking',
+    });
+  });
+
+  it('reports empty when nothing is actionable', () => {
+    expect(buildPmRun([task({ id: 'X' })], NOW).isEmpty).toBe(true);
   });
 });
 

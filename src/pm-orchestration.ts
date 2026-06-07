@@ -66,6 +66,20 @@ function numericEstimate(estimate?: string): number {
 }
 
 /**
+ * Whether a chat message is a request to run the PM orchestration routine.
+ * Matches `/pm`, "pm orchestration", or "pm routine" (case-insensitive),
+ * after any leading @-mention/trigger. Kept narrow to avoid false positives.
+ */
+export function isPmCommand(text: string): boolean {
+  const t = (text || '').toLowerCase();
+  return (
+    /(^|\s)\/pm(\b|$)/.test(t) ||
+    /\bpm\s+orchestration\b/.test(t) ||
+    /\bpm\s+routine\b/.test(t)
+  );
+}
+
+/**
  * Classify the task list. `nowMs` and `dueSoonMs` are injected so the result is
  * deterministic. Dangling edge ids (pointing at tasks not in the list) are
  * ignored; cycles are harmless (each task is judged independently, no traversal).
@@ -163,6 +177,7 @@ export function buildPmBrief(
   candidates: DmCandidate[],
   recentlyNotified: DmCandidate[],
   nowMs: number,
+  pmLead?: string,
 ): string {
   const lines: string[] = [
     `# PM brief — ${new Date(nowMs).toISOString().slice(0, 10)}`,
@@ -193,6 +208,28 @@ export function buildPmBrief(
     lines.push('## Due soon', '');
     for (const t of c.dueSoon) lines.push(line(t, ` — due ${t.deadline}`));
     lines.push('');
+  }
+
+  // Unassigned but actionable (overdue or blocking with no owner). These have
+  // no one to DM — surface them so the agent can find/assign an owner or raise
+  // them to the PM lead / channel rather than letting them fall through.
+  const unownedSeen = new Set<string>();
+  const unowned = [...c.overdue, ...c.blocking].filter((t) => {
+    if (t.owners.length > 0 || unownedSeen.has(t.id)) return false;
+    unownedSeen.add(t.id);
+    return true;
+  });
+  if (unowned.length) {
+    lines.push('## Unassigned — needs an owner (overdue or blocking)', '');
+    for (const t of unowned) {
+      lines.push(line(t, t.deadline ? ` — due ${t.deadline}` : ' — blocking'));
+    }
+    lines.push(
+      pmLead
+        ? `> No owner to DM. Find/assign an owner, or raise these to the PM lead **${pmLead}** and post them in this channel.`
+        : '> No owner to DM. Find/assign an owner, or post these in this channel so someone picks them up.',
+      '',
+    );
   }
 
   lines.push('## Per-owner load (open tasks / est. points)', '');
