@@ -66,11 +66,13 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
-  // message id → forum topic (message_thread_id), so a reply can be pinned to
-  // the topic of the exact message that triggered the run. Without this a
-  // concurrent message in another topic would misroute the reply (#46). Since
-  // outbound only carried the jid before, replies didn't target a topic at
-  // all; this also wires that up. Capped LRU.
+  // "<jid>:<message id>" → forum topic (message_thread_id), so a reply can be
+  // pinned to the topic of the exact message that triggered the run. Without
+  // this a concurrent message in another topic would misroute the reply (#46).
+  // Keyed by jid + message id (not message id alone) because a Telegram
+  // message_id is only unique within a chat and one bot serves many chats.
+  // Since outbound only carried the jid before, replies didn't target a topic
+  // at all; this also wires that up. Capped LRU.
   private threadIdById = new Map<string, string>();
   private static readonly THREAD_ID_BY_ID_MAX = 500;
 
@@ -179,7 +181,7 @@ export class TelegramChannel implements Channel {
       const msgId = ctx.message.message_id.toString();
       const threadId = ctx.message.message_thread_id;
       if (threadId !== undefined) {
-        this.threadIdById.set(msgId, threadId.toString());
+        this.threadIdById.set(`${chatJid}:${msgId}`, threadId.toString());
         if (this.threadIdById.size > TelegramChannel.THREAD_ID_BY_ID_MAX) {
           const oldestKey = this.threadIdById.keys().next().value;
           if (oldestKey !== undefined) this.threadIdById.delete(oldestKey);
@@ -419,7 +421,7 @@ export class TelegramChannel implements Channel {
       // (concurrency-safe); proactive sends with no replyToMessageId go to the
       // chat's general area.
       const threadId = opts?.replyToMessageId
-        ? this.threadIdById.get(opts.replyToMessageId)
+        ? this.threadIdById.get(`${jid}:${opts.replyToMessageId}`)
         : undefined;
       const options = threadId
         ? { message_thread_id: parseInt(threadId, 10) }
