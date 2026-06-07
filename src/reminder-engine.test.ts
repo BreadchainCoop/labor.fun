@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { _initTestDatabase, recordReminderFired } from './db.js';
 import {
   parseDurationToMs,
+  parseDeadline,
   parseLadder,
   selectRung,
   isDoneStatus,
@@ -31,6 +32,22 @@ describe('parseDurationToMs', () => {
     expect(parseDurationToMs('')).toBe(0);
     expect(parseDurationToMs('soon')).toBe(0);
     expect(parseDurationToMs('3y')).toBe(0);
+  });
+});
+
+describe('parseDeadline', () => {
+  it('treats a bare date as end-of-day UTC, not start', () => {
+    expect(parseDeadline('2026-07-01')).toBe(
+      Date.parse('2026-07-01T23:59:59.999Z'),
+    );
+  });
+  it('passes through full datetimes unchanged', () => {
+    expect(parseDeadline('2026-07-01T08:30:00Z')).toBe(
+      Date.parse('2026-07-01T08:30:00Z'),
+    );
+  });
+  it('is NaN for garbage', () => {
+    expect(Number.isNaN(parseDeadline('whenever'))).toBe(true);
   });
 });
 
@@ -105,7 +122,9 @@ describe('runReminderSweep', () => {
     return {
       id: 'TASK-001',
       title: 'Ship the thing',
-      deadline: '2026-07-01',
+      // Explicit datetime so the rung math here is independent of the
+      // date-only "end of day" normalization (covered separately below).
+      deadline: '2026-07-01T00:00:00Z',
       owners: ['Alice'],
       status: 'open',
       ...overrides,
@@ -183,7 +202,7 @@ describe('runReminderSweep', () => {
     expect(r2.fired).toBe(1);
   });
 
-  it('does not re-send on transient send failure', async () => {
+  it('retries on the next sweep after a transient send failure', async () => {
     const send = vi
       .fn()
       .mockRejectedValueOnce(new Error('network'))
@@ -220,9 +239,9 @@ describe('runReminderSweep', () => {
   it('re-fires after a deadline moves later', async () => {
     const send = vi.fn().mockResolvedValue(undefined);
     // Pretend the 1d rung already fired against the original deadline.
-    recordReminderFired('TASK-001', '1d', '2026-07-01');
+    recordReminderFired('TASK-001', '1d', '2026-07-01T00:00:00Z');
     // Deadline moved out a month; now we're 2 days before the NEW deadline.
-    const newDeadline = '2026-08-01';
+    const newDeadline = '2026-08-01T00:00:00Z';
     const newMs = Date.parse(newDeadline);
     await runReminderSweep({
       ...base,
