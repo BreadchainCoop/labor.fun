@@ -35,7 +35,10 @@ function toStringArray(value: unknown): string[] {
 function firstString(...values: unknown[]): string | undefined {
   for (const v of values) {
     if (typeof v === 'string' && v.trim()) return v.trim();
-    // gray-matter parses bare dates into Date objects.
+    // gray-matter parses bare numbers (e.g. `estimate: 3`) into JS numbers and
+    // bare dates into Date objects — coerce both so numeric/date frontmatter
+    // isn't silently dropped.
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
     if (v instanceof Date && !Number.isNaN(v.getTime())) {
       return v.toISOString().slice(0, 10);
     }
