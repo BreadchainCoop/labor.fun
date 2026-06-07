@@ -203,4 +203,27 @@ describe('handleRequestIpc — fetch_discord_history', () => {
     expect(res.ok).toBe(false);
     expect(String(res.error)).toMatch(/Unknown request type/);
   });
+
+  it('drops a request with a path-traversal requestId without writing outside responses/', async () => {
+    setSenderCtx();
+    const fetchImpl = vi.fn();
+    const deps = makeDeps(fetchImpl);
+    const evil = '../../../../tmp/pwned';
+    const escapedTarget = path.join(baseDir, 'tmp', 'pwned.json');
+
+    await handleRequestIpc(
+      { type: 'fetch_discord_history', requestId: evil, channelId: '123' },
+      { sourceGroup: SOURCE_GROUP, isMain: true, ipcBaseDir: baseDir },
+      deps,
+    );
+
+    // No fetch, and nothing written anywhere — the request is dropped.
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fs.existsSync(escapedTarget)).toBe(false);
+    const responsesDir = path.join(baseDir, SOURCE_GROUP, 'responses');
+    const written = fs.existsSync(responsesDir)
+      ? fs.readdirSync(responsesDir)
+      : [];
+    expect(written).toEqual([]);
+  });
 });

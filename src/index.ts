@@ -318,22 +318,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  // Write sender context to IPC so the container agent knows who it's talking to
+  // Write sender context to IPC so the container agent knows who it's talking
+  // to — and, crucially, CLEAR any stale context when this run has no
+  // validated sender. The orchestrator's IPC handlers treat the presence of
+  // sender_context.json as proof of an allowlisted human; leaving a previous
+  // run's file in place would let a later scheduled/unauthenticated run
+  // inherit that identity and pass allowlist gates (e.g. fetch_discord_history,
+  // modify_kb_file). Fail closed: write when present, unlink when absent.
   const lastMsg = missedMessages[missedMessages.length - 1];
-  if (lastMsg && !lastMsg.is_from_me) {
-    const channelName = chatJid.startsWith('tg:')
-      ? 'telegram'
-      : chatJid.startsWith('slack:')
-        ? 'slack'
-        : 'unknown';
-    const senderCtx = getSenderContext(lastMsg.sender, channelName);
+  const senderCtx =
+    lastMsg && !lastMsg.is_from_me
+      ? getSenderContext(
+          lastMsg.sender,
+          chatJid.startsWith('tg:')
+            ? 'telegram'
+            : chatJid.startsWith('slack:')
+              ? 'slack'
+              : 'unknown',
+        )
+      : null;
+  {
+    const ipcInputDir = resolveGroupIpcPath(group.folder) + '/input';
+    const senderCtxPath = path.join(ipcInputDir, 'sender_context.json');
+    fs.mkdirSync(ipcInputDir, { recursive: true });
     if (senderCtx) {
-      const ipcInputDir = resolveGroupIpcPath(group.folder) + '/input';
-      fs.mkdirSync(ipcInputDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(ipcInputDir, 'sender_context.json'),
-        JSON.stringify(senderCtx),
-      );
+      fs.writeFileSync(senderCtxPath, JSON.stringify(senderCtx));
+    } else {
+      try {
+        fs.unlinkSync(senderCtxPath);
+      } catch {
+        /* nothing to clear */
+      }
     }
   }
 
@@ -1008,8 +1023,8 @@ async function main(): Promise<void> {
       const discord = channels.find(
         (c) =>
           c.name === 'discord' &&
-          (c as unknown as { fetchChannelHistory?: unknown })
-            .fetchChannelHistory !== undefined,
+          typeof (c as unknown as { fetchChannelHistory?: unknown })
+            .fetchChannelHistory === 'function',
       ) as unknown as
         | {
             fetchChannelHistory: (

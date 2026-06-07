@@ -667,6 +667,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
       // back to `responses/<requestId>.json` for the agent to read. Each
       // request file is consumed (deleted) on read, then handled
       // asynchronously so a slow fetch never blocks the watcher loop.
+      //
+      // Handlers run concurrently but are capped at MAX_INFLIGHT_REQUESTS to
+      // bound Discord API pagination fan-out (rate-limit / memory pressure).
+      // When at capacity we leave remaining request files untouched so the
+      // next poll tick picks them up — natural backpressure.
       const requestsDir = path.join(ipcBaseDir, sourceGroup, 'requests');
       try {
         if (fs.existsSync(requestsDir)) {
@@ -674,6 +679,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
             .readdirSync(requestsDir)
             .filter((f) => f.endsWith('.json'));
           for (const file of requestFiles) {
+            if (inFlightRequests >= MAX_INFLIGHT_REQUESTS) break;
             const filePath = path.join(requestsDir, file);
             let data: Record<string, unknown>;
             try {
@@ -683,12 +689,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 { file, sourceGroup, err },
                 'Error parsing IPC request — moving to errors',
               );
-              const errorDir = path.join(ipcBaseDir, 'errors');
-              fs.mkdirSync(errorDir, { recursive: true });
-              fs.renameSync(
-                filePath,
-                path.join(errorDir, `${sourceGroup}-${file}`),
-              );
+              // Best-effort quarantine. If the move itself fails, delete the
+              // file so a poison request can't be retried every tick.
+              try {
+                const errorDir = path.join(ipcBaseDir, 'errors');
+                fs.mkdirSync(errorDir, { recursive: true });
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
+              } catch (moveErr) {
+                logger.warn(
+                  { file, sourceGroup, moveErr },
+                  'Failed to quarantine bad request — unlinking instead',
+                );
+                try {
+                  fs.unlinkSync(filePath);
+                } catch {
+                  /* already gone */
+                }
+              }
               continue;
             }
             // Consume immediately so the next tick can't reprocess it.
@@ -698,6 +718,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
               /* already gone */
             }
             // Fire-and-forget the handler; it writes its own response file.
+            // Release the in-flight slot when it settles (success or throw).
+            inFlightRequests++;
             void handleRequestIpc(
               data,
               {
@@ -706,7 +728,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 ipcBaseDir,
               },
               deps,
-            );
+            ).finally(() => {
+              inFlightRequests--;
+            });
           }
         }
       } catch (err) {
@@ -737,9 +761,26 @@ export function startIpcWatcher(deps: IpcDeps): void {
 const DISCORD_HISTORY_MAX = 2000;
 
 /**
+ * Cap on concurrently-running request handlers across all groups. Bounds
+ * Discord API pagination fan-out; excess requests wait for the next poll tick.
+ */
+const MAX_INFLIGHT_REQUESTS = 4;
+let inFlightRequests = 0;
+
+/**
+ * A request id must be a plain filename token — it's interpolated into the
+ * response path (`responses/<requestId>.json`). Rejecting anything with path
+ * separators, dots, or other unsafe characters prevents a crafted request
+ * from steering the orchestrator's write outside the responses dir.
+ */
+const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
  * Write a request's response into the group's `responses/` dir, atomically.
- * Best-effort chowns to the service user (mirrors the KB-write path) so the
- * container — which may run under a different uid — can read it back.
+ * The temp file is given an explicit world-readable mode and chowned to the
+ * service user (mirrors the KB-write path) *before* the rename, so the agent
+ * — which may run under a different uid — never observes a present-but-
+ * unreadable file in the window between rename and a post-hoc chown.
  */
 function writeIpcResponse(
   ipcBaseDir: string,
@@ -751,16 +792,18 @@ function writeIpcResponse(
   fs.mkdirSync(responsesDir, { recursive: true });
   const outPath = path.join(responsesDir, `${requestId}.json`);
   const tmpPath = `${outPath}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(payload));
-  fs.renameSync(tmpPath, outPath);
+  // 0o644: readable by the container regardless of a restrictive host umask.
+  fs.writeFileSync(tmpPath, JSON.stringify(payload), { mode: 0o644 });
   const ids = getKbOwnerIds();
   if (ids && process.getuid?.() !== ids.uid) {
     try {
-      fs.chownSync(outPath, ids.uid, ids.gid);
+      fs.chownSync(tmpPath, ids.uid, ids.gid);
     } catch {
       /* best-effort; same uid in prod, so usually a no-op */
     }
   }
+  // Rename last — the agent only ever sees the final, owned, readable file.
+  fs.renameSync(tmpPath, outPath);
 }
 
 /**
@@ -774,14 +817,22 @@ export async function handleRequestIpc(
   ctx: { sourceGroup: string; isMain: boolean; ipcBaseDir: string },
   deps: IpcDeps,
 ): Promise<void> {
+  // requestId is interpolated into the response file path, so it must be a
+  // safe filename token — reject path separators / traversal outright. An
+  // invalid id is dropped (no response written): we have nowhere safe to put
+  // one, and a well-behaved agent never produces such an id.
   const requestId =
-    typeof data.requestId === 'string' && data.requestId.trim() !== ''
+    typeof data.requestId === 'string' && SAFE_REQUEST_ID.test(data.requestId)
       ? data.requestId
       : null;
   if (!requestId) {
     logger.warn(
-      { sourceGroup: ctx.sourceGroup, type: data.type },
-      'Request IPC missing requestId — cannot respond, dropping',
+      {
+        sourceGroup: ctx.sourceGroup,
+        type: data.type,
+        requestId: data.requestId,
+      },
+      'Request IPC missing or unsafe requestId — cannot respond, dropping',
     );
     return;
   }
@@ -833,9 +884,15 @@ export async function handleRequestIpc(
       rawLimit !== undefined
         ? Math.min(Math.max(rawLimit, 1), DISCORD_HISTORY_MAX)
         : undefined;
-    const before = typeof data.before === 'string' ? data.before : undefined;
-    const sinceIso =
-      typeof data.sinceIso === 'string' ? data.sinceIso : undefined;
+    // Trim and coerce blank strings to undefined — an empty `before`/`since`
+    // would otherwise reach Discord as a malformed cursor and error opaquely.
+    const trimToUndef = (v: unknown): string | undefined => {
+      if (typeof v !== 'string') return undefined;
+      const t = v.trim();
+      return t === '' ? undefined : t;
+    };
+    const before = trimToUndef(data.before);
+    const sinceIso = trimToUndef(data.sinceIso);
 
     const messages = await deps.fetchDiscordHistory(channelId, {
       limit,
