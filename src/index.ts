@@ -282,8 +282,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // from chat (e.g. "@<bot> run pm orchestration" / "/pm"). Replace the normal
   // conversational turn with the deterministic PM brief so the agent runs the
   // routine here, in this chat, and acts per the pm-orchestration skill.
+  // Gated on the sender being allowlisted — the routine has GitHub/KB side
+  // effects and spends API credits, so it must not be invokable by anyone.
+  const pmAllowlistCfg = loadSenderAllowlist();
   const pmTriggered = missedMessages.some(
-    (m) => !m.is_from_me && isPmCommand(m.content),
+    (m) =>
+      !m.is_from_me &&
+      isPmCommand(m.content) &&
+      isTriggerAllowed(chatJid, m.sender, pmAllowlistCfg),
   );
   let prompt: string;
   if (pmTriggered) {
