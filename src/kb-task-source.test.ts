@@ -3,7 +3,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { loadDeadlineItemsFromKb } from './kb-task-source.js';
+import {
+  loadDeadlineItemsFromKb,
+  loadPmTasksFromKb,
+} from './kb-task-source.js';
 
 let dir: string;
 
@@ -111,5 +114,39 @@ body`,
     writeTask('bad.md', `---\ntitle: [unterminated\ndeadline: 2026-07-01`);
     const items = loadDeadlineItemsFromKb(dir);
     expect(items.some((i) => i.title === 'Good')).toBe(true);
+  });
+});
+
+describe('loadPmTasksFromKb', () => {
+  it('reads dependency edges and a numeric estimate (GitHub-synced shape)', () => {
+    // `estimate` is a bare YAML number, as the GitHub sync emits it.
+    writeTask(
+      'GH-Org-repo-1.md',
+      `---
+id: GH-Org-repo-1
+title: Synced
+status: open
+owners: [Alice]
+upstream: [GH-Org-repo-2]
+downstream: [GH-Org-repo-3]
+estimate: 5
+---
+body`,
+    );
+    const [t] = loadPmTasksFromKb(dir);
+    expect(t).toMatchObject({
+      id: 'GH-Org-repo-1',
+      upstream: ['GH-Org-repo-2'],
+      downstream: ['GH-Org-repo-3'],
+      estimate: '5', // numeric frontmatter coerced, not dropped
+    });
+  });
+
+  it('includes tasks without a deadline (PM graph is date-independent)', () => {
+    writeTask(
+      'TASK-001.md',
+      `---\nid: TASK-001\ntitle: No date\nstatus: open\n---\n`,
+    );
+    expect(loadPmTasksFromKb(dir)).toHaveLength(1);
   });
 });
