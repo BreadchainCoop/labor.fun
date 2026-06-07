@@ -89,12 +89,12 @@ export interface TaskRunLog {
 export interface SendMessageOpts {
   /**
    * ID of the inbound message this send is replying to. Thread-aware channels
-   * (Discord, Slack) use it to route the reply into that specific message's
-   * thread, instead of a per-channel "last inbound" anchor that a concurrent
-   * message in another thread can overwrite between the trigger and the reply
-   * (which posted answers in the wrong thread under concurrent load). Omitted
-   * for proactive/agent-initiated sends, which fall back to channel-level
-   * routing.
+   * (Discord threads, Slack threads, Telegram forum topics) use it to route
+   * the reply into that specific message's thread/topic, instead of a
+   * per-channel "last inbound" anchor that a concurrent message in another
+   * thread can overwrite between the trigger and the reply (which posted
+   * answers in the wrong thread under concurrent load). Omitted for
+   * proactive/agent-initiated sends, which fall back to channel-level routing.
    */
   replyToMessageId?: string;
 }

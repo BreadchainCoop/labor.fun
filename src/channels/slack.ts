@@ -62,11 +62,12 @@ export class SlackChannel implements Channel {
   private userNameCache = new Map<string, string>();
   // Track the latest thread_ts per channel so outbound messages reply in-thread
   private lastThreadTs = new Map<string, string>();
-  // message ts → its thread_ts, so a reply can be pinned to the thread of the
-  // exact message that triggered the run rather than whatever arrived last on
-  // this channel. The per-channel lastThreadTs gets overwritten by a
-  // concurrent message in another thread, which posted replies in the wrong
-  // thread (#46). Capped LRU.
+  // "<jid>:<message ts>" → its thread_ts, so a reply can be pinned to the
+  // thread of the exact message that triggered the run rather than whatever
+  // arrived last on this channel. The per-channel lastThreadTs gets overwritten
+  // by a concurrent message in another thread, which posted replies in the
+  // wrong thread (#46). Keyed by jid + ts (not ts alone) since a ts is only
+  // meaningful within its channel. Capped LRU.
   private threadTsById = new Map<string, string>();
   private static readonly THREAD_TS_BY_ID_MAX = 500;
 
@@ -299,9 +300,10 @@ export class SlackChannel implements Channel {
       const threadTs = (msg as GenericMessageEvent).thread_ts;
       if (threadTs && threadTs !== msg.ts) {
         this.lastThreadTs.set(jid, threadTs);
-        // Index by message id (ts) so a reply can be pinned to this exact
-        // message's thread regardless of what else arrives concurrently.
-        this.threadTsById.set(msg.ts, threadTs);
+        // Index by jid + message id (ts) so a reply can be pinned to this exact
+        // message's thread regardless of what else arrives concurrently, and
+        // without colliding with an identical ts in another channel.
+        this.threadTsById.set(`${jid}:${msg.ts}`, threadTs);
         if (this.threadTsById.size > SlackChannel.THREAD_TS_BY_ID_MAX) {
           const oldestKey = this.threadTsById.keys().next().value;
           if (oldestKey !== undefined) this.threadTsById.delete(oldestKey);
@@ -366,7 +368,7 @@ export class SlackChannel implements Channel {
     // proactive/agent-initiated sends. A top-level trigger has no thread entry,
     // so the reply correctly posts at the channel root.
     const threadTs = opts?.replyToMessageId
-      ? this.threadTsById.get(opts.replyToMessageId)
+      ? this.threadTsById.get(`${jid}:${opts.replyToMessageId}`)
       : this.lastThreadTs.get(jid);
     const baseOpts: { channel: string; text?: string; thread_ts?: string } = {
       channel: channelId,
