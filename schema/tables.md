@@ -209,6 +209,19 @@ Action items extracted from meeting transcripts that need coordinator approval b
 | resulting_task_id | TEXT | TASK-NNN id created on approval |
 | rejection_reason | TEXT | Optional reason given by coordinator |
 
+### reminder_log
+
+Idempotency ledger for the escalating-deadline reminder engine (`src/reminder-engine.ts`). One row per (item, ladder rung) that has already fired, so the periodic sweep sends each rung at most once.
+
+| Column | Type | Notes |
+|---|---|---|
+| **item_id** | TEXT PK | Deadline-bearing item id (e.g. `TASK-001`) |
+| **rung** | TEXT PK | Ladder label that fired (`3w`, `1w`, `3d`, `1d`, `OVERDUE`) |
+| deadline | TEXT | Deadline this fire was computed against; a change resets the item's rungs |
+| fired_at | TEXT | ISO timestamp the reminder was sent |
+
+Primary key `(item_id, rung)` is the dedup guarantee.
+
 ## Indices
 
 | Index | Columns | Purpose |
