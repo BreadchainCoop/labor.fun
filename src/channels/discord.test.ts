@@ -912,6 +912,77 @@ describe('DiscordChannel', () => {
     });
   });
 
+  // --- Concurrent reply routing (#46) ---
+
+  describe('concurrent reply routing (#46)', () => {
+    // A guild (non-thread) message the bot replies to by starting a thread on
+    // it. Spies let us assert which message's thread the reply used.
+    function guildMessage(messageId: string) {
+      const threadSend = vi.fn().mockResolvedValue({ id: `sent_${messageId}` });
+      const startThread = vi.fn().mockResolvedValue({
+        isThread: () => true,
+        send: threadSend,
+      });
+      return {
+        channelId: '1234567890123456',
+        id: messageId,
+        content: `question ${messageId}`,
+        createdAt: new Date('2024-01-01T00:00:00.000Z'),
+        author: {
+          id: '55512345',
+          username: 'alice',
+          displayName: 'Alice',
+          bot: false,
+        },
+        member: null,
+        guild: { name: 'Test Server' },
+        startThread,
+        channel: {
+          name: 'general',
+          isThread: () => false,
+          messages: { fetch: vi.fn() },
+        },
+        mentions: { users: new Map() },
+        attachments: new Map(),
+        reference: null,
+      };
+    }
+
+    it('replies in the triggering message thread, not the last-seen one', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const msgA = guildMessage('msg_A');
+      const msgB = guildMessage('msg_B');
+
+      // Two questions land on the same channel jid before the first is
+      // answered; msgB overwrites the per-jid lastReplyAnchor.
+      await triggerMessage(msgA);
+      await triggerMessage(msgB);
+
+      // Reply to A — must start a thread on A, never on B.
+      await channel.sendMessage('dc:1234567890123456', 'Answer to A', {
+        replyToMessageId: 'msg_A',
+      });
+
+      expect(msgA.startThread).toHaveBeenCalledTimes(1);
+      expect(msgB.startThread).not.toHaveBeenCalled();
+    });
+
+    it('falls back to channel resolution for proactive sends (no trigger id)', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('dc:1234567890123456', 'Proactive');
+
+      expect(currentClient().channels.fetch).toHaveBeenCalledWith(
+        '1234567890123456',
+      );
+    });
+  });
+
   // --- ownsJid ---
 
   describe('ownsJid', () => {

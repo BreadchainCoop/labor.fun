@@ -356,7 +356,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        // Anchor the reply to the message that triggered this run so it lands
+        // in the right thread even if another message arrived (in a different
+        // thread/conversation) while the agent was working. Without this the
+        // channel resolves the target from a mutable "last inbound" slot that
+        // the concurrent message overwrites, posting the reply in the wrong
+        // place. See #46.
+        await channel.sendMessage(chatJid, text, {
+          replyToMessageId: triggerMessageId,
+        });
         outputSentToUser = true;
         outputLength += text.length;
       }
