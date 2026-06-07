@@ -1,4 +1,5 @@
 import {
+  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
@@ -51,6 +52,12 @@ export interface DiscordHistoryMessage {
   content: string;
   timestamp: string; // ISO 8601
   attachments: string[]; // filename | url, one per attachment
+  /**
+   * Present when the message came from a thread/forum post — carries the
+   * thread's id and title so a reader can attribute and group by post. Absent
+   * for messages read directly from a text channel.
+   */
+  thread?: { id: string; name: string };
 }
 
 export interface FetchChannelHistoryOpts {
@@ -70,6 +77,45 @@ export interface FetchChannelHistoryOpts {
 const HISTORY_HARD_MAX = 2000;
 /** Discord's per-request page size limit for channel.messages.fetch. */
 const HISTORY_PAGE_SIZE = 100;
+/**
+ * Cap on archived-thread enumeration pages for a forum (100 threads/page).
+ * Bounds work on forums with a deep archive; we log when the cap is hit.
+ */
+const FORUM_ARCHIVED_PAGE_CAP = 20;
+
+/** Minimal shape of a discord.js message manager used for pagination. */
+interface MessagesManagerLike {
+  fetch: (q: {
+    limit: number;
+    before?: string;
+  }) => Promise<Map<string, Parameters<typeof toHistoryMessage>[0]>>;
+}
+
+/** Minimal shape of a thread channel we read messages from. */
+interface ThreadLike {
+  id: string;
+  name?: string | null;
+  parentId?: string | null;
+  archiveTimestamp?: number | null;
+  archivedAt?: { getTime(): number } | null;
+  messages: MessagesManagerLike;
+}
+
+/** Minimal shape of a forum/media channel's thread manager. */
+interface ForumLike {
+  id: string;
+  threads: {
+    fetchActive: () => Promise<{ threads: { values(): Iterable<ThreadLike> } }>;
+    fetchArchived: (q: {
+      type?: 'public' | 'private';
+      limit?: number;
+      before?: string;
+    }) => Promise<{
+      threads: { values(): Iterable<ThreadLike> };
+      hasMore?: boolean;
+    }>;
+  };
+}
 
 /**
  * JID prefix for sending a Discord DM directly to a user by their Discord
@@ -153,19 +199,24 @@ export async function userHasAllowedRole(
  * partial shapes returned by `messages.fetch` (and easy to construct in
  * tests) — every field has a safe fallback.
  */
-export function toHistoryMessage(m: {
-  id: string;
-  content?: string | null;
-  createdTimestamp?: number;
-  author?: {
-    id?: string;
-    bot?: boolean;
-    username?: string;
-    displayName?: string;
-  } | null;
-  member?: { displayName?: string } | null;
-  attachments?: { values(): Iterable<{ name?: string | null; url?: string }> };
-}): DiscordHistoryMessage {
+export function toHistoryMessage(
+  m: {
+    id: string;
+    content?: string | null;
+    createdTimestamp?: number;
+    author?: {
+      id?: string;
+      bot?: boolean;
+      username?: string;
+      displayName?: string;
+    } | null;
+    member?: { displayName?: string } | null;
+    attachments?: {
+      values(): Iterable<{ name?: string | null; url?: string }>;
+    };
+  },
+  thread?: { id: string; name: string },
+): DiscordHistoryMessage {
   const attachments = m.attachments
     ? [...m.attachments.values()].map((a) => a.name || a.url || 'attachment')
     : [];
@@ -181,6 +232,7 @@ export function toHistoryMessage(m: {
     content: m.content ?? '',
     timestamp: new Date(m.createdTimestamp ?? 0).toISOString(),
     attachments,
+    ...(thread ? { thread } : {}),
   };
 }
 
@@ -701,10 +753,16 @@ export class DiscordChannel implements Channel {
   }
 
   /**
-   * Fetch a channel's recent message history, paginating backward from the
-   * newest message (or from `before`). Returns oldest-first so a reader can
-   * scan chronologically. Bounded by `limit` (hard cap {@link HISTORY_HARD_MAX})
-   * and, optionally, by `sinceIso` (stop once messages predate that instant).
+   * Fetch a channel's recent message history, returning messages oldest-first
+   * so a reader can scan chronologically. Bounded by `limit` (hard cap
+   * {@link HISTORY_HARD_MAX}) and, optionally, by `sinceIso` (stop once
+   * messages predate that instant).
+   *
+   * **Forum / media channels** (which hold no messages of their own — content
+   * lives in per-post threads) are handled transparently: the threads are
+   * enumerated (active + archived) and their messages aggregated, each tagged
+   * with its originating `thread`. For a plain text channel or thread, the
+   * channel's own messages are paginated backward (from `before` if given).
    *
    * The bot must be able to see the channel (be in the guild and hold Read
    * Message History permission); otherwise discord.js throws and the caller
@@ -726,52 +784,192 @@ export class DiscordChannel implements Channel {
     }
 
     const channel = await this.client.channels.fetch(channelId);
-    if (!channel || !('messages' in channel)) {
-      throw new Error(
-        `Channel ${channelId} not found or has no readable message history`,
+    if (!channel) {
+      throw new Error(`Channel ${channelId} not found`);
+    }
+
+    // Forum / media channels carry no messages directly — their content lives
+    // in threads (one per post). Enumerate and aggregate across those.
+    const channelType = (channel as { type?: number }).type;
+    if (
+      channelType === ChannelType.GuildForum ||
+      channelType === ChannelType.GuildMedia
+    ) {
+      return this.fetchForumHistory(
+        channel as unknown as ForumLike,
+        channelId,
+        {
+          limit,
+          sinceMs,
+          sinceIso: opts.sinceIso,
+        },
       );
     }
-    const messages = (
-      channel as unknown as {
-        messages: {
-          fetch: (q: {
-            limit: number;
-            before?: string;
-          }) => Promise<Map<string, Parameters<typeof toHistoryMessage>[0]>>;
-        };
-      }
-    ).messages;
 
-    const out: DiscordHistoryMessage[] = [];
-    let before = opts.before;
-    let reachedSince = false;
-
-    while (out.length < limit && !reachedSince) {
-      const pageSize = Math.min(HISTORY_PAGE_SIZE, limit - out.length);
-      const batch = await messages.fetch({ limit: pageSize, before });
-      // discord.js returns a Collection (Map subclass), newest-first.
-      const page = [...batch.values()];
-      if (page.length === 0) break;
-      for (const m of page) {
-        const ts = m.createdTimestamp ?? 0;
-        if (!Number.isNaN(sinceMs) && ts < sinceMs) {
-          reachedSince = true;
-          break;
-        }
-        out.push(toHistoryMessage(m));
-      }
-      before = page[page.length - 1]?.id;
-      // A short page means we've exhausted the channel.
-      if (page.length < pageSize) break;
+    if (!('messages' in channel)) {
+      throw new Error(`Channel ${channelId} has no readable message history`);
     }
+    const messages = (channel as unknown as { messages: MessagesManagerLike })
+      .messages;
 
-    // Collected newest-first across pages; hand back oldest-first.
+    const out = await this.paginateMessages(messages, {
+      limit,
+      sinceMs,
+      before: opts.before,
+    });
+    // Collected newest-first; hand back oldest-first.
     out.reverse();
     logger.info(
       { channelId, count: out.length, limit, since: opts.sinceIso },
       'Discord channel history fetched',
     );
     return out;
+  }
+
+  /**
+   * Paginate one message manager (a text channel or a thread) backward from
+   * the newest message (or `before`), newest-first, stopping at `limit` or
+   * once messages predate `sinceMs`. Each message is tagged with `thread`
+   * when supplied. Shared by the text-channel and forum-thread paths.
+   */
+  private async paginateMessages(
+    messages: MessagesManagerLike,
+    opts: {
+      limit: number;
+      sinceMs: number;
+      before?: string;
+      thread?: { id: string; name: string };
+    },
+  ): Promise<DiscordHistoryMessage[]> {
+    const out: DiscordHistoryMessage[] = [];
+    let before = opts.before;
+    let reachedSince = false;
+
+    while (out.length < opts.limit && !reachedSince) {
+      const pageSize = Math.min(HISTORY_PAGE_SIZE, opts.limit - out.length);
+      const batch = await messages.fetch({ limit: pageSize, before });
+      // discord.js returns a Collection (Map subclass), newest-first.
+      const page = [...batch.values()];
+      if (page.length === 0) break;
+      for (const m of page) {
+        const ts = m.createdTimestamp ?? 0;
+        if (!Number.isNaN(opts.sinceMs) && ts < opts.sinceMs) {
+          reachedSince = true;
+          break;
+        }
+        out.push(toHistoryMessage(m, opts.thread));
+      }
+      before = page[page.length - 1]?.id;
+      // A short page means we've exhausted the channel.
+      if (page.length < pageSize) break;
+    }
+    return out;
+  }
+
+  /**
+   * Aggregate a forum/media channel's history by enumerating its threads
+   * (active + archived public) and reading each thread's messages, newest
+   * threads first, up to the shared `limit` budget. Results are returned
+   * chronologically (oldest-first) with each message tagged by its thread.
+   */
+  private async fetchForumHistory(
+    forum: ForumLike,
+    channelId: string,
+    opts: { limit: number; sinceMs: number; sinceIso?: string },
+  ): Promise<DiscordHistoryMessage[]> {
+    const threads = await this.collectForumThreads(forum, opts.sinceMs);
+
+    const out: DiscordHistoryMessage[] = [];
+    for (const thread of threads) {
+      if (out.length >= opts.limit) break;
+      const msgs = await this.paginateMessages(thread.messages, {
+        limit: opts.limit - out.length,
+        sinceMs: opts.sinceMs,
+        thread: { id: thread.id, name: thread.name || 'thread' },
+      });
+      out.push(...msgs);
+    }
+
+    // Messages were gathered per-thread; sort the whole set chronologically so
+    // a reader (e.g. tallying hours) sees one coherent timeline.
+    out.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+    logger.info(
+      {
+        channelId,
+        threads: threads.length,
+        count: out.length,
+        limit: opts.limit,
+        since: opts.sinceIso,
+      },
+      'Discord forum history fetched',
+    );
+    return out;
+  }
+
+  /**
+   * Collect a forum's candidate threads: all active threads, then archived
+   * public threads paginated newest-archived-first until we pass the `sinceMs`
+   * window or hit {@link FORUM_ARCHIVED_PAGE_CAP}. Threads are de-duplicated by
+   * id and filtered to this forum (defensive — fetchActive is channel-scoped).
+   */
+  private async collectForumThreads(
+    forum: ForumLike,
+    sinceMs: number,
+  ): Promise<ThreadLike[]> {
+    const byId = new Map<string, ThreadLike>();
+    const add = (t: ThreadLike) => {
+      if (t.parentId && t.parentId !== forum.id) return;
+      if (!byId.has(t.id)) byId.set(t.id, t);
+    };
+
+    const active = await forum.threads.fetchActive();
+    for (const t of active.threads.values()) add(t);
+
+    let before: string | undefined;
+    let capped = false;
+    for (let page = 0; page < FORUM_ARCHIVED_PAGE_CAP; page++) {
+      const archived = await forum.threads.fetchArchived({
+        type: 'public',
+        limit: HISTORY_PAGE_SIZE,
+        before,
+      });
+      const batch = [...archived.threads.values()];
+      if (batch.length === 0) break;
+
+      let allBeforeWindow = true;
+      let oldestTs: number | undefined;
+      for (const t of batch) {
+        add(t);
+        const archiveTs =
+          t.archiveTimestamp ?? t.archivedAt?.getTime() ?? undefined;
+        if (archiveTs !== undefined) {
+          oldestTs =
+            oldestTs === undefined ? archiveTs : Math.min(oldestTs, archiveTs);
+        }
+        if (
+          Number.isNaN(sinceMs) ||
+          archiveTs === undefined ||
+          archiveTs >= sinceMs
+        ) {
+          allBeforeWindow = false;
+        }
+      }
+
+      // Past the requested window — older archived threads can't contribute.
+      if (!Number.isNaN(sinceMs) && allBeforeWindow) break;
+      if (!archived.hasMore) break;
+      if (oldestTs === undefined) break;
+      before = new Date(oldestTs).toISOString();
+      if (page === FORUM_ARCHIVED_PAGE_CAP - 1) capped = true;
+    }
+
+    if (capped) {
+      logger.warn(
+        { forumId: forum.id, pageCap: FORUM_ARCHIVED_PAGE_CAP },
+        'Forum archived-thread enumeration hit page cap — older posts may be omitted; narrow with "since"',
+      );
+    }
+    return [...byId.values()];
   }
 
   isConnected(): boolean {
