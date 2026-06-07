@@ -59,6 +59,7 @@ import {
   storeMessage,
   startAgentRun,
   completeAgentRun,
+  recordPmDm,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -78,7 +79,11 @@ import {
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startReminderEngine } from './reminder-engine.js';
-import { startPmOrchestration } from './integrations/pm-orchestration.js';
+import {
+  startPmOrchestration,
+  buildPmRun,
+} from './integrations/pm-orchestration.js';
+import { isPmCommand } from './pm-orchestration.js';
 import {
   loadDeadlineItemsFromKb,
   loadPmTasksFromKb,
@@ -273,7 +278,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // On-demand PM orchestration: an allowlisted user can trigger the routine
+  // from chat (e.g. "@<bot> run pm orchestration" / "/pm"). Replace the normal
+  // conversational turn with the deterministic PM brief so the agent runs the
+  // routine here, in this chat, and acts per the pm-orchestration skill.
+  // Gated on the sender being allowlisted — the routine has GitHub/KB side
+  // effects and spends API credits, so it must not be invokable by anyone.
+  const pmAllowlistCfg = loadSenderAllowlist();
+  const pmTriggered = missedMessages.some(
+    (m) =>
+      !m.is_from_me &&
+      isPmCommand(m.content) &&
+      isTriggerAllowed(chatJid, m.sender, pmAllowlistCfg),
+  );
+  let prompt: string;
+  if (pmTriggered) {
+    const run = buildPmRun(loadPmTasksFromKb(), Date.now());
+    prompt = run.prompt;
+    // Record at dispatch (same as the scheduled loop) so the cooldown applies.
+    for (const c of run.fresh) recordPmDm(c.person, c.taskId, c.reason);
+    logger.info({ group: group.name }, 'PM orchestration triggered from chat');
+  } else {
+    prompt = formatMessages(missedMessages, TIMEZONE);
+  }
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.

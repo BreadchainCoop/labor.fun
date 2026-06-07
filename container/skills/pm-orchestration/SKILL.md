@@ -5,10 +5,12 @@ description: Weekly PM orchestration on top of GitHub — re-estimate/re-plan th
 
 # /pm-orchestration — Continuous PM on top of GitHub
 
-You run periodically with a deterministic **PM brief** in your prompt (blocked /
-blocking / overdue / due-soon / per-owner load, a "DM these people" list, and a
-"do NOT re-ping" list). Your job is the routine *on top* of GitHub — re-evaluate,
-re-plan, communicate — not to reinvent issue tracking.
+You run with a deterministic **PM brief** in your prompt (blocked / blocking /
+overdue / due-soon / per-owner load, an "Unassigned — needs an owner" list, a
+"DM these people" list, and a "do NOT re-ping" list). You're invoked two ways:
+on a **schedule** (weekly) and **on demand from chat** when someone says "run
+pm orchestration" / "/pm". Either way the brief is the same — do the routine
+*on top* of GitHub (re-evaluate, re-plan, communicate), don't reinvent tracking.
 
 ## Philosophy: act first, then ask
 
@@ -41,6 +43,21 @@ Do **not** personally DM for routine *due-soon* items — those are not pings.
 
 Use the `dm_user` tool (resolves a person by name → DM). Batch multiple items
 for the same person into **one** DM.
+
+## Unassigned work (no owner to DM)
+
+The brief's **"Unassigned — needs an owner"** list is overdue/blocking work with
+**no assignee** — there's no one to DM, but it must not fall through. For these:
+
+1. **Try to find/assign an owner.** If the issue clearly belongs to someone
+   (from its content, the `project`, recent activity, or who owns related
+   tasks), assign them on GitHub via `mcp__github__*` and DM that person.
+2. **Otherwise raise it.** Post the unassigned items in **this channel** asking
+   for someone to pick them up, and — if a **PM lead** is named in the brief —
+   DM the lead so it has a human owner of the *triage*, not the task.
+
+Never silently skip an unassigned overdue/blocking item just because there's no
+one in the "DM these people" list.
 
 ## Anti-spam — honor the cooldown
 

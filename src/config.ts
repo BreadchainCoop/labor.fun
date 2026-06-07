@@ -43,6 +43,7 @@ const envConfig = readEnvFile([
   'PM_ORCHESTRATION_TARGET_GROUP',
   'PM_DUE_SOON_DAYS',
   'PM_DM_COOLDOWN_MS',
+  'PM_LEAD',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -229,6 +230,10 @@ export const PM_DM_COOLDOWN_MS = Math.max(
   0,
   parseInt(envVal('PM_DM_COOLDOWN_MS') || '518400000', 10) || 518400000,
 );
+// Fallback contact for overdue/blocking items that have no assignee — the agent
+// raises unowned work to this person (and the channel) instead of dropping it.
+// Empty = post unowned items to the channel only.
+export const PM_LEAD = envVal('PM_LEAD') || '';
 
 // Source group whose `context/` directory holds the canonical shared KB
 // (people, tasks, calendar, projects, …). Mounted into every container at
