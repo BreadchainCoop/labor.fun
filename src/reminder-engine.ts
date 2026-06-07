@@ -87,9 +87,30 @@ export function parseDurationToMs(spec: string): number {
 /** Parse + normalize a ladder spec list into ascending-by-ms rungs. */
 export function parseLadder(specs: string[]): LadderRung[] {
   return specs
-    .map((s) => ({ label: s.trim(), ms: parseDurationToMs(s) }))
+    .map((s) => ({
+      // Canonicalize the label (lowercased, trimmed) so it matches the parser
+      // and stays stable as the dedup key in reminder_log — e.g. editing
+      // REMINDER_LADDER from `1D` to `1d` must not be seen as a new rung.
+      label: s.trim().toLowerCase(),
+      ms: parseDurationToMs(s),
+    }))
     .filter((r) => r.ms > 0)
     .sort((a, b) => a.ms - b.ms);
+}
+
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Parse a deadline string to epoch ms. A bare `YYYY-MM-DD` is treated as the
+ * END of that day (23:59:59.999 UTC), so a task "due 2026-07-01" only goes
+ * overdue once the 1st has fully passed — not at 00:00 when `Date.parse` would
+ * otherwise place it. Full datetimes are parsed as given. Returns NaN for
+ * unparseable input.
+ */
+export function parseDeadline(deadline: string): number {
+  const s = deadline.trim();
+  if (DATE_ONLY_RE.test(s)) return Date.parse(`${s}T23:59:59.999Z`);
+  return Date.parse(s);
 }
 
 /**
@@ -188,7 +209,7 @@ export function buildDeadlineDigest(
   nowMs: number,
 ): string {
   const dated = items
-    .map((it) => ({ it, ms: Date.parse(it.deadline) }))
+    .map((it) => ({ it, ms: parseDeadline(it.deadline) }))
     .filter((x) => !Number.isNaN(x.ms))
     .sort((a, b) => a.ms - b.ms);
 
@@ -273,7 +294,7 @@ export async function runReminderSweep(
   let checked = 0;
 
   for (const item of items) {
-    const deadlineMs = Date.parse(item.deadline);
+    const deadlineMs = parseDeadline(item.deadline);
     if (Number.isNaN(deadlineMs)) {
       logger.debug(
         { itemId: item.id, deadline: item.deadline },
@@ -341,7 +362,12 @@ export interface ReminderEngineDeps {
   loadItems: () => DeadlineItem[];
   /** Persist the digest markdown (optional; e.g. write to the shared KB). */
   writeDigest?: (markdown: string) => void;
-  /** Ladder specs (defaults to config REMINDER_LADDER). */
+  /**
+   * Ladder specs (e.g. `['3w','1w','3d','1d']`). Required to do anything — an
+   * empty/missing list disables the engine. The caller supplies the default
+   * (the orchestrator passes config `REMINDER_LADDER`); the engine has no
+   * config of its own.
+   */
   ladderSpecs?: string[];
   /** Org-wide fallback escalation contact. */
   escalationDefault?: string;
@@ -353,6 +379,7 @@ export interface ReminderEngineDeps {
 
 let loopRunning = false;
 let loopTimer: NodeJS.Timeout | null = null;
+let tickInFlight = false;
 
 /**
  * Run a single sweep + digest write. Exposed so the loop and tests share one
@@ -399,6 +426,15 @@ export function startReminderEngine(deps: ReminderEngineDeps): void {
   loopRunning = true;
 
   const tick = async () => {
+    // Serialize sweeps: if a slow sweep overruns the interval, skip the
+    // overlapping tick rather than running two concurrently — concurrent
+    // sweeps could both see hasReminderFired()===false for the same rung
+    // before either records it, double-sending a reminder.
+    if (tickInFlight) {
+      logger.debug('Reminder sweep already in flight — skipping this tick');
+      return;
+    }
+    tickInFlight = true;
     try {
       const result = await runReminderTick(deps);
       logger.info(
@@ -407,6 +443,8 @@ export function startReminderEngine(deps: ReminderEngineDeps): void {
       );
     } catch (err) {
       logger.error({ err }, 'Reminder sweep failed');
+    } finally {
+      tickInFlight = false;
     }
   };
 
@@ -425,6 +463,7 @@ export function stopReminderEngine(): void {
     loopTimer = null;
   }
   loopRunning = false;
+  tickInFlight = false;
 }
 
 /** @internal - for tests only. */
