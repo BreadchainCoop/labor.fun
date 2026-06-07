@@ -151,7 +151,7 @@ export async function runPmOrchestrationTick(
     closeTimer = setTimeout(() => deps.queue.closeStdin(jid), CLOSE_DELAY_MS);
   };
 
-  deps.queue.enqueueTask(jid, 'pm-orchestration', async () => {
+  const enqueued = deps.queue.enqueueTask(jid, 'pm-orchestration', async () => {
     try {
       await runContainerAgent(
         group,
@@ -183,6 +183,14 @@ export async function runPmOrchestrationTick(
       if (closeTimer) clearTimeout(closeTimer);
     }
   });
+
+  if (!enqueued) {
+    // A pm-orchestration run is already queued/running for this group — that
+    // run will cover the current state, so don't record (or we'd suppress the
+    // next legit follow-up) and don't claim we scheduled one.
+    logger.debug('PM: a run is already queued/running — skipping this tick');
+    return { enqueued: false };
+  }
 
   // Record the fresh follow-ups so they're suppressed within the cooldown.
   for (const c of fresh) recordPmDm(c.person, c.taskId, c.reason);

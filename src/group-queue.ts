@@ -87,19 +87,29 @@ export class GroupQueue {
     );
   }
 
-  enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
-    if (this.shuttingDown) return;
+  /**
+   * Enqueue (or immediately run) a task. Returns true if the task was accepted
+   * (queued or started), false if it was dropped as a duplicate (a task with
+   * the same id is already running/queued) or during shutdown — so callers can
+   * tell whether their run was actually scheduled.
+   */
+  enqueueTask(
+    groupJid: string,
+    taskId: string,
+    fn: () => Promise<void>,
+  ): boolean {
+    if (this.shuttingDown) return false;
 
     const state = this.getGroup(groupJid);
 
     // Prevent double-queuing: check both pending and currently-running task
     if (state.runningTaskId === taskId) {
       logger.debug({ groupJid, taskId }, 'Task already running, skipping');
-      return;
+      return false;
     }
     if (state.pendingTasks.some((t) => t.id === taskId)) {
       logger.debug({ groupJid, taskId }, 'Task already queued, skipping');
-      return;
+      return false;
     }
 
     if (state.active) {
@@ -108,7 +118,7 @@ export class GroupQueue {
         this.closeStdin(groupJid);
       }
       logger.debug({ groupJid, taskId }, 'Container active, task queued');
-      return;
+      return true;
     }
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
@@ -120,13 +130,14 @@ export class GroupQueue {
         { groupJid, taskId, activeCount: this.activeCount },
         'At concurrency limit, task queued',
       );
-      return;
+      return true;
     }
 
     // Run immediately
     this.runTask(groupJid, { id: taskId, groupJid, fn }).catch((err) =>
       logger.error({ groupJid, taskId, err }, 'Unhandled error in runTask'),
     );
+    return true;
   }
 
   registerProcess(

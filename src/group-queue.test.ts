@@ -257,14 +257,14 @@ describe('GroupQueue', () => {
     });
 
     // Start the task (runs immediately — slot available)
-    queue.enqueueTask('group1@g.us', 'task-1', taskFn);
+    expect(queue.enqueueTask('group1@g.us', 'task-1', taskFn)).toBe(true);
     await vi.advanceTimersByTimeAsync(10);
     expect(taskCallCount).toBe(1);
 
     // Scheduler poll re-discovers the same task while it's running —
-    // this must be silently dropped
+    // this must be silently dropped (and report false so callers know)
     const dupFn = vi.fn(async () => {});
-    queue.enqueueTask('group1@g.us', 'task-1', dupFn);
+    expect(queue.enqueueTask('group1@g.us', 'task-1', dupFn)).toBe(false);
     await vi.advanceTimersByTimeAsync(10);
 
     // Duplicate was NOT queued
