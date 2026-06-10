@@ -44,6 +44,8 @@ const envConfig = readEnvFile([
   'PM_DUE_SOON_DAYS',
   'PM_DM_COOLDOWN_MS',
   'PM_LEAD',
+  'MEMBERSHIP_CHANNEL',
+  'MEMBERSHIP_NOTIFY_JID',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -287,6 +289,27 @@ export const REMINDER_TARGET_JID = envVal('REMINDER_TARGET_JID') || '';
 // `escalation_contact` of their own.
 export const REMINDER_ESCALATION_CONTACT =
   envVal('REMINDER_ESCALATION_CONTACT') || '';
+
+// --- External-facing membership intake channel (#30) ---
+// A channel JID designated as the public/external membership-intake channel.
+// In it, the general assistant is suppressed and replaced by a sandboxed,
+// tool-restricted intake flow (see src/membership-intake.ts). EXTERNAL =
+// untrusted: the channel runs non-privileged regardless of FLAT_ACCESS, accepts
+// messages from unknown senders, and cannot read/write the KB or DB. Empty =
+// feature off. Comma-separated to allow more than one intake channel.
+export const MEMBERSHIP_CHANNELS = (envVal('MEMBERSHIP_CHANNEL') || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/** Whether a chat JID is a designated (external) membership-intake channel. */
+export function isMembershipChannel(jid: string): boolean {
+  return MEMBERSHIP_CHANNELS.includes(jid);
+}
+
+// Where membership-interest notifications are posted (onboarding/ops). Empty →
+// the shared-KB group's chat, resolved at runtime.
+export const MEMBERSHIP_NOTIFY_JID = envVal('MEMBERSHIP_NOTIFY_JID') || '';
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
