@@ -77,6 +77,16 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /**
+   * Restrict the agent to exactly these tools (replaces the default allowlist).
+   * Used to sandbox the external membership-intake flow to read-only tools.
+   */
+  allowedTools?: string[];
+  /**
+   * Extra text appended to the system prompt (e.g. the intake persona),
+   * in addition to the global CLAUDE.md.
+   */
+  systemPromptAppend?: string;
 }
 
 export interface ContainerOutput {

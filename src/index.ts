@@ -9,6 +9,8 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   isPrivilegedGroup,
+  isMembershipChannel,
+  MEMBERSHIP_NOTIFY_JID,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
   REMINDER_ESCALATION_CONTACT,
@@ -65,7 +67,22 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startEmailPoller } from './email-poller.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatOutbound,
+  stripInternalTags,
+} from './router.js';
+import {
+  INTAKE_ALLOWED_TOOLS,
+  INTAKE_SYSTEM_PROMPT,
+  hasInterestSentinel,
+  stripInterestSentinel,
+  buildMembershipRecord,
+  buildInterestNotice,
+  membershipRecordId,
+  type MembershipInterest,
+} from './membership-intake.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -235,6 +252,141 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+/** Resolve the shared-KB group's chat JID, if it's registered. */
+function sharedKbGroupJid(): string | null {
+  const entry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === SHARED_KB_GROUP,
+  );
+  return entry?.[0] ?? null;
+}
+
+/**
+ * File a membership-interest record (attributed to the REAL message sender,
+ * never agent-provided) and notify the onboarding/ops channel once. The KB
+ * write happens here on the privileged orchestrator side — the external intake
+ * container has no write path of its own.
+ */
+async function fileMembershipInterest(
+  chatJid: string,
+  msg: NewMessage,
+): Promise<void> {
+  const interest: MembershipInterest = {
+    senderId: msg.sender,
+    senderName: msg.sender_name,
+    chatJid,
+    at: new Date().toISOString(),
+    context: msg.content.slice(0, 280),
+  };
+  const dir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context', 'memberships');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${membershipRecordId(interest)}.md`);
+  const isNew = !fs.existsSync(file);
+  fs.writeFileSync(file, buildMembershipRecord(interest));
+  logger.info(
+    { chatJid, sender: interest.senderId, isNew },
+    'Membership interest filed',
+  );
+  if (!isNew) return; // already recorded + notified for this person today
+
+  const notifyJid = MEMBERSHIP_NOTIFY_JID || sharedKbGroupJid();
+  if (!notifyJid) return;
+  const ch = findChannel(channels, notifyJid);
+  if (ch)
+    await ch.sendMessage(
+      notifyJid,
+      formatOutbound(buildInterestNotice(interest)),
+    );
+}
+
+/**
+ * External membership-intake flow. Suppresses the general assistant: runs a
+ * sandboxed (non-privileged), tool-restricted agent with an injection-hardened
+ * intake persona, responds to anyone (no trigger gate), and files an interest
+ * record when the agent flags a genuine opt-in.
+ */
+async function processMembershipIntake(
+  chatJid: string,
+  group: RegisteredGroup,
+  channel: Channel,
+): Promise<boolean> {
+  const missedMessages = getMessagesSince(
+    chatJid,
+    getOrRecoverCursor(chatJid),
+    ASSISTANT_NAME,
+    MAX_MESSAGES_PER_PROMPT,
+  );
+  if (missedMessages.length === 0) return true;
+
+  const inbound = missedMessages.filter((m) => !m.is_from_me);
+  const lastTs = missedMessages[missedMessages.length - 1].timestamp;
+  if (inbound.length === 0) {
+    lastAgentTimestamp[chatJid] = lastTs;
+    saveState();
+    return true;
+  }
+
+  const previousCursor = lastAgentTimestamp[chatJid] || '';
+  lastAgentTimestamp[chatJid] = lastTs;
+  saveState();
+
+  const triggerMsg = inbound[inbound.length - 1];
+  const prompt = formatMessages(missedMessages, TIMEZONE);
+
+  await channel.setTyping?.(chatJid, true);
+  let interested = false;
+  let hadError = false;
+  let sentReply = false;
+
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        const cleaned = stripInternalTags(raw);
+        if (hasInterestSentinel(cleaned)) interested = true;
+        const reply = stripInterestSentinel(cleaned);
+        if (reply) {
+          await channel.sendMessage(chatJid, reply, {
+            replyToMessageId: triggerMsg.id,
+          });
+          sentReply = true;
+        }
+      }
+      if (result.status === 'error') hadError = true;
+    },
+    {
+      forceNonPrivileged: true,
+      allowedTools: INTAKE_ALLOWED_TOOLS,
+      systemPromptAppend: INTAKE_SYSTEM_PROMPT,
+    },
+  );
+
+  await channel.setTyping?.(chatJid, false);
+
+  if (interested) {
+    try {
+      await fileMembershipInterest(chatJid, triggerMsg);
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to file membership interest');
+    }
+  }
+
+  if (output === 'error' || hadError) {
+    // Roll back the cursor for retry only if we never replied (avoid dupes).
+    if (!sentReply) {
+      lastAgentTimestamp[chatJid] = previousCursor;
+      saveState();
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -247,6 +399,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!channel) {
     logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
     return true;
+  }
+
+  // External membership-intake channel: the general assistant is suppressed
+  // entirely; only the sandboxed intake flow runs here. (#30)
+  if (isMembershipChannel(chatJid)) {
+    return await processMembershipIntake(chatJid, group, channel);
   }
 
   const isMainGroup = group.isMain === true;
@@ -489,11 +647,20 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  opts?: {
+    /** Force a non-privileged (sandboxed) run regardless of FLAT_ACCESS. */
+    forceNonPrivileged?: boolean;
+    /** Restrict the agent to exactly these tools. */
+    allowedTools?: string[];
+    /** Append this to the system prompt (e.g. an intake persona). */
+    systemPromptAppend?: string;
+  },
 ): Promise<'success' | 'error'> {
   // Flat-access (cooperative) mode elevates every group to main-equivalent
   // mounts/IPC auth. isMain here drives container mounts, the NANOCLAW_IS_MAIN
-  // env, and the tasks/groups snapshots.
-  const isMain = isPrivilegedGroup(group);
+  // env, and the tasks/groups snapshots. External/sandboxed flows force this
+  // off so an untrusted channel never gets privileged mounts/IPC.
+  const isMain = opts?.forceNonPrivileged ? false : isPrivilegedGroup(group);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -543,6 +710,8 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        allowedTools: opts?.allowedTools,
+        systemPromptAppend: opts?.systemPromptAppend,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -858,8 +1027,16 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      // Sender allowlist drop mode: discard messages from denied senders before
+      // storing. The external membership-intake channel is exempt — it's public
+      // by design and accepts messages from unknown senders (the intake flow is
+      // sandboxed, so there's no privileged surface to protect there).
+      if (
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        registeredGroups[chatJid] &&
+        !isMembershipChannel(chatJid)
+      ) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&
