@@ -33,6 +33,10 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /** Restrict the agent to exactly these tools (sandboxed flows). */
+  allowedTools?: string[];
+  /** Extra system-prompt text appended after the global memory. */
+  systemPromptAppend?: string;
 }
 
 interface ContainerOutput {
@@ -421,6 +425,12 @@ async function runQuery(
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
+  // Combine the global memory with any per-run system-prompt append (e.g. the
+  // membership-intake persona). The append goes last so it takes precedence.
+  const systemPromptAppend =
+    [globalClaudeMd, containerInput.systemPromptAppend]
+      .filter((s): s is string => Boolean(s))
+      .join('\n\n') || undefined;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -452,14 +462,16 @@ async function runQuery(
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
+      systemPrompt: systemPromptAppend
         ? {
             type: 'preset' as const,
             preset: 'claude_code' as const,
-            append: globalClaudeMd,
+            append: systemPromptAppend,
           }
         : undefined,
-      allowedTools: [
+      // A restricted allowlist (e.g. the sandboxed membership-intake flow)
+      // replaces the default tool set entirely.
+      allowedTools: containerInput.allowedTools ?? [
         'Bash',
         'Read',
         'Write',

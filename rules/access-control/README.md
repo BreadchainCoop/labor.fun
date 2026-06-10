@@ -25,6 +25,17 @@ See [role-matrix.md](role-matrix.md) for the full capability table.
 - **Never leak in summaries**: Private info must not appear in general updates, task lists, or channel messages unless explicitly requested by the user it belongs to
 - **Append-only audit**: Every interaction is logged (see [../knowledge-base/request-logging.md](../knowledge-base/request-logging.md))
 
+## External membership-intake channels
+
+A channel listed in `MEMBERSHIP_CHANNEL` is **public/untrusted** and is the one
+exception to cooperative mode: the general assistant is suppressed there, and a
+**sandboxed** membership-intake flow runs instead — non-privileged regardless of
+`FLAT_ACCESS` (no DB, KB read-only), restricted to read-only tools, with an
+injection-hardened persona. It accepts unknown senders, has no KB/DB write path,
+and its IPC is ignored. The only thing it can do is file a membership-interest
+record (written by the privileged orchestrator, attributed to the real sender)
+and notify onboarding. Never widen this channel's privileges. See `src/membership-intake.ts`.
+
 ## Related Rules
 
 - [Privacy Policy](privacy-policy.md) — Document visibility enforcement
