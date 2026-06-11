@@ -320,7 +320,8 @@ export function renderOperationalReport(
     for (const t of report.blocking) {
       const waiting = t.downstream.join(', ');
       lines.push(
-        taskLine(t, nowMs, isLeaders) + (waiting ? ` — blocks: ${waiting}` : ''),
+        taskLine(t, nowMs, isLeaders) +
+          (waiting ? ` — blocks: ${waiting}` : ''),
       );
     }
     lines.push('');
