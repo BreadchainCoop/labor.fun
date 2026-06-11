@@ -1,6 +1,6 @@
 # Extending labor.fun
 
-labor.fun has five extension points. They all follow the **same shape**: a small
+labor.fun has six extension points. They all follow the **same shape**: a small
 module **self-registers** with a registry, and a barrel file imports it so the
 registration runs at startup. Nothing edits the core message loop.
 
@@ -8,6 +8,7 @@ registration runs at startup. Nothing edits the core message loop.
 |---|---|---|---|
 | Channel | `src/channels/registry.ts` | `src/channels/index.ts` | `src/channels/` (built-in) or **`<profile>/plugins/`** |
 | Flow (background integration) | `src/integrations/registry.ts` | `src/integrations/index.ts` | `src/integrations/` (built-in) or **`<profile>/plugins/`** |
+| Chat flow (sandboxed channel takeover) | `src/chat-flows/registry.ts` | `src/chat-flows/index.ts` | `src/chat-flows/` (built-in) or **`<profile>/plugins/`** |
 | Container skill | filesystem | — | `container/skills/` or `<profile>/container-skills/` |
 | Setup step | `setup/index.ts` `STEPS` | — | `setup/` |
 | Rules / KB | filesystem (markdown) | — | `rules/` (core) + `<profile>/groups/` (org) |
@@ -28,7 +29,7 @@ and its `default` (or named `register`) export is called with a small API:
 
 ```js
 // profiles/<org>/plugins/sms.mjs
-export default function register({ registerChannel, registerIntegration, readEnvFile, logger }) {
+export default function register({ registerChannel, registerIntegration, registerChatFlow, readEnvFile, logger }) {
   registerChannel('sms', (opts) => {
     const env = readEnvFile(['TWILIO_SID', 'TWILIO_TOKEN']);
     if (!env.TWILIO_SID) return null;        // missing creds → skipped
@@ -42,8 +43,9 @@ export default function register({ registerChannel, registerIntegration, readEnv
 }
 ```
 
-The `PluginApi` exposes `registerChannel`, `registerIntegration`, `readEnvFile`,
-and `logger`. Plugins are **plain JS** (the framework build compiles `src/`, not
+The `PluginApi` exposes `registerChannel`, `registerIntegration`,
+`registerChatFlow`, `readEnvFile`, and `logger`. Plugins are **plain JS** (the
+framework build compiles `src/`, not
 `profiles/`), load in filename order, can shadow a built-in by re-registering
 the same name, and are isolated — a throwing plugin is logged and skipped, never
 fatal. The `Channel` / `Integration` interfaces below define what to return.
@@ -98,6 +100,47 @@ Register it from `src/integrations/index.ts` (the barrel). The orchestrator call
 its own config and no-ops when unconfigured. The built-in flows
 (`group-digest`, `github-project-sync`, `discord-members-sync`) are the
 reference implementations.
+
+## 2b. Chat flows (sandboxed channel takeover)
+
+A **chat flow** claims specific chat JIDs and *replaces* the general assistant
+there with a sandboxed, single-purpose agent — for **external/untrusted**
+channels (a public intake desk, a support kiosk, …). The orchestrator enforces
+the trust boundary for every flow chat:
+
+- the agent run is forced **non-privileged** (sandboxed mounts, no DB),
+  restricted to the flow's `allowedTools`, with the flow's `systemPrompt`
+  persona appended;
+- the chat is **exempt from the sender allowlist** (public by design — anyone
+  may write);
+- **all IPC from the chat's group folder is ignored** (defense in depth
+  against prompt injection).
+
+Side effects happen on the privileged orchestrator side, in the flow's
+`onAgentResult` — the sandboxed container has no write path of its own:
+
+```ts
+// src/chat-flows/my-desk.ts  (or via registerChatFlow in <profile>/plugins/)
+import { registerChatFlow } from './registry.js';
+
+registerChatFlow({
+  name: 'my-desk',
+  matches: (jid) => jid === readDeskJidFromEnv(),
+  allowedTools: ['Read', 'Glob', 'Grep'],          // read-only sandbox
+  systemPrompt: 'You are the public help desk. …', // injection-hardened persona
+  async onAgentResult(output, triggerMsg, chatJid, host) {
+    // Detect a sentinel in `output`, file records, notify ops via
+    // host.notify(jid, text) — attribute to triggerMsg.sender, never to
+    // anything the agent claims. Return the user-facing reply ('' = silent).
+    return output;
+  },
+});
+```
+
+Built-ins self-register via the barrel (`src/chat-flows/index.ts`).
+`src/chat-flows/membership-intake.ts` — the external membership-intake desk
+(#30) — is the reference implementation, including the sentinel pattern for
+flagging events to the privileged side.
 
 ## 3. Container skills
 

@@ -79,11 +79,11 @@ export interface ContainerInput {
   script?: string;
   /**
    * Restrict the agent to exactly these tools (replaces the default allowlist).
-   * Used to sandbox the external membership-intake flow to read-only tools.
+   * Used to sandbox external chat flows (src/chat-flows/) to read-only tools.
    */
   allowedTools?: string[];
   /**
-   * Extra text appended to the system prompt (e.g. the intake persona),
+   * Extra text appended to the system prompt (e.g. a chat flow's persona),
    * in addition to the global CLAUDE.md.
    */
   systemPromptAppend?: string;

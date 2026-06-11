@@ -9,8 +9,6 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   isPrivilegedGroup,
-  isMembershipChannel,
-  MEMBERSHIP_NOTIFY_JID,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
   REMINDER_ESCALATION_CONTACT,
@@ -73,16 +71,12 @@ import {
   formatOutbound,
   stripInternalTags,
 } from './router.js';
+import './chat-flows/index.js';
 import {
-  INTAKE_ALLOWED_TOOLS,
-  INTAKE_SYSTEM_PROMPT,
-  hasInterestSentinel,
-  stripInterestSentinel,
-  buildMembershipRecord,
-  buildInterestNotice,
-  membershipRecordId,
-  type MembershipInterest,
-} from './membership-intake.js';
+  findChatFlow,
+  type ChatFlow,
+  type ChatFlowHost,
+} from './chat-flows/registry.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -260,54 +254,26 @@ function sharedKbGroupJid(): string | null {
   return entry?.[0] ?? null;
 }
 
-/**
- * File a membership-interest record (attributed to the REAL message sender,
- * never agent-provided) and notify the onboarding/ops channel once. The KB
- * write happens here on the privileged orchestrator side — the external intake
- * container has no write path of its own.
- */
-async function fileMembershipInterest(
-  chatJid: string,
-  msg: NewMessage,
-): Promise<void> {
-  const interest: MembershipInterest = {
-    senderId: msg.sender,
-    senderName: msg.sender_name,
-    chatJid,
-    at: new Date().toISOString(),
-    context: msg.content.slice(0, 280),
-  };
-  const dir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context', 'memberships');
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${membershipRecordId(interest)}.md`);
-  const isNew = !fs.existsSync(file);
-  fs.writeFileSync(file, buildMembershipRecord(interest));
-  logger.info(
-    { chatJid, sender: interest.senderId, isNew },
-    'Membership interest filed',
-  );
-  if (!isNew) return; // already recorded + notified for this person today
-
-  const notifyJid = MEMBERSHIP_NOTIFY_JID || sharedKbGroupJid();
-  if (!notifyJid) return;
-  const ch = findChannel(channels, notifyJid);
-  if (ch)
-    await ch.sendMessage(
-      notifyJid,
-      formatOutbound(buildInterestNotice(interest)),
-    );
-}
+/** Privileged operations lent to a chat flow's onAgentResult. */
+const chatFlowHost: ChatFlowHost = {
+  async notify(jid: string, text: string): Promise<void> {
+    const ch = findChannel(channels, jid);
+    if (ch) await ch.sendMessage(jid, formatOutbound(text));
+  },
+  sharedKbChatJid: sharedKbGroupJid,
+};
 
 /**
- * External membership-intake flow. Suppresses the general assistant: runs a
- * sandboxed (non-privileged), tool-restricted agent with an injection-hardened
- * intake persona, responds to anyone (no trigger gate), and files an interest
- * record when the agent flags a genuine opt-in.
+ * Run a registered chat flow on its (external) channel. Suppresses the general
+ * assistant: runs a sandboxed (non-privileged) agent restricted to the flow's
+ * tools with the flow's persona appended, responds to anyone (no trigger
+ * gate), and lets the flow post-process the output on the privileged side.
  */
-async function processMembershipIntake(
+async function processChatFlow(
   chatJid: string,
   group: RegisteredGroup,
   channel: Channel,
+  flow: ChatFlow,
 ): Promise<boolean> {
   const missedMessages = getMessagesSince(
     chatJid,
@@ -333,7 +299,6 @@ async function processMembershipIntake(
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
   await channel.setTyping?.(chatJid, true);
-  let interested = false;
   let hadError = false;
   let sentReply = false;
 
@@ -347,9 +312,21 @@ async function processMembershipIntake(
           typeof result.result === 'string'
             ? result.result
             : JSON.stringify(result.result);
-        const cleaned = stripInternalTags(raw);
-        if (hasInterestSentinel(cleaned)) interested = true;
-        const reply = stripInterestSentinel(cleaned);
+        // A broken flow must not take down message processing.
+        let reply = '';
+        try {
+          reply = await flow.onAgentResult(
+            stripInternalTags(raw),
+            triggerMsg,
+            chatJid,
+            chatFlowHost,
+          );
+        } catch (err) {
+          logger.error(
+            { err, chatJid, flow: flow.name },
+            'Chat flow failed to handle agent result',
+          );
+        }
         if (reply) {
           await channel.sendMessage(chatJid, reply, {
             replyToMessageId: triggerMsg.id,
@@ -361,20 +338,12 @@ async function processMembershipIntake(
     },
     {
       forceNonPrivileged: true,
-      allowedTools: INTAKE_ALLOWED_TOOLS,
-      systemPromptAppend: INTAKE_SYSTEM_PROMPT,
+      allowedTools: flow.allowedTools,
+      systemPromptAppend: flow.systemPrompt,
     },
   );
 
   await channel.setTyping?.(chatJid, false);
-
-  if (interested) {
-    try {
-      await fileMembershipInterest(chatJid, triggerMsg);
-    } catch (err) {
-      logger.error({ err, chatJid }, 'Failed to file membership interest');
-    }
-  }
 
   if (output === 'error' || hadError) {
     // Roll back the cursor for retry only if we never replied (avoid dupes).
@@ -401,10 +370,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  // External membership-intake channel: the general assistant is suppressed
-  // entirely; only the sandboxed intake flow runs here. (#30)
-  if (isMembershipChannel(chatJid)) {
-    return await processMembershipIntake(chatJid, group, channel);
+  // Chat-flow channel (e.g. membership intake, #30): the general assistant is
+  // suppressed entirely; only the sandboxed flow runs here.
+  const chatFlow = findChatFlow(chatJid);
+  if (chatFlow) {
+    return await processChatFlow(chatJid, group, channel, chatFlow);
   }
 
   const isMainGroup = group.isMain === true;
@@ -1028,14 +998,14 @@ async function main(): Promise<void> {
       }
 
       // Sender allowlist drop mode: discard messages from denied senders before
-      // storing. The external membership-intake channel is exempt — it's public
-      // by design and accepts messages from unknown senders (the intake flow is
-      // sandboxed, so there's no privileged surface to protect there).
+      // storing. Chat-flow channels (e.g. membership intake) are exempt — they
+      // are public by design and accept messages from unknown senders (the flow
+      // is sandboxed, so there's no privileged surface to protect there).
       if (
         !msg.is_from_me &&
         !msg.is_bot_message &&
         registeredGroups[chatJid] &&
-        !isMembershipChannel(chatJid)
+        !findChatFlow(chatJid)
       ) {
         const cfg = loadSenderAllowlist();
         if (
