@@ -233,6 +233,15 @@ Throttle ledger for the PM-orchestration loop (`src/integrations/pm-orchestratio
 | **reason** | TEXT PK | `blocking` or `overdue` |
 | sent_at | TEXT | ISO timestamp the follow-up was raised |
 
+### ops_report_log
+
+Idempotency ledger for the operational-report loop (`src/integrations/operational-report.ts`, #34). One row per reporting period that has already been delivered, so the recurring report posts at most once per period (`OPS_REPORT_PERIOD`) regardless of how often the loop sweeps or how many times the process restarts.
+
+| Column | Type | Notes |
+|---|---|---|
+| **period** | TEXT PK | Period key — ISO week (`2026-W24`) or month (`2026-06`) |
+| sent_at | TEXT | ISO timestamp the report was delivered |
+
 ## Indices
 
 | Index | Columns | Purpose |
