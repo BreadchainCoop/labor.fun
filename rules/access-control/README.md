@@ -25,16 +25,22 @@ See [role-matrix.md](role-matrix.md) for the full capability table.
 - **Never leak in summaries**: Private info must not appear in general updates, task lists, or channel messages unless explicitly requested by the user it belongs to
 - **Append-only audit**: Every interaction is logged (see [../knowledge-base/request-logging.md](../knowledge-base/request-logging.md))
 
-## External membership-intake channels
+## External chat-flow channels (e.g. membership intake)
 
-A channel listed in `MEMBERSHIP_CHANNEL` is **public/untrusted** and is the one
-exception to cooperative mode: the general assistant is suppressed there, and a
-**sandboxed** membership-intake flow runs instead — non-privileged regardless of
-`FLAT_ACCESS` (no DB, KB read-only), restricted to read-only tools, with an
-injection-hardened persona. It accepts unknown senders, has no KB/DB write path,
-and its IPC is ignored. The only thing it can do is file a membership-interest
-record (written by the privileged orchestrator, attributed to the real sender)
-and notify onboarding. Never widen this channel's privileges. See `src/membership-intake.ts`.
+A channel claimed by a **chat flow** (`src/chat-flows/`, or a profile plugin
+via `registerChatFlow`) is **public/untrusted** and is the one exception to
+cooperative mode: the general assistant is suppressed there, and the sandboxed
+flow runs instead — non-privileged regardless of `FLAT_ACCESS` (no DB, KB
+read-only), restricted to the flow's tool allowlist, with an
+injection-hardened persona. It accepts unknown senders, has no KB/DB write
+path, and its IPC is ignored. Privileged side effects happen only in the
+flow's orchestrator-side handler, attributed to the real sender. Never widen
+these channels' privileges.
+
+The built-in flow is membership intake: a channel listed in
+`MEMBERSHIP_CHANNEL` runs the intake desk, which can only file a
+membership-interest record and notify onboarding. See
+`src/chat-flows/membership-intake.ts`.
 
 ## Related Rules
 

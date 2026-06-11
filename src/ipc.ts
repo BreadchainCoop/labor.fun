@@ -12,12 +12,12 @@ import {
   FLAT_ACCESS,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
-  isMembershipChannel,
   PROJECT_ROOT,
   SERVICE_USER,
   SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
+import { findChatFlow } from './chat-flows/registry.js';
 import { PersonCandidate, resolveDmTarget } from './integrations/dm-resolve.js';
 import { readEnvFile } from './env.js';
 import { AvailableGroup } from './container-runner.js';
@@ -302,19 +302,19 @@ export function startIpcWatcher(deps: IpcDeps): void {
     const registeredGroups = deps.registeredGroups();
 
     // Build folder→isMain lookup from registered groups, and the set of folders
-    // belonging to external membership-intake channels (untrusted/sandboxed).
+    // belonging to external chat-flow channels (untrusted/sandboxed).
     const folderIsMain = new Map<string, boolean>();
-    const membershipFolders = new Set<string>();
+    const chatFlowFolders = new Set<string>();
     for (const [jid, group] of Object.entries(registeredGroups)) {
       if (group.isMain) folderIsMain.set(group.folder, true);
-      if (isMembershipChannel(jid)) membershipFolders.add(group.folder);
+      if (findChatFlow(jid)) chatFlowFolders.add(group.folder);
     }
 
     for (const sourceGroup of groupFolders) {
-      // External membership-intake channels are sandboxed and have no IPC
-      // write tools; defense in depth — ignore ALL IPC from them so a
-      // prompt-injected intake run can never reach a privileged op.
-      if (membershipFolders.has(sourceGroup)) {
+      // External chat-flow channels are sandboxed and have no IPC write
+      // tools; defense in depth — ignore ALL IPC from them so a
+      // prompt-injected flow run can never reach a privileged op.
+      if (chatFlowFolders.has(sourceGroup)) {
         try {
           for (const sub of ['messages', 'tasks']) {
             const d = path.join(ipcBaseDir, sourceGroup, sub);
@@ -328,7 +328,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
         logger.warn(
           { sourceGroup },
-          'Ignoring IPC from external membership channel (sandboxed)',
+          'Ignoring IPC from external chat-flow channel (sandboxed)',
         );
         continue;
       }
