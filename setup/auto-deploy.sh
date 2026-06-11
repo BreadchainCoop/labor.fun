@@ -49,6 +49,39 @@ MAX_DEFER_SECONDS="${MAX_DEFER_SECONDS:-900}"   # 15 min — override via env
 
 log() { echo "[auto-deploy $(date -u +%H:%M:%S)] $*"; }
 
+# Reconcile nanoclaw-agent:latest with the registry on idle ticks. safe-deploy
+# pulls the CI-built image right after a merge, but CI's image build can land
+# minutes later — the failed pull kept the previous image, and since deploys
+# only run on NEW commits, nothing ever retried for that sha. Each idle tick,
+# make sure the local tag matches the image CI built for the last commit that
+# touched container/ (the only commits container.yml publishes images for);
+# pull + retag when it doesn't. Steady state — image already local and tagged —
+# is a no-op with no network calls beyond the ls-remote we already did.
+reconcile_agent_image() {
+  [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ] || return 0
+  local sha ref want have
+  sha="$(su - "$APP_USER" -c "git -C '$GIT_DIR' log -1 --format=%H -- container/" 2>/dev/null || true)"
+  [ -n "$sha" ] || return 0
+  ref="$CONTAINER_REGISTRY_IMAGE:$sha"
+  have="$(docker image inspect nanoclaw-agent:latest -f '{{.Id}}' 2>/dev/null || true)"
+  want="$(docker image inspect "$ref" -f '{{.Id}}' 2>/dev/null || true)"
+  if [ -z "$want" ]; then
+    # Image not local — probe the registry cheaply first. Absent means CI
+    # hasn't published it yet (still building, or pre-CI history); retry on
+    # a later tick. Works unauthenticated for public packages; for private
+    # ones the probe just fails and reconciliation stays a no-op.
+    timeout 30 docker manifest inspect "$ref" >/dev/null 2>&1 || return 0
+    log "agent image $ref published — pulling"
+    timeout 600 docker pull "$ref" >/dev/null 2>&1 \
+      || { log "WARN: reconcile pull failed for $ref"; return 0; }
+    want="$(docker image inspect "$ref" -f '{{.Id}}' 2>/dev/null || true)"
+  fi
+  if [ -n "$want" ] && [ "$want" != "$have" ]; then
+    docker tag "$ref" nanoclaw-agent:latest
+    log "reconciled nanoclaw-agent:latest -> $ref (was ${have:-<none>})"
+  fi
+}
+
 LOCAL="$(su - "$APP_USER" -c "git -C '$GIT_DIR' rev-parse HEAD")"
 # 30s timeout: a slow/down GitHub shouldn't wedge the timer.
 REMOTE="$(timeout 30 su - "$APP_USER" -c "git -C '$GIT_DIR' ls-remote origin main" 2>/dev/null | cut -f1)"
@@ -59,9 +92,11 @@ if [ -z "$REMOTE" ]; then
 fi
 
 if [ "$LOCAL" = "$REMOTE" ]; then
-  # Already at origin/main — most ticks land here. Stay quiet and clear
-  # any leftover defer state so the next backlog starts clean.
+  # Already at origin/main — most ticks land here. Clear any leftover defer
+  # state, then self-heal the agent image in case a recent deploy raced CI's
+  # image build (quiet no-op when everything already matches).
   rm -f "$DEFER_STATE"
+  reconcile_agent_image
   exit 0
 fi
 
