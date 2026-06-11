@@ -388,6 +388,18 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
+  // Idempotency ledger for the operational-report loop (#34): one row per
+  // period (e.g. ISO week `2026-W23`) that has already been delivered, so the
+  // report is sent at most once per period regardless of restarts / sweep
+  // cadence. See src/integrations/operational-report.ts.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ops_report_log (
+      period  TEXT NOT NULL,
+      sent_at TEXT NOT NULL,
+      PRIMARY KEY (period)
+    )
+  `);
+
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:ops","platform":"cli","kb_person":"ops"}]'
@@ -1197,6 +1209,24 @@ export function getRecentPmDms(
     reason: string;
     sent_at: string;
   }>;
+}
+
+// --- Operational report idempotency ---
+
+/** Whether the operational report for `period` has already been delivered. */
+export function hasOpsReportFired(period: string): boolean {
+  const row = db
+    .prepare(`SELECT 1 FROM ops_report_log WHERE period = ?`)
+    .get(period);
+  return row !== undefined;
+}
+
+/** Record that the operational report for `period` was delivered now. */
+export function recordOpsReportFired(period: string): void {
+  db.prepare(
+    `INSERT INTO ops_report_log (period, sent_at) VALUES (?, ?)
+     ON CONFLICT(period) DO UPDATE SET sent_at = excluded.sent_at`,
+  ).run(period, new Date().toISOString());
 }
 
 // --- Meeting summary accessors ---

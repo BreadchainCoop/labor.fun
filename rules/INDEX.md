@@ -38,3 +38,4 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
 | [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on the org's GitHub org (`githubOrg`) |
 | [Discord Integration](integrations/discord.md) | `rules/integrations/` | Reading a Discord channel's past messages (`fetch_discord_history`), registered vs. unregistered channels |
+| [Operational Reports](integrations/operational-reports.md) | `rules/integrations/` | Recurring leadership readout — what's late, load vs. capacity, bottlenecks; member-profile capacity fields |
