@@ -48,6 +48,12 @@ and `logger`. Plugins are **plain JS** (the framework build compiles `src/`, not
 the same name, and are isolated — a throwing plugin is logged and skipped, never
 fatal. The `Channel` / `Integration` interfaces below define what to return.
 
+For a complete reference plugin — a real org workflow (quarterly Strategic
+Directives kickoff: multi-nudge input collection + AI first draft) driven
+entirely through the KB and IPC filesystem contracts, with zero secrets and
+zero framework imports — see `profiles/example/plugins/sd-kickoff.mjs` and its
+companion container skill `profiles/example/container-skills/sd-kickoff/`.
+
 ---
 
 ## 1. Channels
