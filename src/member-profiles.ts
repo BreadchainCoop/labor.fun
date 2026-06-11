@@ -8,7 +8,7 @@
  * fields:
  *
  *   ---
- *   name: Jane Doe
+ *   title: Jane Doe
  *   slug: jane-doe
  *   team: Operations              # optional — groups members in the report
  *   expected_hours_per_week: 20   # optional — declared, NOT verified hours
@@ -24,9 +24,12 @@
  * fabricate hours we don't have (issue #34's "hours verification" decision:
  * capacity is self-declared and labelled as such, not inferred).
  *
- * Keying: the report joins capacities to tasks by the person's **display name**
- * (`name:`), because that's what task `owners` frontmatter uses. A `slug` alias
- * is kept too so either form resolves.
+ * Keying: the report joins capacities to tasks by the person's **display
+ * name**, because that's what task `owners` frontmatter uses. The display name
+ * is read from `title:` (the framework's people-file convention — what
+ * src/permissions.ts reads and the Discord members sync writes), falling back
+ * to `name:` (used by some hand-authored profiles). A `slug` alias is kept too
+ * so either form resolves.
  */
 
 import fs from 'fs';
@@ -99,7 +102,7 @@ export function loadMemberCapacitiesFromKb(
       const fm = matter(fs.readFileSync(path.join(peopleDir, file), 'utf-8'))
         .data as Record<string, unknown>;
       const slug = firstString(fm.slug) || file.replace(/\.md$/, '');
-      const name = firstString(fm.name) || slug;
+      const name = firstString(fm.title, fm.name) || slug;
       out.push({
         name,
         slug,
