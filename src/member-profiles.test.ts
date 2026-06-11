@@ -50,6 +50,15 @@ Ops lead.`,
     });
   });
 
+  it('reads the display name from title: (framework convention) over name:', () => {
+    writePerson(
+      'jane-doe.md',
+      `---\ntitle: Jane Doe\nname: ignored\ncapacity_points: 3\n---\nhi`,
+    );
+    const caps = loadMemberCapacitiesFromKb(dir);
+    expect(caps[0].name).toBe('Jane Doe');
+  });
+
   it('yields a profile with undefined capacity when fields are absent', () => {
     writePerson('bob.md', `---\nname: Bob\n---\nhi`);
     const caps = loadMemberCapacitiesFromKb(dir);

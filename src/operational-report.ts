@@ -214,7 +214,16 @@ export function buildOperationalReport(
   };
 }
 
-function taskLine(t: PmTask, nowMs: number): string {
+/**
+ * Sanitize a free-text value for interpolation into a markdown table cell:
+ * escape `|` (column separator) and collapse newlines, so a name/team/note
+ * can't break the table or inject extra columns.
+ */
+function mdCell(s: string): string {
+  return s.replace(/\|/g, '\\|').replace(/\s*\r?\n\s*/g, ' ');
+}
+
+function taskLine(t: PmTask, nowMs: number, withOwners = true): string {
   const owners = t.owners.length ? t.owners.join(', ') : 'unassigned';
   let when = '';
   if (t.deadline) {
@@ -226,7 +235,8 @@ function taskLine(t: PmTask, nowMs: number): string {
       when = ` — due ${t.deadline}`;
     }
   }
-  return `- ${t.id} — ${t.title} (${owners})${when}`;
+  const who = withOwners ? ` (${owners})` : '';
+  return `- ${t.id} — ${t.title}${who}${when}`;
 }
 
 export interface RenderReportOptions {
@@ -264,6 +274,9 @@ export function renderOperationalReport(
   ];
 
   // --- What's late ---
+  // The coop view stays at the team level: no per-person breakdown and no
+  // owner names on task lines, so a co-op-wide post never carries
+  // individual-level performance signals (those are the leaders view's job).
   lines.push("## What's late", '');
   if (!report.overdue.length) {
     lines.push('- Nothing overdue. 🎉', '');
@@ -273,26 +286,29 @@ export function renderOperationalReport(
     if (lateTeams.length) {
       for (const t of lateTeams) {
         lines.push(`**${t.team}** (${t.overdueTasks.length} late)`);
-        for (const task of t.overdueTasks) lines.push(taskLine(task, nowMs));
+        for (const task of t.overdueTasks)
+          lines.push(taskLine(task, nowMs, isLeaders));
         lines.push('');
       }
     } else {
       lines.push('- (no team mapping on overdue work)', '');
     }
-    lines.push('### By person', '');
-    const byPerson = new Map<string, PmTask[]>();
-    for (const task of report.overdue) {
-      for (const owner of ownersOf(task)) {
-        const arr = byPerson.get(owner) || [];
-        arr.push(task);
-        byPerson.set(owner, arr);
+    if (isLeaders) {
+      lines.push('### By person', '');
+      const byPerson = new Map<string, PmTask[]>();
+      for (const task of report.overdue) {
+        for (const owner of ownersOf(task)) {
+          const arr = byPerson.get(owner) || [];
+          arr.push(task);
+          byPerson.set(owner, arr);
+        }
       }
-    }
-    for (const owner of [...byPerson.keys()].sort()) {
-      lines.push(`**${owner}** (${byPerson.get(owner)!.length} late)`);
-      for (const task of byPerson.get(owner)!)
-        lines.push(taskLine(task, nowMs));
-      lines.push('');
+      for (const owner of [...byPerson.keys()].sort()) {
+        lines.push(`**${owner}** (${byPerson.get(owner)!.length} late)`);
+        for (const task of byPerson.get(owner)!)
+          lines.push(taskLine(task, nowMs));
+        lines.push('');
+      }
     }
   }
 
@@ -303,8 +319,17 @@ export function renderOperationalReport(
   } else {
     for (const t of report.blocking) {
       const waiting = t.downstream.join(', ');
-      lines.push(taskLine(t, nowMs) + (waiting ? ` — blocks: ${waiting}` : ''));
+      lines.push(
+        taskLine(t, nowMs, isLeaders) + (waiting ? ` — blocks: ${waiting}` : ''),
+      );
     }
+    lines.push('');
+  }
+
+  // --- Due soon (forward look) ---
+  if (report.dueSoon.length) {
+    lines.push('## Due soon', '');
+    for (const t of report.dueSoon) lines.push(taskLine(t, nowMs, isLeaders));
     lines.push('');
   }
 
@@ -327,10 +352,10 @@ export function renderOperationalReport(
         m.loadRatio != null
           ? `${Math.round(m.loadRatio * 100)}%${m.overloaded ? ' ⚠️' : ''}`
           : '—';
-      const note = m.payParityNote || '';
+      const note = m.payParityNote ? mdCell(m.payParityNote) : '';
       lines.push(
-        `| ${m.name} | ${m.team || '—'} | ${m.openCount} | ${m.estimateSum} | ` +
-          `${cap}${hours} | ${ratio} | ${note} |`,
+        `| ${mdCell(m.name)} | ${m.team ? mdCell(m.team) : '—'} | ` +
+          `${m.openCount} | ${m.estimateSum} | ${cap}${hours} | ${ratio} | ${note} |`,
       );
     }
     lines.push('');
@@ -353,7 +378,7 @@ export function renderOperationalReport(
     lines.push('|---|---|---|---|');
     for (const t of report.teams) {
       lines.push(
-        `| ${t.team} | ${t.members.length} | ${t.openCount} | ${t.estimateSum} |`,
+        `| ${mdCell(t.team)} | ${t.members.length} | ${t.openCount} | ${t.estimateSum} |`,
       );
     }
     lines.push('');

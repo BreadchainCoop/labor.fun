@@ -125,14 +125,17 @@ describe('buildOperationalReport', () => {
   });
 
   it('joins capacity by slug as well as display name', () => {
-    const tasks = [task({ owners: ['Alice'], estimate: '10' })];
+    // Owner is the SLUG, not the display name — only the slug key can match.
+    const tasks = [task({ owners: ['alice-smith'], estimate: '10' })];
     const r = buildOperationalReport(
       tasks,
-      [cap({ name: 'Alice', slug: 'alice', capacityPoints: 4 })],
+      [cap({ name: 'Alice Smith', slug: 'alice-smith', capacityPoints: 4 })],
       NOW,
       DUE_SOON,
     );
-    expect(r.members[0].loadRatio).toBe(2.5);
+    const bySlug = r.members.find((m) => m.name === 'alice-smith')!;
+    expect(bySlug.loadRatio).toBe(2.5);
+    expect(bySlug.overloaded).toBe(true);
   });
 });
 
@@ -176,6 +179,50 @@ describe('renderOperationalReport', () => {
     expect(md).toContain('Load by team');
     expect(md).not.toContain('20h');
     expect(md).not.toContain('declared, not verified');
+  });
+
+  it('coop view carries no individual-level signals in the late/bottleneck lists', () => {
+    const md = renderOperationalReport(report, { audience: 'coop' });
+    expect(md).not.toContain('By person');
+    // Owner names appear nowhere — not on overdue lines, not on bottleneck lines.
+    expect(md).not.toContain('Alice');
+    expect(md).not.toContain('Bob');
+    // The leaders view of the same report does name owners.
+    const leadersMd = renderOperationalReport(report, { audience: 'leaders' });
+    expect(leadersMd).toContain('By person');
+    expect(leadersMd).toContain('Alice');
+  });
+
+  it('escapes pipes/newlines in free-text table cells', () => {
+    const r = buildOperationalReport(
+      [task({ owners: ['Eve | DROP'], estimate: '1' })],
+      [
+        cap({
+          name: 'Eve | DROP',
+          team: 'A|B',
+          capacityPoints: 2,
+          payParityNote: 'line1\nline2',
+        }),
+      ],
+      NOW,
+      DUE_SOON,
+    );
+    const md = renderOperationalReport(r, { audience: 'leaders' });
+    expect(md).toContain('Eve \\| DROP');
+    expect(md).toContain('A\\|B');
+    expect(md).toContain('line1 line2');
+  });
+
+  it('renders a due-soon section when tasks approach their deadline', () => {
+    const r = buildOperationalReport(
+      [task({ id: 'SOON', deadline: '2026-06-18' })], // 3 days out from NOW
+      [],
+      NOW,
+      DUE_SOON,
+    );
+    const md = renderOperationalReport(r);
+    expect(md).toContain('## Due soon');
+    expect(md).toContain('SOON');
   });
 
   it('reports a clean slate when nothing is overdue', () => {

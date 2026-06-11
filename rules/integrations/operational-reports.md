@@ -31,8 +31,9 @@ defaults; each is configurable.
 - **`leaders`** (default) — full per-person hours/load table, the over-capacity
   check-in list, and pay-parity notes. Point `OPS_REPORT_TARGET_GROUP` at a
   **private leadership channel**.
-- **`coop`** — team-level aggregates only, **no per-person hours**, gentler
-  framing. Safe to post co-op-wide.
+- **`coop`** — team-level aggregates only: **no per-person hours**, no
+  per-person overdue breakdown, and no owner names on task lines. Gentler
+  framing; safe to post co-op-wide.
 
 The same data builds either view; only the render changes. Respect the
 [privacy policy](../access-control/privacy-policy.md) when choosing the target
@@ -64,7 +65,7 @@ same files that act as the allowlist. All fields are **optional**:
 
 ```yaml
 ---
-name: Jane Doe
+title: Jane Doe
 slug: jane-doe
 team: Operations            # groups the member in the report's "by team" view
 expected_hours_per_week: 20 # declared, NOT verified
@@ -73,8 +74,9 @@ pay_parity_note: part-time  # free-text caveat surfaced next to any flag
 ---
 ```
 
-The report joins capacity to tasks by **display name** (`name:`), matching task
-`owners` frontmatter; `slug` also resolves.
+The report joins capacity to tasks by **display name**, matching task `owners`
+frontmatter. The display name is read from `title:` (the framework's people-file
+convention), falling back to `name:`; the `slug` also resolves.
 
 ## Cadence & idempotency
 
