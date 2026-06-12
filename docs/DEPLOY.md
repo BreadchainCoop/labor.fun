@@ -228,6 +228,29 @@ Per earlier notes: `rsync` clobbered `.env`, sessions cached stale source, merge
 
 ---
 
+## Deploy notifications
+
+After a successful deploy that **advanced `main`** (`OLD != NEW`), `safe-deploy.sh`
+runs `setup/deploy-notify.mjs <deployed-sha>` as the app user. It looks up the PR
+the deployed commit came from and comments on it, @-mentioning whoever merged it:
+*"🚀 Deployed to production — @user your changes from #NN are now live."*
+
+- **Fires once per merge.** No-op re-syncs and the auto-deploy reconciler's idle
+  ticks re-run the deploy at the same SHA; the `OLD != NEW` guard skips those so
+  nobody is re-pinged.
+- **Best-effort, never fatal.** The helper always exits 0. A missing token, a
+  direct push with no PR, or a GitHub error just logs a line — a notification
+  can never fail or roll back an otherwise-healthy deploy.
+- **Auth — reuses the existing token.** No new token or file: it uses the same
+  `GITHUB_PERSONAL_ACCESS_TOKEN` the bot already relies on for the GitHub MCP
+  server and project sync (already PR/issue-write capable), read from
+  `$DEPLOY_ROOT/.env` the same way `src/env.ts` does. Resolution order:
+  `$DEPLOY_NOTIFY_TOKEN` → `$GITHUB_PERSONAL_ACCESS_TOKEN` / `$GH_TOKEN` (env) →
+  the same keys parsed from `.env`. If none resolves it logs and skips.
+- **Config.** `NOTIFY_REPO` overrides the target repo (default `BreadchainCoop/labor.fun`).
+
+---
+
 ## Future options (alternatives to rsync)
 
 Ranked by effort vs impact. Not urgent — current system works.
