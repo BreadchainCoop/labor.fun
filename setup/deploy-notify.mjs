@@ -13,16 +13,18 @@
 // GitHub hiccup all just log a line and return — a notification must never be
 // able to fail (or roll back) an otherwise-healthy deploy.
 //
-// Auth — a GitHub token with `pull_requests: write` (fine-grained) or classic
-// `repo` scope on the framework repo, resolved in order:
-//   1. $DEPLOY_NOTIFY_TOKEN          (env)
-//   2. $DEPLOY_ROOT/repo-tokens/notify   (file — preferred on the droplet)
-//   3. $DEPLOY_ROOT/repo-tokens/github   (file — fallback)
-// If none is found the feature simply stays dormant (logs + returns).
+// Auth — reuses the app's existing GitHub token (the same
+// `GITHUB_PERSONAL_ACCESS_TOKEN` the bot already uses for the GitHub MCP server
+// and project sync, so it already has PR/issue write). No new token or file.
+// Resolved in order:
+//   1. $DEPLOY_NOTIFY_TOKEN            (env — optional override)
+//   2. $GITHUB_PERSONAL_ACCESS_TOKEN / $GH_TOKEN   (env, if exported)
+//   3. the same keys parsed out of $DEPLOY_ROOT/.env   (mirrors src/env.ts)
+// If none resolves, the feature simply stays dormant (logs + returns).
 //
 // Config:
-//   $NOTIFY_REPO   owner/repo            (default: BreadchainCoop/labor.fun)
-//   $DEPLOY_ROOT   where repo-tokens/ is (default: /opt/breadbrich)
+//   $NOTIFY_REPO   owner/repo   (default: BreadchainCoop/labor.fun)
+//   $DEPLOY_ROOT   app dir holding .env   (default: /opt/breadbrich)
 //
 // Requires Node 18+ for global fetch (the app runs Node 22 — see .nvmrc).
 
@@ -32,18 +34,48 @@ const log = (m) => console.log(`[deploy-notify] ${m}`);
 
 const sha = process.argv[2];
 const repo = process.env.NOTIFY_REPO || 'BreadchainCoop/labor.fun';
-const deployRoot = process.env.DEPLOY_ROOT || '/opt/breadbrich';
+const deployRoot = process.env.DEPLOY_ROOT || process.cwd();
+
+const TOKEN_KEYS = ['DEPLOY_NOTIFY_TOKEN', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'GH_TOKEN'];
+
+// Parse selected keys out of $DEPLOY_ROOT/.env without loading them into the
+// environment — same approach (and same file) as src/env.ts readEnvFile, so we
+// pick up exactly the token the app itself uses.
+function readEnvFileTokens() {
+  const found = {};
+  let content;
+  try {
+    content = readFileSync(`${deployRoot}/.env`, 'utf8');
+  } catch {
+    return found; // no .env reachable — caller falls back to nothing
+  }
+  for (const line of content.split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const i = t.indexOf('=');
+    if (i === -1) continue;
+    const key = t.slice(0, i).trim();
+    if (!TOKEN_KEYS.includes(key) || found[key]) continue;
+    let v = t.slice(i + 1).trim();
+    if (
+      v.length >= 2 &&
+      ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))
+    ) {
+      v = v.slice(1, -1);
+    }
+    if (v) found[key] = v;
+  }
+  return found;
+}
 
 function resolveToken() {
-  const fromEnv = (process.env.DEPLOY_NOTIFY_TOKEN || '').trim();
-  if (fromEnv) return fromEnv;
-  for (const name of ['notify', 'github']) {
-    try {
-      const t = readFileSync(`${deployRoot}/repo-tokens/${name}`, 'utf8').trim();
-      if (t) return t;
-    } catch {
-      /* file absent/unreadable — try the next candidate */
-    }
+  for (const k of TOKEN_KEYS) {
+    const v = (process.env[k] || '').trim();
+    if (v) return v;
+  }
+  const fromFile = readEnvFileTokens();
+  for (const k of TOKEN_KEYS) {
+    if (fromFile[k]) return fromFile[k];
   }
   return '';
 }
@@ -55,7 +87,7 @@ async function main() {
   }
   const token = resolveToken();
   if (!token) {
-    log('no token (DEPLOY_NOTIFY_TOKEN or repo-tokens/{notify,github}) — skipping');
+    log('no GitHub token (GITHUB_PERSONAL_ACCESS_TOKEN in .env or env) — skipping');
     return;
   }
 
