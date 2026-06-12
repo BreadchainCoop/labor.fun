@@ -94,6 +94,9 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$PROFILE_ABS" 2>/dev/null || true
 
 # Fetch latest main
 log "git fetch + reset --hard origin/main..."
+# Record HEAD before the reset so the success path can tell whether this deploy
+# actually advanced main (and thus whether to notify the merger).
+PREV_SHA_FULL=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse HEAD" 2>/dev/null || echo "")
 su - "$SERVICE_USER" -c "cd $SOURCE && git fetch origin main && git reset --hard origin/main" >> "$LOG" 2>&1 || { log "git fetch/reset failed"; exit 1; }
 CURRENT_SHA=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse --short HEAD")
 CURRENT_SHA_FULL=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse HEAD")
@@ -197,6 +200,13 @@ for i in 1 2 3 4 5 6; do
     if journalctl -u "$SERVICE_NAME" --since "60 seconds ago" | grep -q "Credential proxy started"; then
       log "Breadbrich Engels active, credential proxy up. Deploy @ $CURRENT_SHA complete."
       rm -f /tmp/$SERVICE_NAME-pre-pkg.json /tmp/$SERVICE_NAME-pre-lock.json
+      # Notify the merger their change is live — only when HEAD advanced this
+      # run, and never fatally (a notification must not fail a healthy deploy).
+      if [ "${PREV_SHA_FULL:-}" != "$CURRENT_SHA_FULL" ] && [ -f "$DEPLOY_ROOT/setup/deploy-notify.mjs" ]; then
+        log "Notify merger that $CURRENT_SHA is live"
+        su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && DEPLOY_ROOT='$DEPLOY_ROOT' NOTIFY_REPO='${NOTIFY_REPO:-}' node setup/deploy-notify.mjs '$CURRENT_SHA_FULL'" >> "$LOG" 2>&1 \
+          || log "deploy-notify failed (non-fatal)"
+      fi
       exit 0
     fi
   fi
