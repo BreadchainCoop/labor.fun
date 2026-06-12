@@ -316,3 +316,16 @@ if [ -f "$SELF_SRC" ] && ! cmp -s "$SELF_SRC" "$SELF_DST" 2>/dev/null; then
 fi
 
 log "DEPLOY OK — live app now at $NEW"
+
+# --- 10. Notify the merger that their change is live (best-effort) ---------
+# Fire ONLY when HEAD actually advanced this run. A no-op re-sync (OLD == NEW)
+# and the auto-deploy reconciler's idle ticks both re-run this script at the
+# same SHA; without this guard every tick would re-ping the same person.
+# Runs as the app user — its Node has global fetch and owns repo-tokens/. The
+# ERR trap is already cleared (step 8) and we swallow any failure, so a
+# notification can never fail or roll back an already-healthy deploy.
+if [ "$OLD" != "$NEW" ] && [ -f "$APP_DIR/setup/deploy-notify.mjs" ]; then
+  log "Notify merger that $NEW is live"
+  as_app "cd '$APP_DIR' && DEPLOY_ROOT='$DEPLOY_ROOT' NOTIFY_REPO='${NOTIFY_REPO:-}' node setup/deploy-notify.mjs '$NEW'" \
+    || log "deploy-notify failed (non-fatal)"
+fi

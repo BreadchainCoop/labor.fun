@@ -228,6 +228,28 @@ Per earlier notes: `rsync` clobbered `.env`, sessions cached stale source, merge
 
 ---
 
+## Deploy notifications
+
+After a successful deploy that **advanced `main`** (`OLD != NEW`), `safe-deploy.sh`
+runs `setup/deploy-notify.mjs <deployed-sha>` as the app user. It looks up the PR
+the deployed commit came from and comments on it, @-mentioning whoever merged it:
+*"🚀 Deployed to production — @user your changes from #NN are now live."*
+
+- **Fires once per merge.** No-op re-syncs and the auto-deploy reconciler's idle
+  ticks re-run the deploy at the same SHA; the `OLD != NEW` guard skips those so
+  nobody is re-pinged.
+- **Best-effort, never fatal.** The helper always exits 0. A missing token, a
+  direct push with no PR, or a GitHub error just logs a line — a notification
+  can never fail or roll back an otherwise-healthy deploy.
+- **Auth.** Needs a GitHub token with `pull_requests: write` (fine-grained) or
+  classic `repo` scope, resolved in order: `$DEPLOY_NOTIFY_TOKEN` →
+  `repo-tokens/notify` → `repo-tokens/github`. **The feature stays dormant until
+  one is provided** — drop a PAT at `/opt/breadbrich/repo-tokens/notify` (owned
+  by the service user) to activate it.
+- **Config.** `NOTIFY_REPO` overrides the target repo (default `BreadchainCoop/labor.fun`).
+
+---
+
 ## Future options (alternatives to rsync)
 
 Ranked by effort vs impact. Not urgent — current system works.
