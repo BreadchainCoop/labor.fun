@@ -241,11 +241,12 @@ the deployed commit came from and comments on it, @-mentioning whoever merged it
 - **Best-effort, never fatal.** The helper always exits 0. A missing token, a
   direct push with no PR, or a GitHub error just logs a line — a notification
   can never fail or roll back an otherwise-healthy deploy.
-- **Auth.** Needs a GitHub token with `pull_requests: write` (fine-grained) or
-  classic `repo` scope, resolved in order: `$DEPLOY_NOTIFY_TOKEN` →
-  `repo-tokens/notify` → `repo-tokens/github`. **The feature stays dormant until
-  one is provided** — drop a PAT at `/opt/breadbrich/repo-tokens/notify` (owned
-  by the service user) to activate it.
+- **Auth — reuses the existing token.** No new token or file: it uses the same
+  `GITHUB_PERSONAL_ACCESS_TOKEN` the bot already relies on for the GitHub MCP
+  server and project sync (already PR/issue-write capable), read from
+  `$DEPLOY_ROOT/.env` the same way `src/env.ts` does. Resolution order:
+  `$DEPLOY_NOTIFY_TOKEN` → `$GITHUB_PERSONAL_ACCESS_TOKEN` / `$GH_TOKEN` (env) →
+  the same keys parsed from `.env`. If none resolves it logs and skips.
 - **Config.** `NOTIFY_REPO` overrides the target repo (default `BreadchainCoop/labor.fun`).
 
 ---
