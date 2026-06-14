@@ -58,6 +58,10 @@ see:
   self-evaluation tracking (round-robin assignment, per-member nudge ladder,
   status summary; the companion skill files reviews and books review meetings
   via the agent's `gws` calendar tool).
+- `profiles/example/plugins/admin-email.mjs` — administrative email →
+  auto-issues. The plugin just keeps one recurring triage task in sync with KB
+  config (schedule/cancel/reschedule); the companion skill reads forwarded mail
+  via the agent's `gws` gmail tool, classifies it, and opens GitHub issues.
 
 Each pairs with a container skill under
 `profiles/example/container-skills/<name>/` for the agent-side half.
