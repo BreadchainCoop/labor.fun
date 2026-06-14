@@ -32,6 +32,7 @@ const envConfig = readEnvFile([
   'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
+  'ENABLED_SKILLS',
   'GITHUB_ORG',
   'SERVICE_USER',
   'REMINDER_LADDER',
@@ -74,6 +75,23 @@ export const ORG_WEBSITE = PROFILE.orgWebsite;
 export const GITHUB_ORG = envVal('GITHUB_ORG') || PROFILE.githubOrg;
 export const GITHUB_REPO = PROFILE.githubRepo;
 export const KB_DASHBOARD_URL = PROFILE.kbDashboardUrl;
+
+// Container skills that ship disabled by default (SKILL.md frontmatter
+// `default: false`) but should be enabled for this install. Merged from the
+// active profile's `enabledSkills` and the `ENABLED_SKILLS` env var
+// (comma-separated). Skills without the opt-in flag always load and need not
+// be listed. Consumed by container-runner.ts when syncing skills into each
+// container. See docs/PLUGINS.md → "Opt-in (off-by-default) skills".
+export const ENABLED_SKILLS: string[] = (() => {
+  const fromEnv = (envVal('ENABLED_SKILLS') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromProfile = Array.isArray(PROFILE.enabledSkills)
+    ? PROFILE.enabledSkills.map((s) => String(s).trim()).filter(Boolean)
+    : [];
+  return Array.from(new Set([...fromProfile, ...fromEnv]));
+})();
 export const SERVICE_USER =
   envVal('SERVICE_USER') || PROFILE.serviceUser || 'breadbrich';
 export const ASSISTANT_HAS_OWN_NUMBER =
