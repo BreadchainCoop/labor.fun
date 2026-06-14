@@ -69,17 +69,51 @@ export function parseCommittee(mdText) {
   };
 }
 
-function kickoffPost(label, members) {
+/**
+ * Render a member for a CHANNEL post: their Discord mention `<@id>` when we
+ * resolved one (so the post actually pings them — a plain name doesn't), with
+ * the readable name appended; otherwise just the slug. `mentions` maps slug →
+ * discord_id (see resolveDiscordIds). DMs don't use this — the recipient is
+ * already the person being addressed.
+ */
+function mentionFor(slug, mentions) {
+  const id = mentions?.[slug];
+  return id ? `<@${id}> (${slug})` : slug;
+}
+
+/**
+ * Map committee slugs → discord_id by reading each `people/<slug>.md`
+ * frontmatter. Used to render channel mentions. A member with no people file
+ * or no discord_id is simply omitted (the post falls back to their slug).
+ */
+export function resolveDiscordIds(ctxDir, members) {
+  const out = {};
+  for (const slug of members) {
+    try {
+      const fm = matter(
+        fs.readFileSync(path.join(ctxDir, 'people', `${slug}.md`), 'utf-8'),
+      ).data;
+      const id = fm?.discord_id;
+      if (id) out[slug] = String(id);
+    } catch {
+      // No people file / unreadable — leave unmapped, render the slug.
+    }
+  }
+  return out;
+}
+
+function kickoffPost(label, members, mentions) {
+  const who = members.map((m) => mentionFor(m, mentions)).join(', ');
   return (
     `📋 Strategic Directives kickoff for ${label} starts now. ` +
-    `I'm collecting input from the SD committee (${members.join(', ')}) by DM. ` +
+    `I'm collecting input from the SD committee (${who}) by DM. ` +
     `Once everyone has weighed in — or the drafting deadline arrives — I'll post a first draft here for review.`
   );
 }
 
-function escalationPost(slug, asks, label) {
+function escalationPost(slug, asks, label, mentions) {
   return (
-    `⚠️ ${slug} hasn't provided Strategic Directives input for ${label} after ${asks} DM reminders. ` +
+    `⚠️ ${mentionFor(slug, mentions)} hasn't provided Strategic Directives input for ${label} after ${asks} DM reminders. ` +
     `Committee: please follow up directly — I'll stop nudging them.`
   );
 }
@@ -105,7 +139,7 @@ function askText(label, askNumber) {
  * so the nudge ladder is unit-testable. Returns the actions plus the next
  * state (never mutates the input state).
  */
-export function planActions({ nowMs, cfg, members, state, inputs }) {
+export function planActions({ nowMs, cfg, members, state, inputs, mentions }) {
   const out = { dms: [], posts: [], requestDraft: false };
   const st = {
     ...state,
@@ -116,7 +150,7 @@ export function planActions({ nowMs, cfg, members, state, inputs }) {
 
   if (!st.kickoffAnnouncedAt) {
     st.kickoffAnnouncedAt = new Date(nowMs).toISOString();
-    out.posts.push(kickoffPost(cfg.label, members));
+    out.posts.push(kickoffPost(cfg.label, members, mentions));
   }
 
   const nudgeMs = cfg.nudgeEveryDays * DAY_MS;
@@ -128,7 +162,7 @@ export function planActions({ nowMs, cfg, members, state, inputs }) {
       if (m.asks >= cfg.maxNudges) {
         if (!m.escalated) {
           m.escalated = true;
-          out.posts.push(escalationPost(slug, m.asks, cfg.label));
+          out.posts.push(escalationPost(slug, m.asks, cfg.label, mentions));
         }
       } else {
         m.asks += 1;
@@ -258,6 +292,10 @@ export function tick({ profileDir, logger, nowMs }) {
       : [],
   );
 
+  // Resolve discord_ids so channel posts actually ping members (a plain name
+  // doesn't notify on Discord). Missing ids fall back to the slug.
+  const mentions = resolveDiscordIds(ctxDir, committee.members);
+
   const plan = planActions({
     nowMs,
     cfg: {
@@ -270,6 +308,7 @@ export function tick({ profileDir, logger, nowMs }) {
     members: committee.members,
     state,
     inputs,
+    mentions,
   });
 
   // Same-group IPC namespace: the shared-KB group's own dirs, so the
