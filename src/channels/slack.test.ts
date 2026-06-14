@@ -926,6 +926,34 @@ describe('SlackChannel', () => {
         thread_ts: '1704067200.000000', // thread A, not B
       });
     });
+
+    // The bot's reply to a user should land as a threaded reply to that user's
+    // original message, even when the message was posted at the channel root
+    // (no pre-existing thread). The reply roots a new thread on the triggering
+    // message by using its own ts as thread_ts.
+    it('roots a new thread on a top-level triggering message', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // Top-level message: no thread_ts.
+      await triggerMessageEvent(
+        createMessageEvent({
+          ts: '1704067400.000000',
+          text: '@Jonesy hello',
+        }),
+      );
+
+      await channel.sendMessage('slack:C0123456789', 'Hi there', {
+        replyToMessageId: '1704067400.000000',
+      });
+
+      expect(currentApp().client.chat.postMessage).toHaveBeenCalledWith({
+        channel: 'C0123456789',
+        text: 'Hi there',
+        thread_ts: '1704067400.000000', // threaded under the user's message
+      });
+    });
   });
 
   // --- ownsJid ---
