@@ -335,6 +335,161 @@ describe('planActions — nudge + tracking state machine', () => {
   });
 });
 
+describe('planActions — auto-scheduling pass', () => {
+  const members = ['alice', 'bob', 'carol'];
+  const assignments = computeAssignments(members, 2); // mutual pairs (a↔b etc.)
+  const cfg = {
+    label: '2026-Q2',
+    quarterEndMs: Q2_END,
+    nudgeEveryDays: 4,
+    maxNudges: 4,
+    summaryDaysBeforeEnd: 7,
+  };
+  const dir = {
+    alice: { id: '1', name: 'Alice' },
+    bob: { id: '2', name: 'Bob' },
+    carol: { id: '3', name: 'Carol' },
+  };
+  const base = {
+    nowMs: JUNE_20,
+    cfg,
+    members,
+    assignments,
+    selfEvalDone: new Set(),
+    reviewsDone: new Set(),
+    dir,
+    autoSchedule: true,
+  };
+
+  it('off by default: no matchTasks and no availability prompt', () => {
+    const p = planActions({
+      ...base,
+      autoSchedule: false,
+      state: {},
+      availability: new Set(),
+      meetings: new Set(),
+    });
+    expect(p.matchTasks).toEqual([]);
+    expect(p.dms[0].text).not.toContain('free **this week**');
+  });
+
+  it('first DM asks for availability when auto-scheduling is on', () => {
+    const p = planActions({
+      ...base,
+      state: {},
+      availability: new Set(),
+      meetings: new Set(),
+    });
+    expect(p.dms[0].text).toContain('free **this week**');
+    // No one has filed availability yet → nothing to match.
+    expect(p.matchTasks).toEqual([]);
+  });
+
+  it('kicks a match task once both in a pair have filed availability', () => {
+    const p = planActions({
+      ...base,
+      state: {},
+      availability: new Set(['alice', 'bob']), // carol hasn't answered
+      meetings: new Set(),
+    });
+    const keys = p.matchTasks.map((m) => m.key);
+    expect(keys).toContain('alice--bob');
+    // Pairs needing carol can't match yet.
+    expect(keys).not.toContain('alice--carol');
+    expect(keys).not.toContain('bob--carol');
+    expect(p.state.matchKicked['alice--bob']).toBeTruthy();
+  });
+
+  it('schedules ONE meeting per unordered pair (mutual reviews dedup)', () => {
+    // a→b and b→a both outstanding → a single alice--bob meeting.
+    const p = planActions({
+      ...base,
+      state: {},
+      availability: new Set(['alice', 'bob', 'carol']),
+      meetings: new Set(),
+    });
+    const ab = p.matchTasks.filter((m) => m.key === 'alice--bob');
+    expect(ab).toHaveLength(1);
+  });
+
+  it('does not re-kick a pair within the retry window, nor when booked', () => {
+    const first = planActions({
+      ...base,
+      state: {},
+      availability: new Set(['alice', 'bob', 'carol']),
+      meetings: new Set(),
+    });
+    // Same day → no re-kick.
+    const soon = planActions({
+      ...base,
+      nowMs: JUNE_20 + 3600_000,
+      state: first.state,
+      availability: new Set(['alice', 'bob', 'carol']),
+      meetings: new Set(),
+    });
+    expect(soon.matchTasks).toEqual([]);
+    // Once the meeting file exists, never again.
+    const booked = planActions({
+      ...base,
+      nowMs: JUNE_20 + 5 * DAY,
+      state: first.state,
+      availability: new Set(['alice', 'bob', 'carol']),
+      meetings: new Set(['alice--bob', 'alice--carol', 'bob--carol']),
+    });
+    expect(booked.matchTasks).toEqual([]);
+  });
+
+  it('re-kicks after the retry window if no meeting got recorded (self-heal)', () => {
+    const first = planActions({
+      ...base,
+      state: {},
+      availability: new Set(['alice', 'bob']),
+      meetings: new Set(),
+    });
+    const later = planActions({
+      ...base,
+      nowMs: JUNE_20 + 2 * DAY, // > 1-day retry, still no meetings/alice--bob.md
+      state: first.state,
+      availability: new Set(['alice', 'bob']),
+      meetings: new Set(),
+    });
+    expect(later.matchTasks.map((m) => m.key)).toContain('alice--bob');
+  });
+
+  it('skips a pair whose review is already filed', () => {
+    const p = planActions({
+      ...base,
+      state: {},
+      availability: new Set(['alice', 'bob', 'carol']),
+      // both directions of alice--bob filed → no meeting needed for that pair
+      reviewsDone: new Set(['alice--bob', 'bob--alice']),
+      meetings: new Set(),
+    });
+    expect(p.matchTasks.map((m) => m.key)).not.toContain('alice--bob');
+  });
+});
+
+describe('matchTaskIpc', () => {
+  it('builds a once schedule_task targeting the channel with the pair paths', async () => {
+    const { matchTaskIpc } = await import('../peer-reviews.mjs');
+    const t = matchTaskIpc({
+      label: '2026-Q2',
+      pair: { a: 'alice', b: 'bob', key: 'alice--bob' },
+      channelJid: 'dc:9',
+      nowMs: Date.parse('2026-06-20T12:00:00Z'),
+    });
+    expect(t).toMatchObject({
+      type: 'schedule_task',
+      schedule_type: 'once',
+      context_mode: 'isolated',
+      targetJid: 'dc:9',
+    });
+    expect(t.prompt).toContain('availability/alice.md');
+    expect(t.prompt).toContain('meetings/alice--bob.md');
+    expect(t.schedule_value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
+  });
+});
+
 describe('resolveDirectory', () => {
   let ctxDir;
   beforeEach(() => {
@@ -479,5 +634,39 @@ describe('tick — filesystem integration against a temp profile', () => {
       .filter((t) => t.target === 'alice');
     // alice was DM'd once (kickoff) and is now complete → no second DM.
     expect(second).toHaveLength(1);
+  });
+
+  it('with auto_schedule: emits a meeting schedule_task once a pair has availability', () => {
+    fs.writeFileSync(
+      path.join(ctxDir(), 'peer-reviews', 'config.md'),
+      [
+        '---',
+        'members: [alice, bob, carol]',
+        'channel_jid: dc:999',
+        'auto_schedule: true',
+        '---',
+      ].join('\n'),
+    );
+    tick({ profileDir, logger, nowMs: JUNE_20 });
+    // Kickoff DMs ask for availability.
+    expect(
+      readIpc('tasks').find((t) => t.type === 'dm_user').text,
+    ).toContain('free **this week**');
+    // No availability filed yet → no meeting task.
+    expect(
+      readIpc('tasks').filter((t) => t.type === 'schedule_task'),
+    ).toHaveLength(0);
+
+    // alice + bob file availability.
+    const avail = path.join(ctxDir(), 'peer-reviews', '2026-Q2', 'availability');
+    fs.mkdirSync(avail, { recursive: true });
+    fs.writeFileSync(path.join(avail, 'alice.md'), '# a');
+    fs.writeFileSync(path.join(avail, 'bob.md'), '# b');
+
+    tick({ profileDir, logger, nowMs: JUNE_20 + 4 * DAY });
+    const meet = readIpc('tasks').filter((t) => t.type === 'schedule_task');
+    expect(meet).toHaveLength(1);
+    expect(meet[0].prompt).toContain('alice--bob');
+    expect(meet[0].targetJid).toBe('dc:999');
   });
 });

@@ -52,29 +52,55 @@ told them whom — e.g. "a peer review of Marv"), or says "record my review of X
 > Reviewer ≠ reviewee. Never let someone file a "review" of themselves into the
 > reviews/ directory — that's a self-eval.
 
-## Scheduling a review meeting (Google Calendar)
+## Auto-scheduling review meetings
 
-Trigger: a member wants to meet with their reviewer/reviewee for the review, or
-accepts the offer to schedule.
+When auto-scheduling is on, the flow asks each member for their availability and
+then has *you* match partners and book the meetings. Two halves:
 
-You have the `gws` Google Workspace tools (`mcp__gws__*`). Calendar is included.
-Run `gws_discover` (or the calendar tool's discovery) to find the exact
-create-event operation and its parameters, then:
+### A. Filing a member's availability (DM)
 
-1. Get **both** people's availability — ask each for a few windows in DM (use
-   `dm_user` to reach the other person by name), or check free/busy via the
-   calendar tool if their calendars are visible to the bot's account.
-2. Pick a slot that works for both (default 30 minutes unless they say otherwise).
-3. **Create the calendar event** with both as attendees (use their emails from
-   their people files when present), a clear title
-   (`Peer review: <reviewer> ↔ <reviewee> (<QUARTER>)`), and a short
-   description. Let Google send the invites.
-4. Confirm the booked time to both. Scheduling the meeting is a convenience —
-   the requirement is the *filed* review, so still nudge toward filing it.
+Trigger: a member's DM reply includes when they're free this week (the first
+nudge asked for it), or they say "here's my availability".
 
-If the calendar tool isn't available or a person has no email on file, say so
-plainly and fall back to proposing a time in the DM (don't claim you booked
-something you didn't).
+1. Parse their free windows for **this week** into concrete day+time ranges
+   (resolve "Tue afternoon" / "after 2pm" against the current week and the
+   server timezone). Ask a quick clarifying question only if it's truly
+   ambiguous.
+2. **File it** via `modify_kb_file`:
+   - path: `peer-reviews/<QUARTER>/availability/<slug>.md`
+   - content: frontmatter (`slug`, `quarter`, `week_of: <ISO date>`) and a
+     `windows:` YAML list of `{ start: <ISO datetime>, end: <ISO datetime> }`,
+     followed by their words verbatim.
+3. Confirm filed. Existence of this file is how the flow knows they've answered.
+
+### B. Booking a meeting for a pair (scheduled task)
+
+Trigger: a scheduled task asks you to schedule the meeting between two people
+for a quarter. This fires once **both** have filed availability.
+
+You have the `gws` Google Workspace tools (`mcp__gws__*`, calendar included).
+Run `gws_discover` (or the calendar tool's discovery) to find the create-event
+operation, then:
+
+1. **Stop if already done** — if `peer-reviews/<QUARTER>/meetings/<a>--<b>.md`
+   exists, do nothing (avoids double-booking).
+2. Read both availability files; intersect the windows to find a slot that
+   works for both (default **30 minutes**). One meeting covers both review
+   directions if the pair reviews each other.
+3. **Create the calendar event** with both as attendees (emails from their
+   people files; if one is missing, ask that person in DM and pause), title
+   `Peer review: <a> ↔ <b> (<QUARTER>)`, short description. Let Google send the
+   invites.
+4. DM both the booked time.
+5. **Record it**: write `peer-reviews/<QUARTER>/meetings/<a>--<b>.md` (the same
+   `<a>--<b>` sorted-slug key from the task) via `modify_kb_file` with the
+   booked time. **If you can't find an overlap or can't book**, DM both asking
+   them to coordinate directly — and **still write that file** noting "manual
+   coordination", so the flow stops retrying.
+
+Scheduling is a convenience — the requirement is the *filed review*, so keep
+nudging toward that regardless of the meeting. Never claim you booked something
+you didn't; only after the calendar event and the `meetings/` file are written.
 
 ## Tone
 
