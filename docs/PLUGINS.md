@@ -126,6 +126,37 @@ container/skills/<skill>/SKILL.md            # core — every org gets these
 Drop a folder in either location; no code change. Profile skills with the same
 folder name override the core skill.
 
+### Opt-in (off-by-default) skills
+
+A core skill can ship with every org's checkout but stay **disabled** until an
+install explicitly turns it on. This is for heavy or niche knowledge bases that
+most orgs don't need loaded into every container.
+
+Mark a skill opt-in by adding `default: false` to its `SKILL.md` frontmatter:
+
+```yaml
+---
+name: opacity-sgx-kb
+description: Intel SGX / RA-TLS knowledge base — …
+default: false
+---
+```
+
+Such a skill is **skipped** by the container-runner skill sync unless its folder
+name appears in the install's enable list:
+
+- **Per profile** — add it to `enabledSkills` in `profile.config.json`:
+
+  ```json
+  { "enabledSkills": ["opacity-sgx-kb"] }
+  ```
+
+- **Per install** — set the `ENABLED_SKILLS` env var (comma-separated). Values
+  from both sources are merged.
+
+Skills without the `default: false` flag always load, so this is fully
+backwards-compatible — existing skills are unaffected.
+
 ## 4. Setup steps
 
 Install-wizard steps are modules in `setup/` registered in the `STEPS` map

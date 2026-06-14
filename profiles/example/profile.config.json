@@ -9,5 +9,6 @@
   "sharedKbGroup": "slack_main",
   "serviceUser": "laborfun",
   "telegramBotUsername": "your_bot_username",
-  "timezone": "UTC"
+  "timezone": "UTC",
+  "enabledSkills": []
 }
