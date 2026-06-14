@@ -37,6 +37,10 @@ AUTO_DEPLOY_NAME="${AUTO_DEPLOY_NAME:-breadbrich-auto-deploy}"
 SERVICE_USER="${SERVICE_USER:-breadbrich}"
 # Runtime env lives in the profile (host-local), derived unless overridden.
 DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-$DEPLOY_ROOT/profiles/$PROFILE/deploy.env}"
+# Post-deploy "your change is live" PR comment (step 10). On by default; set
+# DEPLOY_NOTIFY=0 in deploy.config to silence it — e.g. on a downstream org's
+# host that deploys the shared repo but shouldn't comment on its upstream PRs.
+DEPLOY_NOTIFY="${DEPLOY_NOTIFY:-1}"
 
 APP_DIR="$DEPLOY_ROOT"
 BK_DIR="$BACKUP_DIR"
@@ -324,7 +328,9 @@ log "DEPLOY OK — live app now at $NEW"
 # Runs as the app user — its Node has global fetch and owns repo-tokens/. The
 # ERR trap is already cleared (step 8) and we swallow any failure, so a
 # notification can never fail or roll back an already-healthy deploy.
-if [ "$OLD" != "$NEW" ] && [ -f "$APP_DIR/setup/deploy-notify.mjs" ]; then
+if [ "$DEPLOY_NOTIFY" = "0" ]; then
+  log "deploy-notify disabled (DEPLOY_NOTIFY=0) — skipping merger notification"
+elif [ "$OLD" != "$NEW" ] && [ -f "$APP_DIR/setup/deploy-notify.mjs" ]; then
   log "Notify merger that $NEW is live"
   as_app "cd '$APP_DIR' && DEPLOY_ROOT='$DEPLOY_ROOT' NOTIFY_REPO='${NOTIFY_REPO:-}' node setup/deploy-notify.mjs '$NEW'" \
     || log "deploy-notify failed (non-fatal)"
