@@ -12,6 +12,7 @@ import {
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  ENABLED_SKILLS,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   NANOCLAW_MODEL,
@@ -38,6 +39,27 @@ import { RegisteredGroup } from './types.js';
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+
+/**
+ * Whether a container skill loads by default. A skill opts out by setting
+ * `default: false` in its SKILL.md YAML frontmatter; such skills only sync
+ * into containers whose install lists them in ENABLED_SKILLS. Any skill
+ * without the flag (or without a readable SKILL.md) loads by default, keeping
+ * existing skills backwards-compatible.
+ */
+function skillEnabledByDefault(skillDir: string): boolean {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf-8');
+  } catch {
+    return true;
+  }
+  const fm = text.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return true;
+  const m = fm[1].match(/^\s*default:\s*(\S+)\s*$/im);
+  if (!m) return true;
+  return m[1].toLowerCase() !== 'false';
+}
 
 /**
  * Newest file mtime (ms) anywhere under `dir`, recursively; 0 if the dir is
@@ -240,6 +262,17 @@ function buildVolumeMounts(
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
+      // Opt-in skills (SKILL.md frontmatter `default: false`) only sync when
+      // this install enables them by folder name (profile.enabledSkills or the
+      // ENABLED_SKILLS env var). Clear any stale copy so disabling a skill in
+      // config removes it from the container on the next run.
+      if (
+        !skillEnabledByDefault(srcDir) &&
+        !ENABLED_SKILLS.includes(skillDir)
+      ) {
+        fs.rmSync(dstDir, { recursive: true, force: true });
+        continue;
+      }
       // Clear the destination first so a profile overlay fully replaces a
       // same-named core skill (and stale files from a prior run never linger).
       fs.rmSync(dstDir, { recursive: true, force: true });

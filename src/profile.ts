@@ -47,6 +47,15 @@ export interface ProfileConfig {
   telegramBotUsername?: string;
   /** IANA timezone for scheduling/formatting. */
   timezone?: string;
+  /**
+   * Container skills to enable for this org that ship disabled by default.
+   * A skill declares itself opt-in with `default: false` in its SKILL.md
+   * frontmatter; such skills are only synced into this org's containers when
+   * their folder name is listed here (or in the `ENABLED_SKILLS` env var).
+   * Skills without that flag always load and need not be listed.
+   * See container-runner.ts (skill sync) and docs/PLUGINS.md.
+   */
+  enabledSkills?: string[];
 }
 
 const DEFAULTS: ProfileConfig = {
