@@ -7,6 +7,7 @@ import {
   parseCommittee,
   planActions,
   quarterWindow,
+  resolveDiscordIds,
   tick,
 } from '../sd-kickoff.mjs';
 
@@ -187,6 +188,82 @@ describe('planActions — nudge ladder state machine', () => {
     });
     expect(p.requestDraft).toBe(true);
   });
+
+  it('tags members with Discord mentions in channel posts when ids resolve', () => {
+    const mentions = { alice: '111', bob: '222' };
+    const kickoff = planActions({
+      nowMs: JUNE_15,
+      cfg,
+      members,
+      state: {},
+      inputs: new Set(),
+      mentions,
+    });
+    // Kickoff post pings both committee members (with readable name appended).
+    expect(kickoff.posts[0]).toContain('<@111> (alice)');
+    expect(kickoff.posts[0]).toContain('<@222> (bob)');
+
+    // Escalation pings the specific non-responsive member.
+    let state = {};
+    let now = JUNE_15;
+    for (let i = 0; i < 2; i++) {
+      state = planActions({
+        nowMs: now,
+        cfg,
+        members: ['alice'],
+        state,
+        inputs: new Set(),
+        mentions,
+      }).state;
+      now += 3 * DAY;
+    }
+    const esc = planActions({
+      nowMs: now,
+      cfg,
+      members: ['alice'],
+      state,
+      inputs: new Set(),
+      mentions,
+    });
+    expect(esc.posts[0]).toContain('<@111> (alice)');
+  });
+
+  it('falls back to the slug when a member has no resolved id', () => {
+    const p = planActions({
+      nowMs: JUNE_15,
+      cfg,
+      members,
+      state: {},
+      inputs: new Set(),
+      mentions: { alice: '111' }, // bob unmapped
+    });
+    expect(p.posts[0]).toContain('<@111> (alice)');
+    expect(p.posts[0]).toContain('bob');
+    expect(p.posts[0]).not.toContain('<@undefined>');
+  });
+});
+
+describe('resolveDiscordIds', () => {
+  let ctxDir;
+  beforeEach(() => {
+    ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sd-people-'));
+    fs.mkdirSync(path.join(ctxDir, 'people'), { recursive: true });
+    fs.writeFileSync(
+      path.join(ctxDir, 'people', 'alice.md'),
+      "---\ndiscord_id: '12345'\n---\nAlice.",
+    );
+    // bob.md intentionally has no discord_id; carol has no file at all.
+    fs.writeFileSync(
+      path.join(ctxDir, 'people', 'bob.md'),
+      '---\ntitle: Bob\n---\nBob.',
+    );
+  });
+  afterEach(() => fs.rmSync(ctxDir, { recursive: true, force: true }));
+
+  it('maps slugs with a discord_id and omits the rest', () => {
+    const m = resolveDiscordIds(ctxDir, ['alice', 'bob', 'carol']);
+    expect(m).toEqual({ alice: '12345' });
+  });
 });
 
 describe('tick — filesystem integration against a temp profile', () => {
@@ -232,6 +309,17 @@ describe('tick — filesystem integration against a temp profile', () => {
         '---',
       ].join('\n'),
     );
+    // People files so channel posts can resolve mentions (alice has an id, bob
+    // doesn't — exercises both the mention and the slug-fallback path).
+    fs.mkdirSync(path.join(ctxDir(), 'people'), { recursive: true });
+    fs.writeFileSync(
+      path.join(ctxDir(), 'people', 'alice.md'),
+      "---\ndiscord_id: '12345'\n---\nAlice.",
+    );
+    fs.writeFileSync(
+      path.join(ctxDir(), 'people', 'bob.md'),
+      '---\ntitle: Bob\n---\nBob.',
+    );
   });
 
   afterEach(() => {
@@ -266,6 +354,9 @@ describe('tick — filesystem integration against a temp profile', () => {
     const posts = readIpc('messages');
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({ type: 'message', chatJid: 'dc:999' });
+    // Kickoff pings alice via her resolved id; bob (no id) falls back to slug.
+    expect(posts[0].text).toContain('<@12345> (alice)');
+    expect(posts[0].text).toContain('bob');
 
     const state = JSON.parse(
       fs.readFileSync(
