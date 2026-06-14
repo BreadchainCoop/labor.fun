@@ -12,7 +12,9 @@ nudges members until done, and (via the agent) schedules review meetings.
 | `config.md` | Flow config: members + channel + cadence + assignments (see below) | humans |
 | `<quarter>/self-eval/<slug>.md` | A member's filed self-evaluation (existence = self-eval done) | the assistant (DM), or humans |
 | `<quarter>/reviews/<reviewer>--<reviewee>.md` | A completed peer review (existence = that review done) | the assistant (DM), or humans |
-| `state/<quarter>.json` | Plugin bookkeeping (frozen assignments, nudge counts, announced/summary flags) | the plugin |
+| `<quarter>/availability/<slug>.md` | A member's free windows this week (auto-schedule only) | the assistant (DM) |
+| `<quarter>/meetings/<a>--<b>.md` | A booked/coordinated review meeting for a pair (auto-schedule only) | the assistant (task) |
+| `state/<quarter>.json` | Plugin bookkeeping (frozen assignments, nudge counts, announced/summary/match flags) | the plugin |
 
 `<quarter>` is the quarter being closed out, e.g. `2026-Q2`.
 
@@ -29,6 +31,7 @@ reviews_required: 2                  # peer reviews each member must give/receiv
 window_weeks_before: 3               # optional — window opens N weeks before quarter end
 window_weeks_after: 2                # optional — and stays open N weeks INTO next quarter (reviews finish there)
 activate_on: 2026-06-30              # optional — stay dormant until this date even if the window is open ("queue" a cycle)
+auto_schedule: true                  # optional — also collect availability and auto-book the review meetings (Google Calendar)
 nudge_every_days: 4                  # optional — re-nudge cadence per member
 max_nudges: 4                        # optional — then escalate once in the channel
 summary_days_before_end: 7           # optional — post a status summary this many days before quarter end
@@ -59,3 +62,16 @@ With no `assignments` block, member *i* (in listed order) reviews the next
 `reviews_required` members, wrapping — so everyone gives and receives exactly
 that many. Needs at least `reviews_required + 1` members to give everyone
 distinct reviewers; with fewer it assigns as many as possible.
+
+## Auto-scheduling (`auto_schedule: true`)
+
+The first nudge also asks each member for their availability this week; the
+assistant files it to `availability/<slug>.md`. Once **both** people in an
+assigned pair have answered, the flow kicks a one-shot agent task that matches
+a common 30-minute slot, books a Google Calendar event with both as attendees
+(via the `gws` calendar tool), DMs them the time, and records it at
+`meetings/<a>--<b>.md`. One meeting covers a mutual pairing. If no overlap is
+found (or a calendar invite can't be sent), the assistant asks the pair to
+coordinate directly and still records the meeting file so it stops retrying;
+otherwise it re-attempts about daily until a meeting is recorded. The *filed
+review* is the requirement — the meeting is assistance toward it.

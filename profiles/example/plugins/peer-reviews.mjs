@@ -102,6 +102,10 @@ export function parseConfig(mdText) {
     // if the review window is open. Lets ops "queue" a cycle for a date.
     // Accepts an ISO date/datetime (YAML may parse it to a Date — stringify).
     activateOn: fm.activate_on != null ? String(fm.activate_on) : null,
+    // When true, the flow also helps schedule each review meeting: it asks both
+    // people for their availability this week and, once both have answered, an
+    // agent matches a common slot and books a Google Calendar event. Opt-in.
+    autoSchedule: fm.auto_schedule === true,
     nudgeEveryDays: Number(fm.nudge_every_days) || 4,
     maxNudges: Number(fm.max_nudges) || 4,
     reviewsRequired: Number(fm.reviews_required) || 2,
@@ -213,15 +217,21 @@ function escalationPost(slug, items, label, dir) {
   );
 }
 
-function nudgeText(label, askNumber, items, dir) {
+// Appended to the first DM when auto-scheduling is on — collects each member's
+// availability once so the agent can match + book their review meetings.
+const AVAILABILITY_ASK =
+  ` Also: reply with the times you're free **this week** (e.g. "Tue/Thu after 2pm, Wed morning") ` +
+  `and I'll match them with your review partners and put the meetings on the calendar.`;
+
+function nudgeText(label, askNumber, items, dir, autoSchedule) {
   const left = renderItems(items, dir).join('\n• ');
   if (askNumber === 1) {
     return (
       `Hi! Quarterly reviews for **${label}** are open. You still have:\n• ${left}\n\n` +
       `Two completed peer reviews are required for next-quarter payment eligibility. ` +
-      `Reply here and I'll pull up the goals you set last quarter to anchor your self-eval, ` +
-      `help you write your peer reviews, and — if you'd like — find a time and put the ` +
-      `review meetings on the calendar for you. I'll check back every few days.`
+      `Reply here and I'll pull up the goals you set last quarter to anchor your self-eval ` +
+      `and help you write your peer reviews. I'll check back every few days.` +
+      (autoSchedule ? AVAILABILITY_ASK : '')
     );
   }
   return (
@@ -265,13 +275,19 @@ export function planActions({
   selfEvalDone,
   reviewsDone,
   dir,
+  // Auto-scheduling inputs (default off / empty so the non-scheduling path is
+  // unchanged): who has filed availability this week, which meetings are booked.
+  autoSchedule = false,
+  availability = new Set(),
+  meetings = new Set(),
 }) {
-  const out = { dms: [], posts: [] };
+  const out = { dms: [], posts: [], matchTasks: [] };
   const st = {
     ...state,
     members: Object.fromEntries(
       Object.entries(state.members ?? {}).map(([k, v]) => [k, { ...v }]),
     ),
+    matchKicked: { ...(state.matchKicked ?? {}) },
   };
 
   // Freeze the assignment on first run so nudges stay consistent even if the
@@ -303,10 +319,39 @@ export function planActions({
       } else {
         m.asks += 1;
         m.lastAskAt = new Date(nowMs).toISOString();
-        out.dms.push({ slug, text: nudgeText(cfg.label, m.asks, items, dir) });
+        out.dms.push({
+          slug,
+          text: nudgeText(cfg.label, m.asks, items, dir, autoSchedule),
+        });
       }
     }
     st.members[slug] = m;
+  }
+
+  // Auto-scheduling pass: for each assigned review still outstanding, once BOTH
+  // people have filed availability, kick a one-shot agent task to match a slot
+  // and book the meeting. Keyed by the UNORDERED pair so a mutual pairing
+  // (a reviews b AND b reviews a) schedules one meeting, not two. Re-kicks at
+  // most daily until the meeting is recorded — so an agent failure self-heals,
+  // while a booked/coordinated meeting (its file written by the skill) stops it.
+  if (autoSchedule) {
+    const RETRY_MS = DAY_MS;
+    const seen = new Set();
+    for (const r of members) {
+      for (const e of asg[r] ?? []) {
+        if (reviewsDone.has(`${r}--${e}`)) continue; // review done → meeting moot
+        const [x, y] = [r, e].slice().sort();
+        const pk = `${x}--${y}`;
+        if (seen.has(pk)) continue;
+        seen.add(pk);
+        if (meetings.has(pk)) continue; // already booked / coordinated
+        if (!availability.has(x) || !availability.has(y)) continue; // wait
+        const last = st.matchKicked[pk] ? Date.parse(st.matchKicked[pk]) : 0;
+        if (nowMs - last < RETRY_MS) continue; // recently kicked
+        st.matchKicked[pk] = new Date(nowMs).toISOString();
+        out.matchTasks.push({ a: x, b: y, key: pk });
+      }
+    }
   }
 
   const allDone = members.every(
@@ -336,6 +381,46 @@ function atomicWrite(file, content) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, content);
   fs.renameSync(tmp, file);
+}
+
+/** Local-time stamp without timezone suffix — the schedule_task `once` format. */
+function localStamp(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+    `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  );
+}
+
+/** Build the one-shot agent task that matches availability and books the
+ * meeting for an unordered pair. The skill does the calendar I/O; the prompt
+ * carries the quarter + paths so the run is self-contained. */
+export function matchTaskIpc({ label, pair, channelJid, nowMs }) {
+  const { a, b, key } = pair;
+  const base = `/workspace/shared-kb/peer-reviews/${label}`;
+  const prompt =
+    `Schedule the peer-review meeting between ${a} and ${b} for ${label}. ` +
+    `Use the peer-reviews skill (Booking a review meeting).\n\n` +
+    `1. If ${base}/meetings/${key}.md already exists, STOP — it's handled.\n` +
+    `2. Read both availabilities: ${base}/availability/${a}.md and ${base}/availability/${b}.md.\n` +
+    `3. Find a 30-minute slot this week that works for both.\n` +
+    `4. Create a Google Calendar event (gws) titled "Peer review: ${a} ↔ ${b} (${label})" ` +
+    `with both as attendees (emails from their people files; if one is missing, ask them in DM).\n` +
+    `5. DM both the booked time.\n` +
+    `6. Record it at peer-reviews/${label}/meetings/${key}.md via modify_kb_file. ` +
+    `If you can't find an overlap or can't book, DM both to coordinate directly and STILL ` +
+    `write that file (note "manual coordination") so I don't keep retrying.`;
+  return {
+    type: 'schedule_task',
+    taskId: `pr-meet-${label.toLowerCase()}-${key}-${nowMs}`,
+    prompt,
+    schedule_type: 'once',
+    schedule_value: localStamp(nowMs + 2 * 60_000),
+    context_mode: 'isolated',
+    targetJid: channelJid,
+    timestamp: new Date(nowMs).toISOString(),
+  };
 }
 
 /** Slugs of `.md` files directly under `dir` (filename without extension). */
@@ -396,6 +481,9 @@ export function tick({ profileDir, logger, nowMs }) {
   const baseDir = path.join(ctxDir, 'peer-reviews', label);
   const selfEvalDone = new Set(mdSlugs(path.join(baseDir, 'self-eval')));
   const reviewsDone = new Set(mdSlugs(path.join(baseDir, 'reviews')));
+  // Auto-scheduling inputs: per-person availability filed, per-pair meetings booked.
+  const availability = new Set(mdSlugs(path.join(baseDir, 'availability')));
+  const meetings = new Set(mdSlugs(path.join(baseDir, 'meetings')));
 
   const statePath = path.join(ctxDir, 'peer-reviews', 'state', `${label}.json`);
   let state = {};
@@ -425,6 +513,9 @@ export function tick({ profileDir, logger, nowMs }) {
     selfEvalDone,
     reviewsDone,
     dir,
+    autoSchedule: cfg.autoSchedule,
+    availability,
+    meetings,
   });
 
   // Same-group IPC namespace → orchestrator authorizes these as same-group ops.
@@ -446,13 +537,24 @@ export function tick({ profileDir, logger, nowMs }) {
       timestamp: new Date(nowMs).toISOString(),
     });
   }
+  for (const pair of plan.matchTasks) {
+    writeIpcFile(
+      path.join(ipcDir, 'tasks'),
+      matchTaskIpc({ label, pair, channelJid: cfg.channelJid, nowMs }),
+    );
+  }
 
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   atomicWrite(statePath, JSON.stringify(plan.state, null, 2));
 
-  if (plan.dms.length || plan.posts.length) {
+  if (plan.dms.length || plan.posts.length || plan.matchTasks.length) {
     logger.info(
-      { label, dms: plan.dms.length, posts: plan.posts.length },
+      {
+        label,
+        dms: plan.dms.length,
+        posts: plan.posts.length,
+        meetings: plan.matchTasks.length,
+      },
       'peer-reviews: actions emitted',
     );
   }
