@@ -48,11 +48,19 @@ and `logger`. Plugins are **plain JS** (the framework build compiles `src/`, not
 the same name, and are isolated — a throwing plugin is logged and skipped, never
 fatal. The `Channel` / `Integration` interfaces below define what to return.
 
-For a complete reference plugin — a real org workflow (quarterly Strategic
-Directives kickoff: multi-nudge input collection + AI first draft) driven
-entirely through the KB and IPC filesystem contracts, with zero secrets and
-zero framework imports — see `profiles/example/plugins/sd-kickoff.mjs` and its
-companion container skill `profiles/example/container-skills/sd-kickoff/`.
+For complete reference plugins — real org workflows driven entirely through the
+KB and IPC filesystem contracts, with zero secrets and zero framework imports —
+see:
+
+- `profiles/example/plugins/sd-kickoff.mjs` — quarterly Strategic Directives
+  kickoff (multi-nudge input collection + AI first draft).
+- `profiles/example/plugins/peer-reviews.mjs` — quarterly peer-review +
+  self-evaluation tracking (round-robin assignment, per-member nudge ladder,
+  status summary; the companion skill files reviews and books review meetings
+  via the agent's `gws` calendar tool).
+
+Each pairs with a container skill under
+`profiles/example/container-skills/<name>/` for the agent-side half.
 
 ---
 
