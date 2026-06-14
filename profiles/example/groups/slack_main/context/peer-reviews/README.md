@@ -26,7 +26,9 @@ members:                 # KB people slugs (people/<slug>.md must exist)
   - carol
 channel_jid: dc:123456789012345678   # where the cycle is announced / summarized; a REGISTERED group
 reviews_required: 2                  # peer reviews each member must give/receive (round-robin)
-window_weeks_before: 6               # optional — cycle opens N weeks before quarter end
+window_weeks_before: 3               # optional — window opens N weeks before quarter end
+window_weeks_after: 2                # optional — and stays open N weeks INTO next quarter (reviews finish there)
+activate_on: 2026-06-30              # optional — stay dormant until this date even if the window is open ("queue" a cycle)
 nudge_every_days: 4                  # optional — re-nudge cadence per member
 max_nudges: 4                        # optional — then escalate once in the channel
 summary_days_before_end: 7           # optional — post a status summary this many days before quarter end
@@ -42,9 +44,13 @@ Free text: notes on the review policy, what "valid peer" means here, etc.
 ```
 
 The flow is a **silent no-op until `config.md` exists**, and only acts inside
-the window (`window_weeks_before` → quarter end). Assignments are frozen in
-`state/<quarter>.json` on the first tick so nudges stay consistent; to re-roll a
-quarter, delete that state file. Reset/disable by editing or removing
+the review window: `window_weeks_before` before the quarter end through
+`window_weeks_after` into the next quarter (so a cycle that starts near quarter
+end has runway to finish — reviews evaluate the quarter being closed out). Set
+`activate_on` to keep it dormant until a chosen date even while the window is
+open — handy to queue a cycle. Assignments are frozen in `state/<quarter>.json`
+on the first tick so nudges stay consistent; to re-roll a quarter, delete that
+state file. Reset/disable by editing or removing
 `config.md`.
 
 ## Round-robin assignment
