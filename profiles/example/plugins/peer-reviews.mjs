@@ -43,19 +43,40 @@ import matter from 'gray-matter';
 
 const DAY_MS = 86_400_000;
 
+/** Label of the quarter that ENDS at a given quarter boundary (start-of-month
+ * for months Jan/Apr/Jul/Oct). Jan 1 closes Q4 of the prior year. */
+function quarterEndingAt(boundaryMs) {
+  const b = new Date(boundaryMs);
+  const m = b.getMonth(); // 0, 3, 6, 9
+  return m === 0 ? `${b.getFullYear() - 1}-Q4` : `${b.getFullYear()}-Q${m / 3}`;
+}
+
 /**
- * The quarter window this flow operates in. Calendar quarters in server-local
- * time; `label` names the quarter being CLOSED OUT — reviews evaluate the
- * quarter you're finishing, gating payment for the next one. Running in June
- * (Q2) reviews `2026-Q2`.
+ * The review window around a quarter boundary. Reviews evaluate the quarter
+ * being CLOSED OUT, and realistically run from a few weeks before the quarter
+ * ends through a couple weeks into the next one (people finish them in early
+ * next quarter — a window that closed AT quarter end would kill a cycle just
+ * as it got going). We anchor to the nearest quarter boundary: while still
+ * within `weeksAfter` of the PREVIOUS boundary the cycle is for the quarter
+ * that just ended; otherwise it's for the quarter ending next. `label` names
+ * the reviewed quarter (e.g. `2026-Q2`); the flow is active iff
+ * `openMs <= now < closeMs`. `boundaryMs` is the quarter end (used for the
+ * summary deadline).
  */
-export function quarterWindow(nowMs, weeksBefore = 6) {
+export function reviewWindow(nowMs, weeksBefore = 3, weeksAfter = 2) {
+  const beforeMs = weeksBefore * 7 * DAY_MS;
+  const afterMs = weeksAfter * 7 * DAY_MS;
   const d = new Date(nowMs);
-  const q = Math.floor(d.getMonth() / 3); // 0..3
-  const quarterEndMs = new Date(d.getFullYear(), q * 3 + 3, 1).getTime();
-  const windowStartMs = quarterEndMs - weeksBefore * 7 * DAY_MS;
-  const label = `${d.getFullYear()}-Q${q + 1}`;
-  return { label, quarterEndMs, windowStartMs };
+  const qStartMonth = Math.floor(d.getMonth() / 3) * 3;
+  const prevBoundary = new Date(d.getFullYear(), qStartMonth, 1).getTime();
+  const nextBoundary = new Date(d.getFullYear(), qStartMonth + 3, 1).getTime();
+  const boundaryMs = nowMs < prevBoundary + afterMs ? prevBoundary : nextBoundary;
+  return {
+    label: quarterEndingAt(boundaryMs),
+    boundaryMs,
+    openMs: boundaryMs - beforeMs,
+    closeMs: boundaryMs + afterMs,
+  };
 }
 
 /** Parse context/peer-reviews/config.md (frontmatter config; body is notes). */
@@ -75,7 +96,12 @@ export function parseConfig(mdText) {
     members,
     assignments,
     channelJid: typeof fm.channel_jid === 'string' ? fm.channel_jid : '',
-    windowWeeksBefore: Number(fm.window_weeks_before) || 6,
+    windowWeeksBefore: Number(fm.window_weeks_before) || 3,
+    windowWeeksAfter: Number(fm.window_weeks_after) || 2,
+    // Optional hard start gate: the flow stays dormant until this instant even
+    // if the review window is open. Lets ops "queue" a cycle for a date.
+    // Accepts an ISO date/datetime (YAML may parse it to a Date — stringify).
+    activateOn: fm.activate_on != null ? String(fm.activate_on) : null,
     nudgeEveryDays: Number(fm.nudge_every_days) || 4,
     maxNudges: Number(fm.max_nudges) || 4,
     reviewsRequired: Number(fm.reviews_required) || 2,
@@ -353,11 +379,19 @@ export function tick({ profileDir, logger, nowMs }) {
     return null;
   }
 
-  const { label, quarterEndMs, windowStartMs } = quarterWindow(
+  // Hard start gate: stay dormant until activate_on (if set), even if the
+  // review window is already open. Invalid dates are ignored (don't gate).
+  if (cfg.activateOn) {
+    const startMs = Date.parse(cfg.activateOn);
+    if (!Number.isNaN(startMs) && nowMs < startMs) return null;
+  }
+
+  const { label, boundaryMs, openMs, closeMs } = reviewWindow(
     nowMs,
     cfg.windowWeeksBefore,
+    cfg.windowWeeksAfter,
   );
-  if (nowMs < windowStartMs || nowMs >= quarterEndMs) return null;
+  if (nowMs < openMs || nowMs >= closeMs) return null;
 
   const baseDir = path.join(ctxDir, 'peer-reviews', label);
   const selfEvalDone = new Set(mdSlugs(path.join(baseDir, 'self-eval')));
@@ -380,7 +414,7 @@ export function tick({ profileDir, logger, nowMs }) {
     nowMs,
     cfg: {
       label,
-      quarterEndMs,
+      quarterEndMs: boundaryMs,
       nudgeEveryDays: cfg.nudgeEveryDays,
       maxNudges: cfg.maxNudges,
       summaryDaysBeforeEnd: cfg.summaryDaysBeforeEnd,

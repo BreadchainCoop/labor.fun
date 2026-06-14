@@ -8,23 +8,46 @@ import {
   outstandingFor,
   parseConfig,
   planActions,
-  quarterWindow,
+  reviewWindow,
   resolveDirectory,
   tick,
 } from '../peer-reviews.mjs';
 
 const DAY = 86_400_000;
-// May 28 2026, local noon — inside the Q2 review window (Q2 ends July 1; a
-// 6-week window opens ~May 20).
-const MAY_28 = new Date(2026, 4, 28, 12, 0, 0).getTime();
 const Q2_END = new Date(2026, 6, 1).getTime();
+// June 20 2026, local noon — inside the Q2 review window (default: 3 weeks
+// before July 1 → June 10, through 2 weeks after → July 15).
+const JUNE_20 = new Date(2026, 5, 20, 12, 0, 0).getTime();
 
-describe('quarterWindow', () => {
-  it('labels the quarter being closed out and opens N weeks before its end', () => {
-    const w = quarterWindow(MAY_28, 6);
+describe('reviewWindow', () => {
+  it('reviews the quarter ending next, spanning before+after the boundary', () => {
+    const w = reviewWindow(JUNE_20, 3, 2);
     expect(w.label).toBe('2026-Q2');
-    expect(w.quarterEndMs).toBe(Q2_END);
-    expect(w.windowStartMs).toBe(Q2_END - 42 * DAY);
+    expect(w.boundaryMs).toBe(Q2_END);
+    expect(w.openMs).toBe(Q2_END - 21 * DAY);
+    expect(w.closeMs).toBe(Q2_END + 14 * DAY);
+  });
+
+  it('keeps reviewing the just-ended quarter during the after-grace', () => {
+    const july5 = new Date(2026, 6, 5).getTime(); // 4 days into Q3
+    const w = reviewWindow(july5, 3, 2);
+    expect(w.label).toBe('2026-Q2'); // still Q2, not Q3
+    expect(w.boundaryMs).toBe(Q2_END);
+    expect(july5 < w.closeMs).toBe(true);
+  });
+
+  it('rolls to the next boundary once the after-grace passes', () => {
+    const july20 = new Date(2026, 6, 20).getTime();
+    const w = reviewWindow(july20, 3, 2);
+    expect(w.label).toBe('2026-Q3');
+    expect(w.boundaryMs).toBe(new Date(2026, 9, 1).getTime());
+  });
+
+  it('labels a January boundary as the prior year Q4', () => {
+    const dec20 = new Date(2026, 11, 20).getTime();
+    const w = reviewWindow(dec20, 3, 2);
+    expect(w.label).toBe('2026-Q4');
+    expect(w.boundaryMs).toBe(new Date(2027, 0, 1).getTime());
   });
 });
 
@@ -53,8 +76,19 @@ describe('parseConfig', () => {
     expect(c.assignments).toEqual({ alice: ['bob'], bob: ['alice'] });
     // Defaults for unset knobs.
     expect(c.maxNudges).toBe(4);
-    expect(c.windowWeeksBefore).toBe(6);
+    expect(c.windowWeeksBefore).toBe(3);
+    expect(c.windowWeeksAfter).toBe(2);
+    expect(c.activateOn).toBeNull();
     expect(c.summaryDaysBeforeEnd).toBe(7);
+  });
+
+  it('reads activate_on (stringifying a YAML date)', () => {
+    const c = parseConfig(
+      '---\nmembers: [a, b]\nchannel_jid: dc:1\nactivate_on: 2026-06-30\n---',
+    );
+    // gray-matter may parse the YAML date to a Date; parseConfig stringifies it.
+    expect(typeof c.activateOn).toBe('string');
+    expect(Date.parse(c.activateOn)).toBe(Date.parse('2026-06-30'));
   });
 
   it('leaves assignments null when not provided (→ round-robin later)', () => {
@@ -136,7 +170,7 @@ describe('planActions — nudge + tracking state machine', () => {
 
   it('first tick: announces (with mentions) and DMs everyone their items', () => {
     const p = planActions({
-      nowMs: MAY_28,
+      nowMs: JUNE_20,
       cfg,
       members,
       assignments,
@@ -159,7 +193,7 @@ describe('planActions — nudge + tracking state machine', () => {
 
   it('does not re-DM inside the nudge interval', () => {
     const first = planActions({
-      nowMs: MAY_28,
+      nowMs: JUNE_20,
       cfg,
       members,
       assignments,
@@ -169,7 +203,7 @@ describe('planActions — nudge + tracking state machine', () => {
       dir,
     });
     const soon = planActions({
-      nowMs: MAY_28 + DAY,
+      nowMs: JUNE_20 + DAY,
       cfg,
       members,
       assignments,
@@ -183,7 +217,7 @@ describe('planActions — nudge + tracking state machine', () => {
 
   it('stops nudging a member once all their items are filed', () => {
     const first = planActions({
-      nowMs: MAY_28,
+      nowMs: JUNE_20,
       cfg,
       members,
       assignments,
@@ -194,7 +228,7 @@ describe('planActions — nudge + tracking state machine', () => {
     });
     // alice completes everything: self-eval + reviews of bob and carol.
     const later = planActions({
-      nowMs: MAY_28 + 4 * DAY,
+      nowMs: JUNE_20 + 4 * DAY,
       cfg,
       members,
       assignments,
@@ -210,7 +244,7 @@ describe('planActions — nudge + tracking state machine', () => {
 
   it('escalates a stuck member once in the channel, then goes quiet', () => {
     let state = {};
-    let now = MAY_28;
+    let now = JUNE_20;
     for (let i = 0; i < 2; i++) {
       state = planActions({
         nowMs: now,
@@ -258,7 +292,7 @@ describe('planActions — nudge + tracking state machine', () => {
       ),
     );
     const first = planActions({
-      nowMs: MAY_28,
+      nowMs: JUNE_20,
       cfg,
       members,
       assignments,
@@ -270,7 +304,7 @@ describe('planActions — nudge + tracking state machine', () => {
     expect(first.posts.some((p) => p.includes('complete'))).toBe(true);
     expect(first.dms).toHaveLength(0);
     const again = planActions({
-      nowMs: MAY_28 + DAY,
+      nowMs: JUNE_20 + DAY,
       cfg,
       members,
       assignments,
@@ -374,16 +408,36 @@ describe('tick — filesystem integration against a temp profile', () => {
 
   it('no-ops without config.md', () => {
     fs.rmSync(path.join(ctxDir(), 'peer-reviews', 'config.md'));
-    expect(tick({ profileDir, logger, nowMs: MAY_28 })).toBeNull();
+    expect(tick({ profileDir, logger, nowMs: JUNE_20 })).toBeNull();
   });
 
-  it('no-ops outside the window', () => {
-    const jan = new Date(2026, 0, 10).getTime();
-    expect(tick({ profileDir, logger, nowMs: jan })).toBeNull();
+  it('no-ops outside the window (mid-quarter, far from any boundary)', () => {
+    const feb15 = new Date(2026, 1, 15).getTime();
+    expect(tick({ profileDir, logger, nowMs: feb15 })).toBeNull();
+  });
+
+  it('stays dormant until activate_on, then runs', () => {
+    fs.writeFileSync(
+      path.join(ctxDir(), 'peer-reviews', 'config.md'),
+      [
+        '---',
+        'members: [alice, bob, carol]',
+        'channel_jid: dc:999',
+        'activate_on: 2026-06-25',
+        '---',
+      ].join('\n'),
+    );
+    // In-window but before activate_on → dormant, no IPC.
+    expect(tick({ profileDir, logger, nowMs: JUNE_20 })).toBeNull();
+    expect(readIpc('messages')).toHaveLength(0);
+    // After activate_on → runs.
+    const june26 = new Date(2026, 5, 26, 12).getTime();
+    tick({ profileDir, logger, nowMs: june26 });
+    expect(readIpc('messages').length).toBeGreaterThan(0);
   });
 
   it('announces, DMs assignments, persists frozen assignments, is idempotent', () => {
-    tick({ profileDir, logger, nowMs: MAY_28 });
+    tick({ profileDir, logger, nowMs: JUNE_20 });
 
     const dms = readIpc('tasks').filter((t) => t.type === 'dm_user');
     expect(dms.map((d) => d.target).sort()).toEqual(['alice', 'bob', 'carol']);
@@ -404,13 +458,13 @@ describe('tick — filesystem integration against a temp profile', () => {
     );
 
     // Same instant again → no duplicate IPC.
-    tick({ profileDir, logger, nowMs: MAY_28 });
+    tick({ profileDir, logger, nowMs: JUNE_20 });
     expect(readIpc('tasks').filter((t) => t.type === 'dm_user')).toHaveLength(3);
     expect(readIpc('messages')).toHaveLength(1);
   });
 
   it('a filed self-eval + reviews drop those items from the next nudge', () => {
-    tick({ profileDir, logger, nowMs: MAY_28 });
+    tick({ profileDir, logger, nowMs: JUNE_20 });
 
     const q = path.join(ctxDir(), 'peer-reviews', '2026-Q2');
     fs.mkdirSync(path.join(q, 'self-eval'), { recursive: true });
@@ -419,7 +473,7 @@ describe('tick — filesystem integration against a temp profile', () => {
     fs.writeFileSync(path.join(q, 'reviews', 'alice--bob.md'), '# review');
     fs.writeFileSync(path.join(q, 'reviews', 'alice--carol.md'), '# review');
 
-    tick({ profileDir, logger, nowMs: MAY_28 + 4 * DAY });
+    tick({ profileDir, logger, nowMs: JUNE_20 + 4 * DAY });
     const second = readIpc('tasks')
       .filter((t) => t.type === 'dm_user')
       .filter((t) => t.target === 'alice');
