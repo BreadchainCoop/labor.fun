@@ -126,6 +126,51 @@ container/skills/<skill>/SKILL.md            # core — every org gets these
 Drop a folder in either location; no code change. Profile skills with the same
 folder name override the core skill.
 
+### Optional (off-by-default) skills
+
+A skill can be present on disk but stay **disabled** until an install explicitly
+turns it on. This is for heavy or niche knowledge bases that most orgs don't
+need loaded into every container — and, in particular, for skills you want to
+keep **private and out of this repo entirely**.
+
+Mark a skill optional by adding `default: false` to its `SKILL.md` frontmatter:
+
+```yaml
+---
+name: my-skill
+description: Short description of what this skill is for …
+default: false
+---
+```
+
+Such a skill is **skipped** by the container-runner skill sync unless its folder
+name appears in the install's enable list:
+
+- **Per profile** — add it to `enabledSkills` in `profile.config.json`:
+
+  ```json
+  { "enabledSkills": ["my-skill"] }
+  ```
+
+- **Per install** — set the `ENABLED_SKILLS` env var (comma-separated). Values
+  from both sources are merged.
+
+Skills without the `default: false` flag always load, so this is fully
+backwards-compatible — existing skills are unaffected.
+
+#### Keeping an optional skill private (off-repo)
+
+The per-profile overlay (`<profile>/container-skills/`) is **gitignored**, so a
+skill placed there never lands in this framework repo. Combine that with the
+opt-in flag to add a private skill entirely on the server:
+
+1. Create `<profile>/container-skills/<name>/SKILL.md` on the host (with
+   `default: false` if you also want it toggleable), plus any reference files.
+2. Enable it via the profile's `enabledSkills` (or `ENABLED_SKILLS`).
+
+The skill syncs into that org's containers only, stays out of the public repo,
+and the framework needs no changes to host it.
+
 ## 4. Setup steps
 
 Install-wizard steps are modules in `setup/` registered in the `STEPS` map
