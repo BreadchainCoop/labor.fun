@@ -71,6 +71,25 @@ describe('parseConfig', () => {
     // defaults
     expect(c.meetingHour).toBe(16);
     expect(c.maxNudges).toBe(3);
+    // optional context sources: deadline_digest defaults, the rest empty
+    expect(c.deadlineDigest).toBe('deadline-digest.md');
+    expect(c.directivesDoc).toBe('');
+    expect(c.githubOrg).toBe('');
+  });
+
+  it('reads the optional context-source keys when present', () => {
+    const c = parseConfig(
+      [
+        '---',
+        'directives_doc: artifacts/strategy-q2.md',
+        'deadline_digest: deadlines.md',
+        'github_org: AcmeCoop',
+        '---',
+      ].join('\n'),
+    );
+    expect(c.directivesDoc).toBe('artifacts/strategy-q2.md');
+    expect(c.deadlineDigest).toBe('deadlines.md');
+    expect(c.githubOrg).toBe('AcmeCoop');
   });
 });
 
@@ -255,6 +274,13 @@ describe('tick — end to end against a temp profile', () => {
     const f = ipcFiles('tasks')[0];
     const t = JSON.parse(fs.readFileSync(path.join(dir, 'data/ipc/slack_main/tasks', f)));
     expect(t.taskId).toMatch(/^weekly-agenda-build-2026-06-10-\d+$/);
+    // the prompt asks for a RICH agenda, not a bare skeleton: deadlines, a
+    // goals read against the directives, linked GitHub activity, verification.
+    expect(t.prompt).toMatch(/Upcoming Deadlines/);
+    expect(t.prompt).toMatch(/Goals Review/);
+    expect(t.prompt).toMatch(/hyperlink/i);
+    expect(t.prompt).toMatch(/deadline-digest\.md/); // default digest path
+    expect(t.prompt).toMatch(/merged PRs and closed issues/i);
   });
 
   it('once the built marker exists: posts the kickoff and DMs owners', () => {

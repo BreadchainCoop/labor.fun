@@ -47,6 +47,9 @@ meeting_hour: 16                       # local hour of the meeting (default 16)
 prep_days_before: 2                    # build + start nudging N days before (default 2)
 nudge_every_days: 1                    # re-ask cadence per owner (default 1)
 max_nudges: 3                          # then escalate once in the channel (default 3)
+directives_doc: artifacts/breadchain-strategy-directives-q2-2026.md  # optional — KB path to the quarter's strategic directives; drives the agenda's "Goals Review"
+deadline_digest: deadline-digest.md    # optional — KB path to the auto-maintained deadline list (default deadline-digest.md); drives "Upcoming Deadlines"
+github_org: BreadchainCoop             # optional — GitHub org to mine for each owner's recent merged PRs / closed issues (else the agent's profile org)
 owners:                                # project label -> KB people slug
   Design: ruben
   Stacks: bren
@@ -72,7 +75,8 @@ Notes:
 - **Quote the facilitator dates** (`'2026-06-17'`). Unquoted, YAML parses them
   as timestamps; the plugin defends against this but quoting is clearer.
 - Every `owners`/`facilitators` slug should have a `people/<slug>.md` with a
-  `discord_id`, so channel posts actually ping them.
+  `discord_id`, so channel posts actually ping them — and a `github_username`,
+  so the build agent can attribute each person's merged PRs / closed issues.
 - The flow is a **no-op until `config.md` exists** with a `channel_jid` and a
   non-empty `owners` map — creating that file (with the plugin installed) turns
   it on. Delete it to turn the flow off. State is per-week, so a misfire can be

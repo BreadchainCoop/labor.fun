@@ -3,12 +3,15 @@
 // chase everyone by hand:
 //
 //   * Each week, `prep_days_before` the meeting, fires a ONE-SHOT agent task
-//     that (re)builds the agenda's "This Week" tab from the standard skeleton:
+//     that (re)builds the agenda's "This Week" tab into a DECISION-READY draft:
 //     it first archives the previous week's contents into the doc's permanent
-//     Archive tab, then writes a fresh dated skeleton pre-filled with the
-//     week's facilitator (from the rota) and auto-pulled context (merged PRs /
-//     closed issues per project from GitHub, upcoming calendar events). It
-//     then posts the agenda link in the core channel.
+//     Archive tab, then writes a fresh dated agenda pre-filled with the week's
+//     facilitator (from the rota) and rich auto-pulled context — each owner's
+//     merged PRs / closed issues from the last 7 days as clickable links with a
+//     one-line summary, upcoming deadlines (from the KB deadline digest), and a
+//     Goals Review read against the quarter's strategic directives. It then
+//     posts the agenda link in the core channel — only after a build is
+//     verified (see the `built` marker below).
 //   * DMs every project owner (and the facilitator) asking them to fill in
 //     their section, and re-nudges on a cadence until they do — silence is not
 //     consent. After max_nudges unanswered DMs it escalates once in the core
@@ -124,6 +127,18 @@ export function parseConfig(mdText) {
     maxNudges: Number(fm.max_nudges) || 3,
     owners,
     facilitators,
+    // Optional context sources the build agent weaves into the agenda (all
+    // org-agnostic — paths are KB-relative, org is the GitHub org to mine).
+    // Strategic directives doc → drives the "Goals Review" section.
+    directivesDoc: typeof fm.directives_doc === 'string' ? fm.directives_doc.trim() : '',
+    // Auto-maintained deadline digest → drives the "Upcoming Deadlines" section.
+    deadlineDigest:
+      typeof fm.deadline_digest === 'string' && fm.deadline_digest.trim()
+        ? fm.deadline_digest.trim()
+        : 'deadline-digest.md',
+    // GitHub org to mine for each owner's recent merged PRs / closed issues
+    // (else the build agent falls back to its profile's configured org).
+    githubOrg: typeof fm.github_org === 'string' ? fm.github_org.trim() : '',
   };
 }
 
@@ -167,7 +182,8 @@ function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl) {
   const link = docUrl ? ` ${docUrl}` : '';
   return (
     `🗓️ Weekly Core Meeting agenda for ${weekKey} is up.${link}\n` +
-    `Facilitator: ${fac}. I've pre-filled the skeleton and recent PRs/issues — ` +
+    `Facilitator: ${fac}. I've pre-filled it with each project's merged PRs/closed issues (linked), ` +
+    `upcoming deadlines, and a goals-review read against the Q directives — ` +
     `owners (${who}), please add your project updates before the meeting. ` +
     `I'll DM each of you and check back until your section is in (silence isn't consent 🙂).`
   );
@@ -268,24 +284,55 @@ function localStamp(ms) {
 function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
   const facLine = facilitator
     ? `This week's facilitator is "${facilitator}".`
-    : `No facilitator is set for ${weekKey} in the config — note that in the agenda and ask the team to claim it.`;
+    : `No facilitator is set for ${weekKey} in the config — write "Facilitator: TBD — claim it" and ask the team to claim it.`;
+  const orgLine = cfg.githubOrg
+    ? `the "${cfg.githubOrg}" GitHub org`
+    : `your profile's configured GitHub org`;
+  const directivesLine = cfg.directivesDoc
+    ? `the strategic directives at \`${cfg.directivesDoc}\` (the quarter's numbered priorities + success metrics)`
+    : `the quarter's strategic directives if you can find them in the KB (artifacts/, look for "strategy"/"directives")`;
   const prompt =
     `Weekly Core Meeting agenda build for ${weekKey}. Use the weekly-agenda skill (Build section).\n\n` +
+    `You are producing a DECISION-READY agenda, not a bare skeleton. Make it genuinely useful: ` +
+    `every recent piece of work shown with a clickable link and a one-line "what it did", deadlines surfaced, ` +
+    `and progress read against the quarter's strategic goals. Read these KB sources FIRST and weave them in:\n` +
+    `  • ${directivesLine}.\n` +
+    `  • the deadline digest at \`${cfg.deadlineDigest}\` (auto-maintained; bucketed Overdue / This week / Next week).\n` +
+    `  • each owner's \`people/<slug>.md\` for their \`github_username\` (use it to attribute GitHub activity).\n\n` +
+    `STEPS:\n` +
     `1. In Google Doc ${cfg.docId}, FIRST archive the current contents of the "This Week" tab ` +
-    `(tabId ${cfg.thisWeekTabId}) by appending them, under a "### ${weekKey}" heading, to the top of ` +
-    `the Archive tab (tabId ${cfg.archiveTabId}). Never create a new tab — write only into these existing tabs.\n` +
-    `2. Replace the "This Week" tab content with a fresh agenda skeleton dated ${weekKey} ` +
-    `(Check In, Revise Agenda, Goals review, Contributor Pipeline, Urgent Topics, Active Projects with one ` +
-    `sub-bullet per project owner, Appreciations, Other topics / Time Off). ${facLine}\n` +
-    `3. Pre-fill each Active Projects bullet with that owner's merged PRs and closed issues from the last 7 days ` +
-    `(search GitHub per the repos in the config), and add any upcoming calendar events to the relevant section.\n` +
-    `4. VERIFY: re-read the "This Week" tab and confirm the skeleton actually landed. ONLY if it did, mark the ` +
-    `build done by writing the marker file weekly-agenda/built/${weekKey}.md via modify_kb_file ` +
+    `(tabId ${cfg.thisWeekTabId}) by appending them, under a "### ${weekKey}" heading, to the TOP of ` +
+    `the Archive tab (tabId ${cfg.archiveTabId}). Never create a new tab — write only into these two existing tabs.\n` +
+    `2. Replace the "This Week" tab with a fresh agenda dated ${weekKey}. ${facLine} Use these sections IN ORDER, ` +
+    `and match the doc's existing formatting — real heading styles, real bulleted lists (not "- " text), bold ` +
+    `labels, and REAL hyperlinks (link the title text to the URL; never paste raw URLs):\n` +
+    `   🏁 Check In · ✍️ Revise Agenda\n` +
+    `   🎯 Goals Review — one sub-bullet PER numbered strategic priority from the directives doc; for each, name the ` +
+    `priority and give a one-line read on where we stand vs its success metrics THIS week, citing the shipped work ` +
+    `below. Bold-flag any priority that looks behind.\n` +
+    `   📅 Upcoming Deadlines — from the deadline digest, list items due THIS WEEK and NEXT WEEK that are still OPEN ` +
+    `(skip ones marked ✅ done). Put any OVERDUE-and-still-open items at the very top under a bold "Overdue". ` +
+    `Each line: the item as a hyperlink (to the GitHub issue/PR where it is one), its date, and the owner.\n` +
+    `   🧑‍🏭 Contributor Pipeline · ‼️ Urgent Topics\n` +
+    `   🌱 Active Projects — Updates — ONE bold sub-heading per project, "• <Project> — <owner name>". Under each, ` +
+    `a TIGHT bullet list of that owner's MERGED PRs and CLOSED issues from the LAST 7 DAYS, pulled from ${orgLine} ` +
+    `by their github_username. Each bullet = a hyperlink on the "title (#num)" + a 4–8 word plain summary of what it ` +
+    `did. Attribute work to the project whose repo it lives in; if an owner owns several and it's ambiguous, list ` +
+    `under their primary one. If an owner had no merged/closed activity, write "— no merged PRs / closed issues this week —".\n` +
+    `   🎉 Appreciations (3 MINIMUM) · 💰 Other topics / Upcoming Time Off\n` +
+    `   Also fold any upcoming calendar events (next 7 days) into the relevant section if a calendar is configured.\n` +
+    `3. QUALITY BAR: terse but informative — one line per bullet, every PR/issue/deadline is a clickable link, ` +
+    `project and priority labels are bold. It should read like a polished agenda a facilitator can run the meeting ` +
+    `from, not a raw dump. Owners still flesh out their own narrative — you give them the scaffolding + the facts.\n` +
+    `4. VERIFY: re-read the "This Week" tab and confirm the real content landed (dated header, the Goals Review ` +
+    `bullets, the Upcoming Deadlines list, and the per-project activity — not just empty section headers). ONLY if ` +
+    `it did, mark the build done by writing the marker file weekly-agenda/built/${weekKey}.md via modify_kb_file ` +
     `(a one-line note is fine). Do NOT post anything to the channel on success — the flow announces it once the ` +
     `marker exists.\n` +
     `5. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
     `instead post a short message in this channel saying the agenda build failed and why, so a human can fix it.\n\n` +
-    `Tone: helpful and light — this is a starting point the team fills in, not a finished agenda.`;
+    `Tone: helpful and crisp. This is a rich starting point the team fills in — not a finished narrative, but far ` +
+    `more than an empty skeleton.`;
   return {
     type: 'schedule_task',
     taskId: `weekly-agenda-build-${weekKey}-${nowMs}`,
