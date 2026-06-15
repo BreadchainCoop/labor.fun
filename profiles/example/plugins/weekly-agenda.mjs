@@ -44,6 +44,10 @@ import { fileURLToPath } from 'url';
 import matter from 'gray-matter';
 
 const DAY_MS = 86_400_000;
+/** Re-request the build this often until the agent confirms it (writes the
+ * `built` marker) — so a failed/incomplete build self-heals instead of
+ * stalling the week with no agenda. */
+const BUILD_RETRY_MS = 30 * 60_000;
 
 /** Local YYYY-MM-DD for a timestamp (the per-week key + the human date). */
 export function isoDate(ms) {
@@ -198,7 +202,7 @@ function askText(weekKey, projects, askNumber, docUrl) {
  * the build/nudge ladder is unit-testable. Returns the actions plus the next
  * state (never mutates the input state).
  */
-export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state, filled, mentions, docUrl }) {
+export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state, filled, built, mentions, docUrl }) {
   const out = { dms: [], posts: [], requestBuild: false };
   const st = {
     ...state,
@@ -207,11 +211,24 @@ export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state
     ),
   };
 
-  // First tick of the cycle: build the agenda (archive prior week + write fresh
-  // skeleton), then announce it in the channel.
-  if (!st.buildRequestedAt) {
-    st.buildRequestedAt = new Date(nowMs).toISOString();
-    out.requestBuild = true;
+  // Phase 1 — get the doc built FIRST. (Re)request the build task until the
+  // agent confirms it actually wrote + verified the skeleton (the `built`
+  // marker). We announce and nudge NOTHING here, so the channel/owners are
+  // never told the agenda is ready before it is. Re-kick on a retry cadence so
+  // a failed build self-heals rather than stalling the week.
+  if (!built) {
+    const last = st.buildKickedAt ? Date.parse(st.buildKickedAt) : 0;
+    if (nowMs - last >= BUILD_RETRY_MS) {
+      st.buildKickedAt = new Date(nowMs).toISOString();
+      out.requestBuild = true;
+    }
+    return { ...out, state: st };
+  }
+
+  // Phase 2 — build verified. Announce once (now the "pre-filled" claim is
+  // true), then run the owner nudge ladder.
+  if (!st.announcedAt) {
+    st.announcedAt = new Date(nowMs).toISOString();
     out.posts.push(kickoffPost(cfg.weekKey, facilitator, slugs, mentions, docUrl));
   }
 
@@ -262,11 +279,16 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `sub-bullet per project owner, Appreciations, Other topics / Time Off). ${facLine}\n` +
     `3. Pre-fill each Active Projects bullet with that owner's merged PRs and closed issues from the last 7 days ` +
     `(search GitHub per the repos in the config), and add any upcoming calendar events to the relevant section.\n` +
-    `4. Post the agenda doc link in this channel so owners know it's ready.\n\n` +
+    `4. VERIFY: re-read the "This Week" tab and confirm the skeleton actually landed. ONLY if it did, mark the ` +
+    `build done by writing the marker file weekly-agenda/built/${weekKey}.md via modify_kb_file ` +
+    `(a one-line note is fine). Do NOT post anything to the channel on success — the flow announces it once the ` +
+    `marker exists.\n` +
+    `5. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
+    `instead post a short message in this channel saying the agenda build failed and why, so a human can fix it.\n\n` +
     `Tone: helpful and light — this is a starting point the team fills in, not a finished agenda.`;
   return {
     type: 'schedule_task',
-    taskId: `weekly-agenda-build-${weekKey}`,
+    taskId: `weekly-agenda-build-${weekKey}-${nowMs}`,
     prompt,
     schedule_type: 'once',
     schedule_value: localStamp(nowMs + 2 * 60_000),
@@ -350,6 +372,13 @@ export function tick({ profileDir, logger, nowMs }) {
       : [],
   );
 
+  // The build agent writes this marker only AFTER it has written the skeleton
+  // and re-read the tab to confirm it landed. Its existence is what unlocks the
+  // announce + nudges (so we never announce an unbuilt doc).
+  const built = fs.existsSync(
+    path.join(ctxDir, 'weekly-agenda', 'built', `${weekKey}.md`),
+  );
+
   const mentions = resolveDiscordIds(ctxDir, [...slugs, facilitator].filter(Boolean));
   const docUrl = cfg.docId ? `https://docs.google.com/document/d/${cfg.docId}/edit` : '';
 
@@ -361,6 +390,7 @@ export function tick({ profileDir, logger, nowMs }) {
     facilitator,
     state,
     filled,
+    built,
     mentions,
     docUrl,
   });
