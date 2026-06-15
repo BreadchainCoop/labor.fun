@@ -10,6 +10,13 @@ import {
   IDLE_TIMEOUT,
   isPrivilegedGroup,
   MAX_MESSAGES_PER_PROMPT,
+  OPS_REPORT_AUDIENCE,
+  OPS_REPORT_INTERVAL_MS,
+  OPS_REPORT_OVERLOAD_RATIO,
+  OPS_REPORT_PERIOD,
+  OPS_REPORT_DUE_SOON_DAYS,
+  OPS_REPORT_TARGET_GROUP,
+  ORG_NAME,
   POLL_INTERVAL,
   REMINDER_ESCALATION_CONTACT,
   REMINDER_LADDER,
@@ -95,6 +102,8 @@ import {
   buildPmRun,
 } from './integrations/pm-orchestration.js';
 import { isPmCommand } from './pm-orchestration.js';
+import { startOperationalReport } from './integrations/operational-report.js';
+import { loadMemberCapacitiesFromKb } from './member-profiles.js';
 import {
   loadDeadlineItemsFromKb,
   loadPmTasksFromKb,
@@ -1168,6 +1177,48 @@ async function main(): Promise<void> {
     },
     loadTasks: () => loadPmTasksFromKb(),
   });
+
+  // Operational reports (#34): recurring leadership readout of what's late (by
+  // team/person), per-member load vs. declared capacity (soft over-capacity
+  // flag), and a bottleneck digest. Deterministic — no agent run / API spend.
+  // Disabled when OPS_REPORT_INTERVAL_MS=0. Posts at most once per period.
+  startOperationalReport({
+    intervalMs: OPS_REPORT_INTERVAL_MS,
+    dueSoonDays: OPS_REPORT_DUE_SOON_DAYS,
+    overloadRatio: OPS_REPORT_OVERLOAD_RATIO,
+    audience: OPS_REPORT_AUDIENCE,
+    period: OPS_REPORT_PERIOD,
+    orgName: ORG_NAME,
+    loadTasks: () => loadPmTasksFromKb(),
+    loadCapacities: () => loadMemberCapacitiesFromKb(),
+    resolveTargetJid: () => {
+      const wanted = OPS_REPORT_TARGET_GROUP || SHARED_KB_GROUP;
+      const entry = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === wanted,
+      );
+      return entry?.[0] ?? null;
+    },
+    sendMessage: async (jid, rawText) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) {
+        logger.warn({ jid }, 'Operational report: no channel owns JID');
+        return;
+      }
+      const text = formatOutbound(rawText);
+      if (text) await channel.sendMessage(jid, text);
+    },
+    writeDigest: (markdown) => {
+      const digestPath = path.join(
+        path.dirname(sharedKbTasksDir()),
+        'operational-report.md',
+      );
+      const tmp = `${digestPath}.tmp`;
+      fs.mkdirSync(path.dirname(digestPath), { recursive: true });
+      fs.writeFileSync(tmp, markdown);
+      fs.renameSync(tmp, digestPath);
+    },
+  });
+
   startIpcWatcher({
     sendMessage: (jid, text) => {
       const channel = findChannel(channels, jid);

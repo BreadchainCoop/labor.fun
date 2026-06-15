@@ -101,6 +101,17 @@ the channel rather than dropping it. The routine also runs **on demand from chat
 an allowlisted user can say "run pm orchestration" or "/pm". Tunable via `PM_*`
 env vars; see `.env.example`.
 
+## Operational reports
+
+A second, **read-only** loop (#34) turns this same task graph — plus declared
+member capacity from people profiles — into a recurring **operational report**
+for leadership: what's late (by team and by person), per-member load vs. the
+hours/points they're meant to work (with a *soft* over-capacity flag), and a
+bottleneck digest. Unlike PM orchestration it never wakes the assistant (no API
+spend); it just posts on a cadence and writes `context/operational-report.md`.
+Load is summed from each task's `estimate`. Tunable via `OPS_REPORT_*` env vars.
+See [Operational Reports](../integrations/operational-reports.md).
+
 ## Deadlines & Reminders
 
 Any task with a machine-readable `deadline:` (an ISO `YYYY-MM-DD`) is picked up

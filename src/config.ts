@@ -32,6 +32,7 @@ const envConfig = readEnvFile([
   'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
+  'ENABLED_SKILLS',
   'GITHUB_ORG',
   'SERVICE_USER',
   'REMINDER_LADDER',
@@ -44,6 +45,12 @@ const envConfig = readEnvFile([
   'PM_DUE_SOON_DAYS',
   'PM_DM_COOLDOWN_MS',
   'PM_LEAD',
+  'OPS_REPORT_INTERVAL_MS',
+  'OPS_REPORT_TARGET_GROUP',
+  'OPS_REPORT_AUDIENCE',
+  'OPS_REPORT_PERIOD',
+  'OPS_REPORT_DUE_SOON_DAYS',
+  'OPS_REPORT_OVERLOAD_RATIO',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -68,6 +75,23 @@ export const ORG_WEBSITE = PROFILE.orgWebsite;
 export const GITHUB_ORG = envVal('GITHUB_ORG') || PROFILE.githubOrg;
 export const GITHUB_REPO = PROFILE.githubRepo;
 export const KB_DASHBOARD_URL = PROFILE.kbDashboardUrl;
+
+// Container skills that ship disabled by default (SKILL.md frontmatter
+// `default: false`) but should be enabled for this install. Merged from the
+// active profile's `enabledSkills` and the `ENABLED_SKILLS` env var
+// (comma-separated). Skills without the opt-in flag always load and need not
+// be listed. Consumed by container-runner.ts when syncing skills into each
+// container. See docs/PLUGINS.md → "Opt-in (off-by-default) skills".
+export const ENABLED_SKILLS: string[] = (() => {
+  const fromEnv = (envVal('ENABLED_SKILLS') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromProfile = Array.isArray(PROFILE.enabledSkills)
+    ? PROFILE.enabledSkills.map((s) => String(s).trim()).filter(Boolean)
+    : [];
+  return Array.from(new Set([...fromProfile, ...fromEnv]));
+})();
 export const SERVICE_USER =
   envVal('SERVICE_USER') || PROFILE.serviceUser || 'breadbrich';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -234,6 +258,41 @@ export const PM_DM_COOLDOWN_MS = Math.max(
 // raises unowned work to this person (and the channel) instead of dropping it.
 // Empty = post unowned items to the channel only.
 export const PM_LEAD = envVal('PM_LEAD') || '';
+
+// --- Operational reports (#34) ---
+// Recurring leadership readout of operational state (what's late by team/person,
+// per-member load vs. declared capacity with a soft over-capacity flag, and a
+// bottleneck digest). Deterministic — no agent run, no API spend. Default
+// weekly; 0 disables the loop. Sweeps more often than it posts (idempotent
+// per-period via ops_report_log), so a daily sweep still posts once a week.
+export const OPS_REPORT_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('OPS_REPORT_INTERVAL_MS') || '86400000', 10) || 86400000,
+);
+// Group whose chat receives the report. Empty → SHARED_KB_GROUP. Point this at a
+// private leadership channel when the audience is 'leaders'.
+export const OPS_REPORT_TARGET_GROUP = envVal('OPS_REPORT_TARGET_GROUP') || '';
+// 'leaders' → full per-person hours/load detail (private channel).
+// 'coop'    → team-level aggregates + gentler framing, no per-person hours.
+export const OPS_REPORT_AUDIENCE: 'leaders' | 'coop' =
+  (envVal('OPS_REPORT_AUDIENCE') || 'leaders') === 'coop' ? 'coop' : 'leaders';
+// Idempotency / cadence bucket: at most one post per 'weekly' (ISO week) or
+// 'monthly' period.
+export const OPS_REPORT_PERIOD: 'weekly' | 'monthly' =
+  (envVal('OPS_REPORT_PERIOD') || 'weekly') === 'monthly'
+    ? 'monthly'
+    : 'weekly';
+// A task counts as "due soon" within this many days of its deadline.
+export const OPS_REPORT_DUE_SOON_DAYS = Math.max(
+  0,
+  parseInt(envVal('OPS_REPORT_DUE_SOON_DAYS') || '7', 10) || 7,
+);
+// Soft-flag a member as over capacity when open estimate / declared capacity
+// exceeds this ratio. Default 1.0 (any over-capacity). Parsed as a float.
+export const OPS_REPORT_OVERLOAD_RATIO = (() => {
+  const v = parseFloat(envVal('OPS_REPORT_OVERLOAD_RATIO') || '1');
+  return Number.isFinite(v) && v > 0 ? v : 1;
+})();
 
 // Source group whose `context/` directory holds the canonical shared KB
 // (people, tasks, calendar, projects, …). Mounted into every container at

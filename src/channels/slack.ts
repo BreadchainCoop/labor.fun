@@ -363,12 +363,18 @@ export class SlackChannel implements Channel {
       return;
     }
 
-    // Reply in-thread. Prefer the thread of the exact message being replied to
-    // (concurrency-safe); fall back to the per-channel last-seen thread for
-    // proactive/agent-initiated sends. A top-level trigger has no thread entry,
-    // so the reply correctly posts at the channel root.
+    // Reply in-thread, anchored to the message that triggered this run.
+    // If that message was itself inside a thread, reply into that same thread
+    // (threadTsById holds its parent thread_ts). Otherwise root a new thread on
+    // the triggering message by using its own ts as thread_ts — so the bot's
+    // reply always lands as a threaded reply to the user's original message,
+    // even when that message was posted at the channel root. Anchoring to the
+    // exact triggering message (not the per-channel last-seen thread) keeps this
+    // concurrency-safe. For proactive/agent-initiated sends (no replyToMessageId)
+    // there is no originating message, so fall back to the last-seen thread.
     const threadTs = opts?.replyToMessageId
-      ? this.threadTsById.get(`${jid}:${opts.replyToMessageId}`)
+      ? this.threadTsById.get(`${jid}:${opts.replyToMessageId}`) ||
+        opts.replyToMessageId
       : this.lastThreadTs.get(jid);
     const baseOpts: { channel: string; text?: string; thread_ts?: string } = {
       channel: channelId,

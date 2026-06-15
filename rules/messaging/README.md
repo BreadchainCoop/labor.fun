@@ -8,6 +8,7 @@ How the assistant formats output and sends messages across channels.
 |------|-------------|
 | [Channel Formatting](channel-formatting.md) | Before sending any message — format varies by platform |
 | [Cross-Channel Send](cross-channel.md) | When asked to message someone on a different platform |
+| [Mentions](mentions.md) | Any message meant to notify a person — a plain name doesn't ping; use `<@id>` |
 
 ## Communication Model
 
