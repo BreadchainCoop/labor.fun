@@ -17,7 +17,14 @@ work* and *file owner updates*. You're invoked two ways:
 Config lives in the KB at
 `/workspace/shared-kb/weekly-agenda/config.md` (frontmatter: `doc_id`,
 `this_week_tab_id`, `archive_tab_id`, `channel_jid`, `owners`, `facilitators`,
-`meeting_day/hour`). Read it first — never hardcode IDs.
+`meeting_day/hour`, and optionally `directives_doc`, `deadline_digest`,
+`github_org`). Read it first — never hardcode IDs.
+
+The build task prompt already spells out the exact sections and quality bar for
+the week — follow it. This skill is the durable reference for *how* to do the
+Google Docs work well; the prompt is the per-week source of truth for *what* to
+put in. When they agree, do what they say; the goal is a polished,
+decision-ready agenda, not a bare skeleton.
 
 ## Hard rule: never create a tab
 
@@ -43,33 +50,50 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
    tab under a `### <previous date>` heading — insert at the Archive tab's start
    so newest is on top. Use its existing title line for the date if present.
 3. **Reset the This Week tab.** Delete its body content range and insert a fresh
-   skeleton dated `<week>`:
+   agenda dated `<week>` with these sections, in order:
    - `🏁 Check In (5min)`
    - `✍️ Revise Agenda`
-   - `🎯 Goals review`
+   - `🎯 Goals Review` — one sub-bullet **per numbered strategic priority** from
+     the `directives_doc`; for each, a one-line read on where we stand vs its
+     success metrics this week, citing the shipped work in Active Projects.
+     Bold-flag any priority that looks behind.
+   - `📅 Upcoming Deadlines` — from the `deadline_digest`, the items due **this
+     week and next week that are still open** (skip ✅-done ones), with anything
+     **overdue-and-still-open** at the top under a bold "Overdue". Each line is a
+     hyperlink (to the GitHub issue/PR where it is one) + date + owner.
    - `🧑‍🏭 Contributor Pipeline`
    - `‼️ Urgent Topics`
-   - `🌱 Active Projects — Updates` with one sub-bullet per **owners** entry,
-     labelled `• <Project> (<owner name>)`
+   - `🌱 Active Projects — Updates` — one bold sub-heading per **owners** entry,
+     labelled `• <Project> — <owner name>`, with the pre-fill below under each.
    - `🎉 Appreciations — 3 MINIMUM`
    - `💰 Other topics / Upcoming Time Off`
    Put the facilitator on the header line (`Facilitator: <name>`), or
    `Facilitator: TBD — claim it` when none is set.
-4. **Pre-fill context** under each Active Projects bullet:
-   - GitHub: for the repos in the config's org, list that owner's **merged PRs
-     and closed issues from the last 7 days** (use the GitHub tools; keep it to
-     titles + numbers). If you can't map a project to a repo, skip silently.
+4. **Pre-fill context** — make it rich, not a stub:
+   - GitHub: read each owner's `github_username` from `people/<slug>.md`, then
+     mine `github_org`'s repos for their **merged PRs and closed issues in the
+     last 7 days**. Under each project, write a tight bullet list — every bullet
+     a **real hyperlink** on `title (#num)` plus a 4–8 word summary of what it
+     did. No activity → `— no merged PRs / closed issues this week —`.
    - Calendar: add upcoming events in the next 7 days to the relevant section
      (Community/Events) if a calendar is configured.
-   Keep pre-fill terse — it's a memory aid, not a report. Owners flesh it out.
-5. **Verify, then mark done.** Re-read the **This Week** tab and confirm the
-   skeleton actually landed (it has the dated header + the section list). **Only
-   if it did**, write the marker file `weekly-agenda/built/<week>.md` via
-   `modify_kb_file` (a one-line note is enough). That marker is what tells the
-   flow the agenda is ready — the flow then posts the kickoff and starts nudging
-   owners. **Do not post a "ready" message yourself** (the flow does, only after
-   the marker exists), and **do not** write the marker if the write didn't land.
-6. **On failure, say so — don't go quiet.** If the Docs write or the verify
+   Terse but informative — one line per bullet. This is the scaffolding + facts
+   owners build their narrative on, so give them real signal, not placeholders.
+5. **Formatting quality.** Use the Docs API to make **real** bulleted lists
+   (`createParagraphBullets`) and **real hyperlinks** (`updateTextStyle` with a
+   `link.url` over the title text — never paste raw URLs). Bold the project and
+   priority labels. One line per bullet. It should read like a polished agenda a
+   facilitator can run the meeting from.
+6. **Verify, then mark done.** Re-read the **This Week** tab and confirm the
+   real content landed — the dated header, the **Goals Review** bullets, the
+   **Upcoming Deadlines** list, and the per-project activity (not just empty
+   section headers). **Only if it did**, write the marker file
+   `weekly-agenda/built/<week>.md` via `modify_kb_file` (a one-line note is
+   enough). That marker is what tells the flow the agenda is ready — the flow
+   then posts the kickoff and starts nudging owners. **Do not post a "ready"
+   message yourself** (the flow does, only after the marker exists), and **do
+   not** write the marker if the write didn't land.
+7. **On failure, say so — don't go quiet.** If the Docs write or the verify
    failed (missing/empty tab, no Docs access, API error), do **not** write the
    marker. Post a short message in `channel_jid` explaining the build failed and
    why, so a human can fix it (and the flow will retry the build automatically).
