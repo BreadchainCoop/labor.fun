@@ -62,9 +62,17 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
    - Calendar: add upcoming events in the next 7 days to the relevant section
      (Community/Events) if a calendar is configured.
    Keep pre-fill terse — it's a memory aid, not a report. Owners flesh it out.
-5. **Announce.** The flow already posts the kickoff message, so you only need to
-   confirm completion if something went wrong (missing tab, no GitHub access) —
-   post that in the `channel_jid` so a human can fix it.
+5. **Verify, then mark done.** Re-read the **This Week** tab and confirm the
+   skeleton actually landed (it has the dated header + the section list). **Only
+   if it did**, write the marker file `weekly-agenda/built/<week>.md` via
+   `modify_kb_file` (a one-line note is enough). That marker is what tells the
+   flow the agenda is ready — the flow then posts the kickoff and starts nudging
+   owners. **Do not post a "ready" message yourself** (the flow does, only after
+   the marker exists), and **do not** write the marker if the write didn't land.
+6. **On failure, say so — don't go quiet.** If the Docs write or the verify
+   failed (missing/empty tab, no Docs access, API error), do **not** write the
+   marker. Post a short message in `channel_jid` explaining the build failed and
+   why, so a human can fix it (and the flow will retry the build automatically).
 
 ## File-an-update routine
 
