@@ -94,6 +94,9 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$PROFILE_ABS" 2>/dev/null || true
 
 # Fetch latest main
 log "git fetch + reset --hard origin/main..."
+# Record HEAD before the reset so the success path can tell whether this deploy
+# actually advanced main (and thus whether to notify the merger).
+PREV_SHA_FULL=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse HEAD" 2>/dev/null || echo "")
 su - "$SERVICE_USER" -c "cd $SOURCE && git fetch origin main && git reset --hard origin/main" >> "$LOG" 2>&1 || { log "git fetch/reset failed"; exit 1; }
 CURRENT_SHA=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse --short HEAD")
 CURRENT_SHA_FULL=$(su - "$SERVICE_USER" -c "cd $SOURCE && git rev-parse HEAD")
@@ -153,13 +156,31 @@ if [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ]; then
         || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
     fi
   fi
-  REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$CURRENT_SHA_FULL"
-  log "Pulling agent image $REMOTE_REF"
-  if docker pull "$REMOTE_REF" >> "$LOG" 2>&1; then
+  # Pull the image for the LAST commit that touched container/ — CI only
+  # publishes images for those commits, so $CURRENT_SHA_FULL usually has no
+  # image of its own, and on container-touching merges the deploy races CI's
+  # build (the single pull failed and was never retried, leaving the tag
+  # stale). Retry briefly when this deploy changed container/; the
+  # auto-deploy idle reconciler converges anything slower.
+  IMAGE_SHA=$(su - "$SERVICE_USER" -c "cd $SOURCE && git log -1 --format=%H -- container/" 2>/dev/null || true)
+  IMAGE_SHA="${IMAGE_SHA:-$CURRENT_SHA_FULL}"
+  REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$IMAGE_SHA"
+  PULL_TRIES=1
+  [ "$CONTAINER_CHANGED" = "1" ] && PULL_TRIES="${IMAGE_PULL_TRIES:-6}"
+  pulled=0
+  for attempt in $(seq 1 "$PULL_TRIES"); do
+    log "Pulling agent image $REMOTE_REF (attempt $attempt/$PULL_TRIES)"
+    if docker pull "$REMOTE_REF" >> "$LOG" 2>&1; then
+      pulled=1
+      break
+    fi
+    [ "$attempt" -lt "$PULL_TRIES" ] && sleep "${IMAGE_PULL_DELAY:-20}"
+  done
+  if [ "$pulled" = "1" ]; then
     docker tag "$REMOTE_REF" "$LOCAL_IMAGE"
     log "Tagged $REMOTE_REF -> $LOCAL_IMAGE"
   elif docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
-    log "WARN: pull failed for $REMOTE_REF — keeping existing $LOCAL_IMAGE"
+    log "WARN: pull failed for $REMOTE_REF — keeping existing $LOCAL_IMAGE (auto-deploy's reconciler retags once CI publishes)"
   else
     log "WARN: pull failed and no local $LOCAL_IMAGE — building on host as fallback"
     su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && ./container/build.sh" >> "$LOG" 2>&1 || rollback "container build failed"
@@ -179,6 +200,13 @@ for i in 1 2 3 4 5 6; do
     if journalctl -u "$SERVICE_NAME" --since "60 seconds ago" | grep -q "Credential proxy started"; then
       log "Breadbrich Engels active, credential proxy up. Deploy @ $CURRENT_SHA complete."
       rm -f /tmp/$SERVICE_NAME-pre-pkg.json /tmp/$SERVICE_NAME-pre-lock.json
+      # Notify the merger their change is live — only when HEAD advanced this
+      # run, and never fatally (a notification must not fail a healthy deploy).
+      if [ "${PREV_SHA_FULL:-}" != "$CURRENT_SHA_FULL" ] && [ -f "$DEPLOY_ROOT/setup/deploy-notify.mjs" ]; then
+        log "Notify merger that $CURRENT_SHA is live"
+        su - "$SERVICE_USER" -c "cd $DEPLOY_ROOT && DEPLOY_ROOT='$DEPLOY_ROOT' NOTIFY_REPO='${NOTIFY_REPO:-}' node setup/deploy-notify.mjs '$CURRENT_SHA_FULL'" >> "$LOG" 2>&1 \
+          || log "deploy-notify failed (non-fatal)"
+      fi
       exit 0
     fi
   fi

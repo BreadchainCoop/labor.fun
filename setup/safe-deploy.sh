@@ -37,6 +37,10 @@ AUTO_DEPLOY_NAME="${AUTO_DEPLOY_NAME:-breadbrich-auto-deploy}"
 SERVICE_USER="${SERVICE_USER:-breadbrich}"
 # Runtime env lives in the profile (host-local), derived unless overridden.
 DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-$DEPLOY_ROOT/profiles/$PROFILE/deploy.env}"
+# Post-deploy "your change is live" PR comment (step 10). On by default; set
+# DEPLOY_NOTIFY=0 in deploy.config to silence it — e.g. on a downstream org's
+# host that deploys the shared repo but shouldn't comment on its upstream PRs.
+DEPLOY_NOTIFY="${DEPLOY_NOTIFY:-1}"
 
 APP_DIR="$DEPLOY_ROOT"
 BK_DIR="$BACKUP_DIR"
@@ -157,6 +161,18 @@ as_app "cd '$APP_DIR' && npm run build"
 # container/build.sh produces. Pulling guarantees image==deployed-code and keeps
 # the ~10-min chromium build off the host. If unset, fall back to the legacy
 # behavior: build on the host when container/ sources changed.
+#
+# Which sha to pull: CI (container.yml) only publishes an image for commits
+# that touch container/**, so most HEADs have no image of their own — the
+# image that should be live is the one built from the LAST commit that touched
+# container/. Pulling $NEW unconditionally (the old behavior) failed for most
+# deploys and, worse, raced CI on container-touching merges: the deploy fires
+# ~1 min after merge while the image build takes minutes, so the single pull
+# failed and nothing ever retried — nanoclaw-agent:latest silently stayed
+# stale until some later container-touching merge. Now: pull the
+# last-container-commit's image (already published except in the race window),
+# retry briefly when this very deploy changed container/ (the race window),
+# and let auto-deploy.sh's idle-tick reconciler converge the tail end.
 LOCAL_IMAGE="nanoclaw-agent:latest"
 if [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ]; then
   REGISTRY_HOST="${REGISTRY_HOST:-ghcr.io}"
@@ -171,13 +187,30 @@ if [ -n "${CONTAINER_REGISTRY_IMAGE:-}" ]; then
         || log "WARN: docker login to $REGISTRY_HOST failed — continuing (image may be public)"
     fi
   fi
-  REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$NEW"
-  log "Pull agent image $REMOTE_REF"
-  if docker pull "$REMOTE_REF"; then
+  IMAGE_SHA="$(git -C "$GIT_DIR" log -1 --format=%H -- container/ 2>/dev/null || true)"
+  IMAGE_SHA="${IMAGE_SHA:-$NEW}"
+  REMOTE_REF="$CONTAINER_REGISTRY_IMAGE:$IMAGE_SHA"
+  # Retry only when this deploy changed container/ — that's when the tag is
+  # brand-new and CI may still be building it. 6 × 20s ≈ 2 min covers cached
+  # CI builds; the idle reconciler covers anything slower.
+  PULL_TRIES=1
+  if ! git -C "$GIT_DIR" diff --quiet "$OLD" "$NEW" -- container/ 2>/dev/null; then
+    PULL_TRIES="${IMAGE_PULL_TRIES:-6}"
+  fi
+  pulled=0
+  for attempt in $(seq 1 "$PULL_TRIES"); do
+    log "Pull agent image $REMOTE_REF (attempt $attempt/$PULL_TRIES)"
+    if docker pull "$REMOTE_REF"; then
+      pulled=1
+      break
+    fi
+    [ "$attempt" -lt "$PULL_TRIES" ] && sleep "${IMAGE_PULL_DELAY:-20}"
+  done
+  if [ "$pulled" -eq 1 ]; then
     docker tag "$REMOTE_REF" "$LOCAL_IMAGE"
     log "Tagged $REMOTE_REF -> $LOCAL_IMAGE"
   elif docker image inspect "$LOCAL_IMAGE" >/dev/null 2>&1; then
-    log "WARN: pull failed for $REMOTE_REF — keeping existing $LOCAL_IMAGE"
+    log "WARN: pull failed for $REMOTE_REF — keeping existing $LOCAL_IMAGE (auto-deploy's reconciler retags once CI publishes)"
   else
     log "WARN: pull failed and no local $LOCAL_IMAGE present — building on host as fallback"
     as_app "cd '$APP_DIR' && ./container/build.sh"
@@ -287,3 +320,18 @@ if [ -f "$SELF_SRC" ] && ! cmp -s "$SELF_SRC" "$SELF_DST" 2>/dev/null; then
 fi
 
 log "DEPLOY OK — live app now at $NEW"
+
+# --- 10. Notify the merger that their change is live (best-effort) ---------
+# Fire ONLY when HEAD actually advanced this run. A no-op re-sync (OLD == NEW)
+# and the auto-deploy reconciler's idle ticks both re-run this script at the
+# same SHA; without this guard every tick would re-ping the same person.
+# Runs as the app user — its Node has global fetch and owns repo-tokens/. The
+# ERR trap is already cleared (step 8) and we swallow any failure, so a
+# notification can never fail or roll back an already-healthy deploy.
+if [ "$DEPLOY_NOTIFY" = "0" ]; then
+  log "deploy-notify disabled (DEPLOY_NOTIFY=0) — skipping merger notification"
+elif [ "$OLD" != "$NEW" ] && [ -f "$APP_DIR/setup/deploy-notify.mjs" ]; then
+  log "Notify merger that $NEW is live"
+  as_app "cd '$APP_DIR' && DEPLOY_ROOT='$DEPLOY_ROOT' NOTIFY_REPO='${NOTIFY_REPO:-}' node setup/deploy-notify.mjs '$NEW'" \
+    || log "deploy-notify failed (non-fatal)"
+fi
