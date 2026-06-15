@@ -12,6 +12,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
 - **GitHub operations**: [GitHub Integration](integrations/github.md)
+- **Linear operations**: [Linear Integration](integrations/linear.md)
 - **Reading Discord channel history**: [Discord Integration](integrations/discord.md)
 
 ## Directory
@@ -37,5 +38,6 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Approval gate for tasks proposed from meeting transcripts |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
 | [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on the org's GitHub org (`githubOrg`) |
+| [Linear Integration](integrations/linear.md) | `rules/integrations/` | Any Linear operation — issues, projects, comments in the org's Linear workspace |
 | [Discord Integration](integrations/discord.md) | `rules/integrations/` | Reading a Discord channel's past messages (`fetch_discord_history`), registered vs. unregistered channels |
 | [Operational Reports](integrations/operational-reports.md) | `rules/integrations/` | Recurring leadership readout — what's late, load vs. capacity, bottlenecks; member-profile capacity fields |
