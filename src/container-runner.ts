@@ -379,6 +379,19 @@ function getGithubToken(): string | undefined {
   );
 }
 
+/**
+ * Linear personal API key for the bundled Linear MCP server, read from .env
+ * (with process.env fallback). Returns undefined when unset, which leaves the
+ * Linear MCP server unloaded inside the container. Like the GitHub PAT, the
+ * value is passed through the spawned runtime's process environment, never
+ * argv, so it can't leak via the containerArgs debug log or host process args.
+ */
+function getLinearApiKey(): string | undefined {
+  return (
+    readEnvFile(['LINEAR_API_KEY']).LINEAR_API_KEY || process.env.LINEAR_API_KEY
+  );
+}
+
 // Fixed in-container path for the mounted gws credentials file. The host
 // path comes from GOOGLE_WORKSPACE_CREDENTIALS_FILE (.env or process.env).
 const CONTAINER_GWS_CREDS_PATH = '/run/secrets/gws-credentials.json';
@@ -505,6 +518,13 @@ function buildContainerArgs(
     args.push('-e', 'GH_TOKEN');
   }
 
+  // Linear MCP: only the env var name is passed through (value comes from the
+  // runtime's process env, kept out of argv). Its presence flips hasLinear
+  // inside agent-runner, which loads the official hosted Linear MCP server.
+  if (getLinearApiKey()) {
+    args.push('-e', 'LINEAR_API_KEY');
+  }
+
   // Google Workspace MCP: only the in-container path goes in argv (not a
   // secret); actual credentials live in the read-only mounted file. The
   // env var presence is what flips hasGoogleWorkspace inside agent-runner.
@@ -595,16 +615,19 @@ export async function runContainerAgent(
     //                                same value). Without this, `gh api`
     //                                calls in task script gates fail silently.
     const githubToken = getGithubToken();
+    const linearApiKey = getLinearApiKey();
+    const extraEnv: Record<string, string> = {};
+    if (githubToken) {
+      extraEnv.GITHUB_PERSONAL_ACCESS_TOKEN = githubToken;
+      extraEnv.GH_TOKEN = githubToken;
+    }
+    if (linearApiKey) {
+      extraEnv.LINEAR_API_KEY = linearApiKey;
+    }
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      ...(githubToken
-        ? {
-            env: {
-              ...process.env,
-              GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
-              GH_TOKEN: githubToken,
-            },
-          }
+      ...(Object.keys(extraEnv).length
+        ? { env: { ...process.env, ...extraEnv } }
         : {}),
     });
 

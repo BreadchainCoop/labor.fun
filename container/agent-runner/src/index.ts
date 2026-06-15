@@ -66,6 +66,7 @@ const IPC_POLL_MS = 500;
 
 const hasGoogleWorkspace = !!process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
 const hasGithub = !!process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+const hasLinear = !!process.env.LINEAR_API_KEY;
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -481,6 +482,7 @@ async function runQuery(
         'mcp__nanoclaw__*',
         ...(hasGoogleWorkspace ? ['mcp__gws__*'] : []),
         ...(hasGithub ? ['mcp__github__*'] : []),
+        ...(hasLinear ? ['mcp__linear__*'] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -532,6 +534,21 @@ async function runQuery(
                 env: {
                   GITHUB_PERSONAL_ACCESS_TOKEN:
                     process.env.GITHUB_PERSONAL_ACCESS_TOKEN!,
+                },
+              },
+            }
+          : {}),
+        ...(hasLinear
+          ? {
+              linear: {
+                // Linear's official hosted MCP server. It accepts a personal
+                // API key via the Authorization: Bearer header (no OAuth flow),
+                // so no local package or browser auth is needed. Connected over
+                // streamable HTTP; the key never appears in argv.
+                type: 'http' as const,
+                url: 'https://mcp.linear.app/mcp',
+                headers: {
+                  Authorization: `Bearer ${process.env.LINEAR_API_KEY!}`,
                 },
               },
             }
