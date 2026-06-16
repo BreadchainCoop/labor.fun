@@ -31,7 +31,12 @@ import { getGitHubToken } from '../integrations/github-projects.js';
 import { logger as rootLogger } from '../logger.js';
 import { ChannelOpts } from './registry.js';
 import { registerChannel } from './registry.js';
-import { Channel, NewMessage, RegisteredGroup, SendMessageOpts } from '../types.js';
+import {
+  Channel,
+  NewMessage,
+  RegisteredGroup,
+  SendMessageOpts,
+} from '../types.js';
 
 const GH_API = 'https://api.github.com';
 const JID_PREFIX = 'gh:';
@@ -62,7 +67,11 @@ export function parseGithubJid(jid: string): GithubJid | null {
   return { owner: m[1], repo: m[2], number: Number(m[3]) };
 }
 
-export function makeGithubJid(owner: string, repo: string, number: number): string {
+export function makeGithubJid(
+  owner: string,
+  repo: string,
+  number: number,
+): string {
   return `${JID_PREFIX}${owner}/${repo}/${number}`;
 }
 
@@ -145,7 +154,11 @@ export class GithubMentionsChannel implements Channel {
   }
 
   /** Post the agent's reply back into the issue/PR thread as a comment. */
-  async sendMessage(jid: string, text: string, _opts?: SendMessageOpts): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+    _opts?: SendMessageOpts,
+  ): Promise<void> {
     const parts = parseGithubJid(jid);
     if (!parts) {
       this.log.warn({ jid }, 'GitHub sendMessage: unparseable jid');
@@ -205,7 +218,8 @@ export class GithubMentionsChannel implements Channel {
   private async processThread(n: any): Promise<void> {
     const fullName: string = n?.repository?.full_name ?? '';
     const [owner, repo] = fullName.split('/');
-    const subjectUrl: string = n?.subject?.latest_comment_url || n?.subject?.url || '';
+    const subjectUrl: string =
+      n?.subject?.latest_comment_url || n?.subject?.url || '';
     const number = Number(n?.subject?.url?.split('/').pop());
     if (!owner || !repo || !Number.isInteger(number) || !subjectUrl) {
       await this.markRead(n.id);
@@ -309,7 +323,9 @@ export class GithubMentionsChannel implements Channel {
 /** Build a token-authenticated GitHub REST request function. */
 export function makeGhRequest(token: string): GhRequest {
   return async (method, pathOrUrl, body) => {
-    const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${GH_API}${pathOrUrl}`;
+    const url = pathOrUrl.startsWith('http')
+      ? pathOrUrl
+      : `${GH_API}${pathOrUrl}`;
     const res = await fetch(url, {
       method,
       headers: {

@@ -43,7 +43,11 @@ function harness(opts: {
   const members = new Set((opts.members ?? []).map((m) => m.toLowerCase()));
 
   const request = vi.fn(
-    async (method: string, path: string, body?: unknown): Promise<GhResponse> => {
+    async (
+      method: string,
+      path: string,
+      body?: unknown,
+    ): Promise<GhResponse> => {
       calls.push({ method, path, body });
       if (method === 'GET' && path.startsWith('/notifications?')) {
         return { status: 200, data: opts.notifications };
@@ -118,7 +122,8 @@ describe('GithubMentionsChannel.poll', () => {
           id: 777,
           user: { login: 'cypherbren' },
           body: '@bot-account can you summarize this?',
-          html_url: 'https://github.com/BreadchainCoop/labor.fun/issues/42#c777',
+          html_url:
+            'https://github.com/BreadchainCoop/labor.fun/issues/42#c777',
         },
       },
       members: ['cypherbren'],
@@ -137,7 +142,9 @@ describe('GithubMentionsChannel.poll', () => {
     expect(h.registered[jid]?.folder).toBe('github');
     // thread marked read
     expect(
-      h.calls.some((c) => c.method === 'PATCH' && c.path.includes('/threads/th-1')),
+      h.calls.some(
+        (c) => c.method === 'PATCH' && c.path.includes('/threads/th-1'),
+      ),
     ).toBe(true);
   });
 
@@ -159,7 +166,9 @@ describe('GithubMentionsChannel.poll', () => {
 
     expect(h.delivered).toHaveLength(0);
     expect(
-      h.calls.some((c) => c.method === 'PATCH' && c.path.includes('/threads/th-1')),
+      h.calls.some(
+        (c) => c.method === 'PATCH' && c.path.includes('/threads/th-1'),
+      ),
     ).toBe(true);
   });
 
@@ -224,7 +233,10 @@ describe('GithubMentionsChannel.poll', () => {
 describe('GithubMentionsChannel.sendMessage', () => {
   it('posts the reply to the issue/PR comments endpoint', async () => {
     const h = harness({ notifications: [] });
-    await h.channel.sendMessage('gh:BreadchainCoop/labor.fun/42', 'Here you go.');
+    await h.channel.sendMessage(
+      'gh:BreadchainCoop/labor.fun/42',
+      'Here you go.',
+    );
     const post = h.calls.find((c) => c.method === 'POST');
     expect(post?.path).toBe(
       '/repos/BreadchainCoop/labor.fun/issues/42/comments',
