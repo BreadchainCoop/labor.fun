@@ -27,6 +27,7 @@
  * notifications poller everywhere).
  */
 import { GITHUB_ORG } from '../config.js';
+import { readEnvFile } from '../env.js';
 import { getGitHubToken } from '../integrations/github-projects.js';
 import { logger as rootLogger } from '../logger.js';
 import { ChannelOpts } from './registry.js';
@@ -351,7 +352,15 @@ export function makeGhRequest(token: string): GhRequest {
 }
 
 registerChannel('github', (opts: ChannelOpts): Channel | null => {
-  const enabled = (process.env.GITHUB_MENTIONS_ENABLED || '').toLowerCase();
+  // Read flags from .env (not just process.env) — matches how slack/discord
+  // resolve their tokens, since the orchestrator loads secrets via readEnvFile
+  // rather than into the process environment.
+  const env = readEnvFile(['GITHUB_MENTIONS_ENABLED', 'GITHUB_BOT_LOGIN']);
+  const enabled = (
+    process.env.GITHUB_MENTIONS_ENABLED ||
+    env.GITHUB_MENTIONS_ENABLED ||
+    ''
+  ).toLowerCase();
   if (enabled !== 'true' && enabled !== '1') return null;
 
   const token = getGitHubToken();
@@ -374,6 +383,6 @@ registerChannel('github', (opts: ChannelOpts): Channel | null => {
   return new GithubMentionsChannel(opts, {
     request,
     org: GITHUB_ORG,
-    login: process.env.GITHUB_BOT_LOGIN || '',
+    login: process.env.GITHUB_BOT_LOGIN || env.GITHUB_BOT_LOGIN || '',
   });
 });
