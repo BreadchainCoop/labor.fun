@@ -58,6 +58,37 @@ deployment rule in `CLAUDE.md`:
   they're allowlisted before acting on a write request. See
   [Access Control](../access-control/README.md).
 
+## Inbound: responding to @-mentions
+
+Everything above is **outbound** — the agent acting on GitHub when a user asks
+it to from a chat channel. There is also an optional **inbound** trigger so the
+assistant can *respond when it is tagged on GitHub itself*.
+
+- Implemented as a channel (`src/channels/github.ts`), not via the container
+  MCP. A host-side poller checks the bot account's GitHub **notifications**
+  (`reason: mention` / `team_mention`) on an interval, exactly like the email
+  poller. (The MCP server's `notifications` toolset stays disabled — this is a
+  separate, narrowly-scoped read.)
+- When the bot is @-mentioned, the poller fetches the triggering comment/issue,
+  routes it into the agent as a normal inbound message under a `gh:<owner>/<repo>/<number>`
+  jid, and the agent's reply is posted **back into that thread** as a comment.
+- **Authorization — org members only.** A mention only triggers a response if
+  the comment author is a member of the org (`githubOrg`), checked via
+  `GET /orgs/{org}/members/{user}`. Mentions from non-members are marked read
+  and dropped — on a public repo anyone can tag the bot, but only the co-op can
+  drive it. This is the requester-authorization rule above, applied to GitHub.
+  (The bot account should itself be an **org member** so this endpoint can see
+  *concealed* members; an outside collaborator only sees public members and
+  would wrongly reject private ones.)
+- **Off by default.** Set `GITHUB_MENTIONS_ENABLED=true` to turn it on. The PAT
+  additionally needs `Notifications` access and `read:org` (org membership);
+  the account should be a **dedicated bot account**, since the notifications
+  API reports mentions of the *authenticated user*. Optionally pin the bot's
+  handle with `GITHUB_BOT_LOGIN` (else it's resolved via `GET /user` on start).
+- Replies are public, on-the-record org statements — same tone/discipline as
+  the rest of this file. The agent runs as a non-main group (no `rules/` mount;
+  it reads `groups/global/CLAUDE.md`).
+
 ## Setup checklist (operator)
 
 1. On the assistant's GitHub account, create a **fine-grained PAT** scoped to
@@ -66,3 +97,7 @@ deployment rule in `CLAUDE.md`:
    (store via the OneCLI vault per `CLAUDE.md`; never commit).
 3. Rebuild the agent container (`./container/build.sh`) so the binary is
    present, then deploy via the standard push → merge → deploy flow.
+4. *(Optional — inbound @-mentions)* Grant the PAT `Notifications` + `read:org`,
+   set `GITHUB_MENTIONS_ENABLED=true` (and optionally `GITHUB_BOT_LOGIN`), and
+   restart the orchestrator. No container rebuild needed — the poller runs
+   host-side in the orchestrator, not in the agent container.
