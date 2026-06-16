@@ -50,6 +50,11 @@ export function parseConfig(mdText) {
     startBlock: Number(fm.start_block) || 0,
     decimals: Number.isInteger(fm.decimals) ? fm.decimals : 18,
     rpcs: Array.isArray(fm.rpcs) && fm.rpcs.length ? fm.rpcs.map(String) : DEFAULT_RPCS,
+    // BREAD is minted 1:1 against xDAI and redeemable 1:1 for DAI, so ~$1 is the
+    // canonical value; override per-deployment if you price it differently.
+    usdPerBread: Number.isFinite(fm.usd_per_bread) ? fm.usd_per_bread : 1,
+    explorerTxBase:
+      typeof fm.explorer_tx_base === 'string' ? fm.explorer_tx_base : 'https://gnosisscan.io/tx/',
     names,
   };
 }
@@ -70,6 +75,15 @@ export function formatUnits(value, decimals) {
 }
 
 const round = (n) => Math.round(n * 100) / 100;
+const usd = (n) => `$${round(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** UTC date like "Mon 8 Jun 2026" from a unix-seconds timestamp. Pure. */
+export function formatCycleDate(timestampSec) {
+  if (!timestampSec) return '';
+  return new Intl.DateTimeFormat('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  }).format(new Date(timestampSec * 1000));
+}
 
 /**
  * Aggregate one cycle's Transfer logs (already filtered to from=distributor at
@@ -89,17 +103,39 @@ export function aggregateCycle(transferLogs, names) {
     .map(([addr, v]) => ({ addr, label: names[addr] || addr, value: v }));
 }
 
-/** Render a per-cycle Mermaid Sankey + a one-line caption. Pure. */
-export function renderSankey({ rows, decimals, blockNumber, cycleIndex }) {
+/**
+ * Render a newsletter-ready per-cycle report: caption (date, BREAD + USD total,
+ * tx link), a Mermaid sankey-beta, and a per-project breakdown with %. Pure —
+ * all chain data is passed in. `timestampSec`, `txHash`, `usdPerBread`,
+ * `explorerTxBase` are optional; the report degrades gracefully without them.
+ */
+export function renderSankey({
+  rows, decimals, blockNumber, cycleIndex,
+  timestampSec, txHash, usdPerBread = 1, explorerTxBase = 'https://gnosisscan.io/tx/',
+}) {
   const total = rows.reduce((a, r) => a + r.value, 0n);
+  const totalBread = formatUnits(total, decimals);
+  const idx = cycleIndex != null ? ` #${cycleIndex}` : '';
+  const date = formatCycleDate(timestampSec);
+
+  let caption = `🍞 *Bread yield distribution${idx}*` + (date ? ` — ${date}` : '');
+  caption += `\nTotal: ${round(totalBread).toLocaleString()} BREAD (~${usd(totalBread * usdPerBread)}) to ${rows.length} projects`;
+  if (txHash) caption += ` · [tx](${explorerTxBase}${txHash})`;
+  else caption += ` · block ${blockNumber}`;
+
   let body = '```mermaid\nsankey-beta\n';
   for (const r of rows) body += `Yield Distributor,${r.label},${round(formatUnits(r.value, decimals))}\n`;
   body += '```';
-  const idx = cycleIndex != null ? ` #${cycleIndex}` : '';
-  const caption =
-    `🍞 Bread yield distribution${idx} — ${round(formatUnits(total, decimals)).toLocaleString()} BREAD ` +
-    `to ${rows.length} projects (block ${blockNumber}).`;
-  return `${caption}\n\n${body}`;
+
+  const breakdown = rows
+    .map((r) => {
+      const b = formatUnits(r.value, decimals);
+      const pct = totalBread > 0 ? round((b / totalBread) * 100) : 0;
+      return `• ${r.label} — ${round(b).toLocaleString()} BREAD (${pct}%)`;
+    })
+    .join('\n');
+
+  return `${caption}\n\n${body}\n\n${breakdown}`;
 }
 
 // ---- RPC (plain fetch JSON-RPC; tries each endpoint until one answers) ----
@@ -201,8 +237,14 @@ export async function poll({ profileDir, logger, nowMs = Date.now() }) {
   const posts = [];
   let cycleIndex = state.cycleIndex ?? 0;
   const fromTopic = '0x' + cfg.distributor.replace(/^0x/, '').padStart(64, '0');
+  // block -> the distribution tx hash (for the explorer link).
+  const txByBlock = new Map();
+  for (const l of cycleLogs) {
+    const b = Number(BigInt(l.blockNumber));
+    if (!txByBlock.has(b)) txByBlock.set(b, l.transactionHash);
+  }
   // Oldest first so reports are chronological.
-  const blocks = [...new Set(cycleLogs.map((l) => Number(BigInt(l.blockNumber))))].sort((a, b) => a - b);
+  const blocks = [...txByBlock.keys()].sort((a, b) => a - b);
   for (const block of blocks) {
     const transfers = await getLogs(cfg.rpcs, {
       address: cfg.breadToken,
@@ -213,7 +255,26 @@ export async function poll({ profileDir, logger, nowMs = Date.now() }) {
     const rows = aggregateCycle(transfers, cfg.names);
     if (rows.length === 0) continue;
     cycleIndex += 1;
-    posts.push(renderSankey({ rows, decimals: cfg.decimals, blockNumber: block, cycleIndex }));
+    // Block timestamp for the human date (best-effort — skip on failure).
+    let timestampSec = 0;
+    try {
+      const blk = await rpc(cfg.rpcs, 'eth_getBlockByNumber', [toHex(block), false]);
+      timestampSec = blk?.timestamp ? Number(BigInt(blk.timestamp)) : 0;
+    } catch {
+      /* date is optional */
+    }
+    posts.push(
+      renderSankey({
+        rows,
+        decimals: cfg.decimals,
+        blockNumber: block,
+        cycleIndex,
+        timestampSec,
+        txHash: txByBlock.get(block),
+        usdPerBread: cfg.usdPerBread,
+        explorerTxBase: cfg.explorerTxBase,
+      }),
+    );
   }
 
   const ipcDir = path.join(profileDir, 'data', 'ipc', sharedKb, 'messages');

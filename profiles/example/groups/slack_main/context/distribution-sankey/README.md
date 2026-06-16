@@ -12,7 +12,10 @@ It derives each cycle straight from events — **no subgraph dependency**:
 2. for each new cycle block, reads the BREAD `Transfer` logs emitted **from** the
    distributor in that block (authoritative recipient + amount — no positional
    project-array guessing, the thing that keeps breaking the subgraph),
-3. renders a `sankey-beta` diagram of that cycle and posts it.
+3. posts a newsletter-ready report for that cycle:
+   - a caption with the **cycle date**, **total BREAD + ~USD**, and a **tx link**,
+   - a `sankey-beta` diagram (recipient → BREAD),
+   - a per-project **breakdown with %**.
 
 Plain `fetch` JSON-RPC + minimal hex decoding, so it adds **no dependency**.
 
@@ -36,6 +39,8 @@ distributor: '0xeE95A62b749d8a2520E0128D9b3aCa241269024b'   # YieldDistributor (
 bread_token: '0xa555d5344f6fb6c65da19e403cb4c1ec4a1a5ee3'   # BREAD token (Gnosis) — QUOTE it
 start_block: 34696259
 decimals: 18
+usd_per_bread: 1            # optional — BREAD is 1:1 with DAI, so ~$1 (default 1)
+explorer_tx_base: 'https://gnosisscan.io/tx/'   # optional — for the tx link (default this)
 # optional — defaults to public Gnosis RPCs
 rpcs:
   - https://rpc.gnosischain.com

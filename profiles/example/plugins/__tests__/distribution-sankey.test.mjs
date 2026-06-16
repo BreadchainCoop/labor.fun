@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addrFromTopic,
   aggregateCycle,
+  formatCycleDate,
   formatUnits,
   parseConfig,
   renderSankey,
@@ -31,6 +32,35 @@ describe('parseConfig', () => {
     expect(c.startBlock).toBe(34696259);
     expect(c.decimals).toBe(18);
     expect(c.names['0x918def5d593f46735f74f9e2b280fe51af3a99ad']).toBe('Bread Core');
+    // enrichment defaults
+    expect(c.usdPerBread).toBe(1);
+    expect(c.explorerTxBase).toBe('https://gnosisscan.io/tx/');
+  });
+
+  it('honours overridden usd_per_bread and explorer_tx_base', () => {
+    const c = parseConfig(
+      [
+        '---',
+        'channel_jid: dc:1',
+        "distributor: '0xee95a62b749d8a2520e0128d9b3aca241269024b'",
+        "bread_token: '0xa555d5344f6fb6c65da19e403cb4c1ec4a1a5ee3'",
+        'usd_per_bread: 1.02',
+        'explorer_tx_base: https://blockscout.com/tx/',
+        '---',
+      ].join('\n'),
+    );
+    expect(c.usdPerBread).toBe(1.02);
+    expect(c.explorerTxBase).toBe('https://blockscout.com/tx/');
+  });
+});
+
+describe('formatCycleDate', () => {
+  it('formats a unix-seconds timestamp as a UTC date', () => {
+    const ts = Math.floor(Date.UTC(2026, 5, 10, 16, 0, 0) / 1000); // Wed, 10 Jun 2026
+    expect(formatCycleDate(ts)).toBe('Wed, 10 Jun 2026');
+  });
+  it('returns empty string for a missing timestamp', () => {
+    expect(formatCycleDate(0)).toBe('');
   });
 });
 
@@ -79,17 +109,33 @@ describe('aggregateCycle', () => {
 });
 
 describe('renderSankey', () => {
-  it('emits a sankey-beta block + caption with cycle index and total', () => {
-    const rows = [
-      { addr: '0xa', label: 'Bread Core', value: 6n * 10n ** 18n },
-      { addr: '0xb', label: 'Symbiota', value: 4n * 10n ** 18n },
-    ];
+  const rows = [
+    { addr: '0xa', label: 'Bread Core', value: 6n * 10n ** 18n },
+    { addr: '0xb', label: 'Symbiota', value: 4n * 10n ** 18n },
+  ];
+
+  it('emits the sankey, cycle index, total BREAD, and a falls-back to block', () => {
     const out = renderSankey({ rows, decimals: 18, blockNumber: 46393177, cycleIndex: 23 });
     expect(out).toContain('```mermaid\nsankey-beta');
     expect(out).toContain('Yield Distributor,Bread Core,6');
     expect(out).toContain('Yield Distributor,Symbiota,4');
     expect(out).toContain('#23');
     expect(out).toContain('10 BREAD'); // 6 + 4
-    expect(out).toContain('block 46393177');
+    expect(out).toContain('block 46393177'); // no txHash → block fallback
+  });
+
+  it('enriches with date, USD, tx link, and per-project % breakdown', () => {
+    const ts = Math.floor(Date.UTC(2026, 5, 10, 16, 0, 0) / 1000);
+    const out = renderSankey({
+      rows, decimals: 18, blockNumber: 46393177, cycleIndex: 23,
+      timestampSec: ts, txHash: '0xabc123', usdPerBread: 1.02,
+      explorerTxBase: 'https://gnosisscan.io/tx/',
+    });
+    expect(out).toContain('Wed, 10 Jun 2026');              // human date
+    expect(out).toContain('~$10.20');                       // 10 BREAD * 1.02
+    expect(out).toContain('[tx](https://gnosisscan.io/tx/0xabc123)'); // explorer link
+    expect(out).toContain('• Bread Core — 6 BREAD (60%)');  // per-project %
+    expect(out).toContain('• Symbiota — 4 BREAD (40%)');
+    expect(out).not.toContain('block 46393177');            // tx link replaces block
   });
 });
