@@ -44,6 +44,7 @@ People files carry descriptive `tags:` in frontmatter (`engineering`, `operation
 
 ## Related Rules
 
+- [Voice & Register](voice.md) — the register/tone the assistant speaks in once identity is resolved
 - [Platform Identities](platform-identities.md) — Full cross-platform mapping
 - [Access Control](../access-control/README.md) — What allowlisted users can do
 - [Privacy Policy](../access-control/privacy-policy.md) — Enforce after identity resolution

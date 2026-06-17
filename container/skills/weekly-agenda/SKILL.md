@@ -55,8 +55,11 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
    - `✍️ Revise Agenda`
    - `🎯 Goals Review` — one sub-bullet **per numbered strategic priority** from
      the `directives_doc`; for each, a one-line read on where we stand vs its
-     success metrics this week, citing the shipped work in Active Projects.
-     Bold-flag any priority that looks behind.
+     success metrics this week, **naming what moved** as well as what is still
+     open, and citing the shipped work in Active Projects. Note status plainly
+     (e.g. `on track` / `needs attention`). This is a status read, **not a
+     scorecard** — do not single out misses with shaming emphasis, and never
+     imply a person or team underperformed.
    - `📅 Upcoming Deadlines` — from the `deadline_digest`, the items due **this
      week and next week that are still open** (skip ✅-done ones), with anything
      **overdue-and-still-open** at the top under a bold "Overdue". Each line is a
@@ -74,7 +77,14 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
      mine `github_org`'s repos for their **merged PRs and closed issues in the
      last 7 days**. Under each project, write a tight bullet list — every bullet
      a **real hyperlink** on `title (#num)` plus a 4–8 word summary of what it
-     did. No activity → `— no merged PRs / closed issues this week —`.
+     did.
+   - **Empty GitHub sections are invitations, not verdicts.** If an owner has no
+     merged GitHub work, leave their space open with a prompt — e.g.
+     `— space for <name>'s update —` — **never** a line that reads as "did
+     nothing." Merged PRs are an **engineering-only, partial** signal: design,
+     BD, community, marketing, ops, research and care work rarely show up as
+     PRs, so *absence of PRs is not absence of contribution.* (See **Tone** and
+     [voice.md](../../../rules/identity/voice.md).)
    - Calendar: add upcoming events in the next 7 days to the relevant section
      (Community/Events) if a calendar is configured.
    Terse but informative — one line per bullet. This is the scaffolding + facts
@@ -113,8 +123,29 @@ When a project owner replies in DM with their weekly update:
    reply).
 4. Reply confirming where it landed. Light touch — a sentence is enough.
 
+> **Robustness — never silently drop an update.** Treat *any* update-shaped DM
+> from an allowlisted owner as a file-an-update trigger, even if it isn't
+> perfectly formatted and even if the flow didn't pre-classify it. Always write
+> the marker (step 3): an un-filed update means the owner's work goes invisible
+> **and** they get re-nudged — the exact failure this skill exists to prevent.
+> During a **Build**, also sweep each owner's recent DM for an update that was
+> never filed and fold it in rather than printing an empty section.
+
 ## Tone
 
-Helpful and low-friction. The agenda is a shared scratchpad the team fills in,
-never a finished document you author for them. Don't over-format, don't nag
-beyond what the flow already does.
+Helpful and low-friction. The agenda is a **shared mirror the team fills in** —
+never a scoreboard, and never a finished document you author for them. Don't
+over-format, don't nag beyond what the flow already does.
+
+This is the same stance the
+[operational-reports rule](../../../rules/integrations/operational-reports.md)
+already commits to — *a shared mirror, not a surveillance tool* — and the
+[voice rule](../../../rules/identity/voice.md). Apply it here:
+
+- **GitHub activity is a partial, eng-only proxy.** Most cooperative work
+  (design, BD, community, marketing, ops, research, care work) never lands as a
+  merged PR. Never frame an empty GitHub section as "did nothing."
+- **Empty states are invitations, not verdicts.** A quiet section means "add
+  your update here," not a flag of underperformance.
+- **Status reads name what moved**, not only what's missing — no shaming
+  emphasis on misses, no ranking people against each other.
