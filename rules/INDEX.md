@@ -6,6 +6,7 @@ Operational rules, access control policies, and process definitions. The assista
 
 When the assistant starts a conversation, it reads the relevant rules based on context:
 - **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md)
+- **Every message**: [Voice & Register](identity/voice.md) — the register underneath what you say
 - **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
 - **Cross-channel requests**: [Messaging](messaging/README.md)
 - **Task scheduling**: [Scheduling](scheduling/README.md)
@@ -29,6 +30,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Request Logging](knowledge-base/request-logging.md) | `rules/knowledge-base/request-logging.md` | After every interaction |
 | [Close the Loop](knowledge-base/close-the-loop.md) | `rules/knowledge-base/close-the-loop.md` | Every reply — ensure actionable info is written to KB |
 | [Messaging](messaging/README.md) | `rules/messaging/` | Formatting output, cross-channel sends |
+| [Voice & Register](identity/voice.md) | `rules/identity/voice.md` | Every message — the tone/register underneath what you say |
 | [Channel Formatting](messaging/channel-formatting.md) | `rules/messaging/channel-formatting.md` | Before sending any message |
 | [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
