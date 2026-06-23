@@ -12,6 +12,12 @@
 //     Goals Review read against the quarter's strategic directives. It then
 //     posts the agenda link in the core channel — only after a build is
 //     verified (see the `built` marker below).
+//   * Optionally, `refresh_hours_before` the meeting, fires a second ONE-SHOT
+//     "refresh" task that re-pulls fresh GitHub/deadline facts into the SAME
+//     already-built doc WITHOUT archiving, resetting the tab, re-nudging, or
+//     touching any owner-written content — so the agenda is current at meeting
+//     time even when it was built (and the single reminder sent) days earlier.
+//     Disabled when unset (0).
 //   * DMs every project owner (and the facilitator) asking them to fill in
 //     their section, and re-nudges on a cadence until they do — silence is not
 //     consent. After max_nudges unanswered DMs it escalates once in the core
@@ -47,6 +53,7 @@ import { fileURLToPath } from 'url';
 import matter from 'gray-matter';
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 /** Re-request the build this often until the agent confirms it (writes the
  * `built` marker) — so a failed/incomplete build self-heals instead of
  * stalling the week with no agenda. */
@@ -125,6 +132,10 @@ export function parseConfig(mdText) {
     prepDaysBefore: Number(fm.prep_days_before) || 2,
     nudgeEveryDays: Number(fm.nudge_every_days) || 1,
     maxNudges: Number(fm.max_nudges) || 3,
+    // Optional second pass: hours before the meeting to run a light "refresh"
+    // that re-pulls GitHub/deadline facts into the already-built doc without
+    // re-nudging or resetting owner content. 0 (default) disables it.
+    refreshHoursBefore: Number(fm.refresh_hours_before) || 0,
     owners,
     facilitators,
     // Optional context sources the build agent weaves into the agenda (all
@@ -217,9 +228,12 @@ function askText(weekKey, projects, askNumber, docUrl) {
  * Decide this tick's actions from current state. Pure — no I/O, no clock — so
  * the build/nudge ladder is unit-testable. Returns the actions plus the next
  * state (never mutates the input state).
+ *
+ * `refreshDue` (computed by the caller from `refresh_hours_before`) gates the
+ * once-per-week refresh pass; it's only honoured once the doc is built.
  */
-export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state, filled, built, mentions, docUrl }) {
-  const out = { dms: [], posts: [], requestBuild: false };
+export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state, filled, built, refreshDue, mentions, docUrl }) {
+  const out = { dms: [], posts: [], requestBuild: false, requestRefresh: false };
   const st = {
     ...state,
     members: Object.fromEntries(
@@ -246,6 +260,15 @@ export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state
   if (!st.announcedAt) {
     st.announcedAt = new Date(nowMs).toISOString();
     out.posts.push(kickoffPost(cfg.weekKey, facilitator, slugs, mentions, docUrl));
+  }
+
+  // Refresh pass — once the refresh window opens (refreshDue, computed by the
+  // caller), re-pull fresh GitHub/deadline facts into the already-built doc.
+  // Fires exactly once per week (the `refreshedAt` guard) and NEVER re-nudges
+  // or resets owner content — that's enforced by the refresh task prompt.
+  if (refreshDue && !st.refreshedAt) {
+    st.refreshedAt = new Date(nowMs).toISOString();
+    out.requestRefresh = true;
   }
 
   const nudgeMs = cfg.nudgeEveryDays * DAY_MS;
@@ -308,8 +331,9 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `labels, and REAL hyperlinks (link the title text to the URL; never paste raw URLs):\n` +
     `   🏁 Check In · ✍️ Revise Agenda\n` +
     `   🎯 Goals Review — one sub-bullet PER numbered strategic priority from the directives doc; for each, name the ` +
-    `priority and give a one-line read on where we stand vs its success metrics THIS week, citing the shipped work ` +
-    `below. Bold-flag any priority that looks behind.\n` +
+    `priority and give a one-line read on where we stand vs its success metrics THIS week, naming what MOVED as well ` +
+    `as what's still open and citing the shipped work below. Keep it a plain status read, not a scorecard — do not ` +
+    `single out misses with shaming emphasis.\n` +
     `   📅 Upcoming Deadlines — from the deadline digest, list items due THIS WEEK and NEXT WEEK that are still OPEN ` +
     `(skip ones marked ✅ done). Put any OVERDUE-and-still-open items at the very top under a bold "Overdue". ` +
     `Each line: the item as a hyperlink (to the GitHub issue/PR where it is one), its date, and the owner.\n` +
@@ -318,7 +342,8 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `a TIGHT bullet list of that owner's MERGED PRs and CLOSED issues from the LAST 7 DAYS, pulled from ${orgLine} ` +
     `by their github_username. Each bullet = a hyperlink on the "title (#num)" + a 4–8 word plain summary of what it ` +
     `did. Attribute work to the project whose repo it lives in; if an owner owns several and it's ambiguous, list ` +
-    `under their primary one. If an owner had no merged/closed activity, write "— no merged PRs / closed issues this week —".\n` +
+    `under their primary one. If an owner had no merged/closed activity, leave an INVITATION ("— space for <name>'s ` +
+    `update —"), never a line that reads as "did nothing" — merged PRs are an eng-only, partial proxy.\n` +
     `   🎉 Appreciations (3 MINIMUM) · 💰 Other topics / Upcoming Time Off\n` +
     `   Also fold any upcoming calendar events (next 7 days) into the relevant section if a calendar is configured.\n` +
     `3. QUALITY BAR: terse but informative — one line per bullet, every PR/issue/deadline is a clickable link, ` +
@@ -336,6 +361,42 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
   return {
     type: 'schedule_task',
     taskId: `weekly-agenda-build-${weekKey}-${nowMs}`,
+    prompt,
+    schedule_type: 'once',
+    schedule_value: localStamp(nowMs + 2 * 60_000),
+    context_mode: 'isolated',
+    targetJid: cfg.channelJid,
+    timestamp: new Date(nowMs).toISOString(),
+  };
+}
+
+function refreshTaskIpc({ cfg, weekKey, nowMs }) {
+  const orgLine = cfg.githubOrg
+    ? `the "${cfg.githubOrg}" GitHub org`
+    : `your profile's configured GitHub org`;
+  const prompt =
+    `Weekly Core Meeting agenda REFRESH for ${weekKey}. The agenda was already built earlier this week and ` +
+    `owners may have filled in their sections since — this is a LIGHT refresh of the AUTO-PULLED facts only, ` +
+    `NOT a rebuild.\n\n` +
+    `DO NOT: archive anything, reset or replace the "This Week" tab, change the facilitator line, or touch ` +
+    `Goals Review prose, Appreciations, Urgent Topics, owner-written narrative, or any human edit. DO NOT DM ` +
+    `anyone, post a kickoff, or write any marker file (the build marker already exists).\n\n` +
+    `DO: In Google Doc ${cfg.docId}, "This Week" tab (tabId ${cfg.thisWeekTabId}), update ONLY the auto-pulled ` +
+    `facts so the agenda is current for today's meeting:\n` +
+    `  • Under "🌱 Active Projects — Updates", for each "• <Project> — <owner>" sub-heading, re-pull that owner's ` +
+    `MERGED PRs and CLOSED issues from the LAST 7 DAYS from ${orgLine} (by their people/<slug>.md github_username) ` +
+    `and update the auto-pulled activity bullets — the linked "title (#num) — summary" lines, or the ` +
+    `"space for <name>'s update" placeholder. Keep real hyperlinks and real bullets.\n` +
+    `  • Refresh "📅 Upcoming Deadlines" from \`${cfg.deadlineDigest}\` (open items due this/next week; overdue on top).\n\n` +
+    `CRITICAL — preserve human content: only replace bullets you can clearly tell are auto-pulled GitHub/deadline ` +
+    `facts. If an owner has added their own narrative under a project, leave it and update the GitHub bullets ` +
+    `alongside it — never overwrite it. If you cannot cleanly tell auto-pulled from human content in a section, ` +
+    `LEAVE THAT SECTION UNTOUCHED.\n\n` +
+    `When done: do NOT write a marker and do NOT message the channel — just stop. Only if the doc can't be ` +
+    `read/written, post one short line in this channel explaining why.`;
+  return {
+    type: 'schedule_task',
+    taskId: `weekly-agenda-refresh-${weekKey}-${nowMs}`,
     prompt,
     schedule_type: 'once',
     schedule_value: localStamp(nowMs + 2 * 60_000),
@@ -400,6 +461,12 @@ export function tick({ profileDir, logger, nowMs }) {
   );
   if (nowMs < windowStartMs || nowMs >= meetingMs) return null; // outside prep window
 
+  // The refresh window opens `refresh_hours_before` hours before the meeting
+  // (disabled when 0). We're already inside the prep window and before the
+  // meeting here, so this is always a sub-window of it.
+  const refreshDue =
+    cfg.refreshHoursBefore > 0 && nowMs >= meetingMs - cfg.refreshHoursBefore * HOUR_MS;
+
   const assignments = assignmentsBySlug(cfg.owners);
   const slugs = Object.keys(assignments);
   const facilitator = cfg.facilitators[weekKey] || '';
@@ -438,6 +505,7 @@ export function tick({ profileDir, logger, nowMs }) {
     state,
     filled,
     built,
+    refreshDue,
     mentions,
     docUrl,
   });
@@ -449,6 +517,12 @@ export function tick({ profileDir, logger, nowMs }) {
     writeIpcFile(
       path.join(ipcDir, 'tasks'),
       buildTaskIpc({ cfg: { weekKey, ...cfg }, weekKey, facilitator, nowMs }),
+    );
+  }
+  if (plan.requestRefresh) {
+    writeIpcFile(
+      path.join(ipcDir, 'tasks'),
+      refreshTaskIpc({ cfg: { weekKey, ...cfg }, weekKey, nowMs }),
     );
   }
   for (const dm of plan.dms) {
@@ -472,13 +546,14 @@ export function tick({ profileDir, logger, nowMs }) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   atomicWrite(statePath, JSON.stringify(plan.state, null, 2));
 
-  if (plan.dms.length || plan.posts.length || plan.requestBuild) {
+  if (plan.dms.length || plan.posts.length || plan.requestBuild || plan.requestRefresh) {
     logger.info(
       {
         weekKey,
         dms: plan.dms.length,
         posts: plan.posts.length,
         buildRequested: plan.requestBuild,
+        refreshRequested: plan.requestRefresh,
       },
       'weekly-agenda: actions emitted',
     );
