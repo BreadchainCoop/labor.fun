@@ -1078,6 +1078,9 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
+    // Mirror the send path above so the watcher can pre-flight a target's
+    // routability and surface undeliverable sends instead of dropping them.
+    canDeliver: (jid) => findChannel(channels, jid) !== undefined,
     deleteMessage: async (jid, messageId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);

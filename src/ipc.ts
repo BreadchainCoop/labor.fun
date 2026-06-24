@@ -45,6 +45,7 @@ import {
 import { writeApprovedTaskFile } from './kb-tasks.js';
 import { writeOutboundSnapshot } from './container-runner.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
+import { classifyDeliverability } from './ipc-delivery.js';
 import { logger } from './logger.js';
 import type { DiscordHistoryMessage } from './channels/discord.js';
 import { RegisteredGroup } from './types.js';
@@ -223,6 +224,12 @@ function readSenderCtxFromDir(
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  /**
+   * True when a connected channel can route this JID (mirrors the send
+   * path's `findChannel`). Lets the watcher reject undeliverable targets
+   * up front instead of silently dropping them — see `ipc-delivery.ts`.
+   */
+  canDeliver: (jid: string) => boolean;
   deleteMessage: (jid: string, messageId: string) => Promise<void>;
   editMessage: (jid: string, messageId: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -335,12 +342,71 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 const hasSenderCtx = senderCtx !== null;
 
                 if (isMain || isSameGroup || hasSenderCtx) {
-                  await deps.sendMessage(data.chatJid, data.text);
-                  refreshOutboundSnapshot(sourceGroup, data.chatJid);
-                  logger.info(
-                    { chatJid: data.chatJid, sourceGroup, hasSenderCtx },
-                    'IPC message sent',
-                  );
+                  // Deliverability guard (issue #95): a send whose target no
+                  // connected channel can route — e.g. escalating to `slack:…`
+                  // on a deployment with no Slack channel — used to be
+                  // logged-and-dropped while the agent's tool had already
+                  // reported success: a silent failure that made escalations
+                  // vanish. Verify the target is routable and surface any
+                  // failure back to the *source* chat (mirrors `dm_user`)
+                  // rather than dropping it.
+                  const notifySource = async (msg: string) => {
+                    const srcJid =
+                      data.sourceJid ||
+                      Object.entries(registeredGroups).find(
+                        ([, g]) => g.folder === sourceGroup,
+                      )?.[0] ||
+                      null;
+                    // Don't try to report a failure into the very chat we
+                    // just failed to reach (avoids a pointless second error).
+                    if (!srcJid || srcJid === data.chatJid) return;
+                    try {
+                      await deps.sendMessage(srcJid, msg);
+                    } catch (notifyErr) {
+                      logger.warn(
+                        { srcJid, notifyErr },
+                        'IPC message: failed to surface delivery error to source chat',
+                      );
+                    }
+                  };
+
+                  const verdict = classifyDeliverability(data.chatJid, {
+                    hasChannel: deps.canDeliver(data.chatJid),
+                    isRegistered: !!targetGroup,
+                  });
+
+                  if (!verdict.deliverable) {
+                    logger.warn(
+                      {
+                        chatJid: data.chatJid,
+                        sourceGroup,
+                        reason: verdict.reason,
+                      },
+                      'IPC message undeliverable — surfaced to source chat',
+                    );
+                    await notifySource(`⚠️ Your message ${verdict.reason}.`);
+                  } else {
+                    try {
+                      await deps.sendMessage(data.chatJid, data.text);
+                      refreshOutboundSnapshot(sourceGroup, data.chatJid);
+                      logger.info(
+                        { chatJid: data.chatJid, sourceGroup, hasSenderCtx },
+                        'IPC message sent',
+                      );
+                    } catch (sendErr) {
+                      const msg =
+                        sendErr instanceof Error
+                          ? sendErr.message
+                          : String(sendErr);
+                      logger.warn(
+                        { chatJid: data.chatJid, sourceGroup, err: msg },
+                        'IPC message send failed — surfaced to source chat',
+                      );
+                      await notifySource(
+                        `⚠️ Couldn't deliver your message to \`${data.chatJid}\`: ${msg}`,
+                      );
+                    }
+                  }
                 } else {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
