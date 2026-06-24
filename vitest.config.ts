@@ -9,6 +9,10 @@ export default defineConfig({
       // live beside them in __tests__/ (which the plugin loader's
       // non-recursive directory scan ignores).
       'profiles/example/plugins/__tests__/*.test.mjs',
+      // kb-ui is a plain .mjs Express app; its pure helpers (e.g. roster.mjs)
+      // are unit-tested beside them. The test files import only the helpers,
+      // never server.mjs (which starts a server on import).
+      'kb-ui/**/*.test.mjs',
     ],
   },
 });

@@ -1012,7 +1012,7 @@ Call AFTER save_meeting_summary -- pass the summary_id you got back. One call co
           proposed_assignee: z
             .string()
             .optional()
-            .describe('KB person name if identified, e.g. "dave"'),
+            .describe('KB person name if identified, e.g. "jane-doe"'),
           proposed_due_date: z
             .string()
             .optional()
