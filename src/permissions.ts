@@ -18,7 +18,7 @@ import { logger } from './logger.js';
 // --- Types ---
 
 export interface Person {
-  id: string; // filename without .md (e.g., 'alice')
+  id: string; // filename without .md (e.g., 'jane-doe')
   displayName: string;
   tags: string[];
 }

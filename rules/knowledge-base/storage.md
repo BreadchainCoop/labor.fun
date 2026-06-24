@@ -11,7 +11,7 @@ The assistant uses **two distinct storage systems**. Knowing which one holds wha
 
 | Directory | Example File | Managed How |
 |-----------|-------------|-------------|
-| `context/people/` | `bob.md` | The assistant creates/edits markdown files |
+| `context/people/` | `jane-doe.md` | The assistant creates/edits markdown files |
 | `context/tasks/` | `TASK-001.md` | The assistant creates/edits markdown files |
 | `context/calendar/` | `2026-05-01-shape-rotator.md` | The assistant creates/edits markdown files |
 | `context/artifacts/` | `request_log.md` | The assistant creates/edits markdown files |

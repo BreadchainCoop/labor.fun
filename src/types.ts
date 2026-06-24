@@ -56,7 +56,7 @@ export interface NewMessage {
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
   is_reply_to_bot?: boolean;
-  user_id?: string; // Resolved KB person ID (e.g., 'alice')
+  user_id?: string; // Resolved KB person ID (e.g., 'jane-doe')
 }
 
 export interface ScheduledTask {

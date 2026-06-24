@@ -402,7 +402,7 @@ function createSchema(database: Database.Database): void {
 
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
-  // Example: SEED_IDENTITIES='[{"platform_id":"cli:ops","platform":"cli","kb_person":"ops"}]'
+  // Example: SEED_IDENTITIES='[{"platform_id":"cli:jane-doe","platform":"cli","kb_person":"jane-doe"}]'
   // If unset, no identities are seeded (existing rows in user_identities are preserved).
   const seedIdentitiesJson = process.env.SEED_IDENTITIES;
   if (seedIdentitiesJson) {

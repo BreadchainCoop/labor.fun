@@ -23,9 +23,9 @@ nudges members until done, and (via the agent) schedules review meetings.
 ```markdown
 ---
 members:                 # KB people slugs (people/<slug>.md must exist)
-  - alice
-  - bob
-  - carol
+  - jane-doe
+  - john-doe
+  - sam-roe
 channel_jid: dc:123456789012345678   # where the cycle is announced / summarized; a REGISTERED group
 reviews_required: 2                  # peer reviews each member must give/receive (round-robin)
 window_weeks_before: 3               # optional — window opens N weeks before quarter end
@@ -38,9 +38,9 @@ summary_days_before_end: 7           # optional — post a status summary this m
 # Optional explicit pairing instead of round-robin (ops owns the "valid peer /
 # anonymity" policy). Omit to auto-assign each member the next two in the list.
 # assignments:
-#   alice: [bob, carol]
-#   bob:   [carol, alice]
-#   carol: [alice, bob]
+#   jane-doe: [john-doe, sam-roe]
+#   john-doe: [sam-roe, jane-doe]
+#   sam-roe:  [jane-doe, john-doe]
 ---
 
 Free text: notes on the review policy, what "valid peer" means here, etc.

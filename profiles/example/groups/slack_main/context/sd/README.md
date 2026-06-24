@@ -19,8 +19,8 @@ KB home of the quarterly Strategic Directives flow, driven by the
 ```markdown
 ---
 members:            # KB people slugs (people/<slug>.md must exist with a discord_id)
-  - alice
-  - bob
+  - jane-doe
+  - john-doe
 channel_jid: dc:123456789012345678   # committee channel; must be a REGISTERED group
 kickoff_weeks_before: 4              # optional — window opens N weeks before quarter end
 nudge_every_days: 3                  # optional — re-ask cadence per member
