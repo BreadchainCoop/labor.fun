@@ -47,9 +47,15 @@ groups/
 
 ## RBAC
 
-- **Superadmins:** alice, bob (admin dashboard, credentials)
-- **Admins:** alice, ops, bob, carol, dave (all KB, logs, manage groups/tasks)
-- **Coordinators:** dave (operations, cross-send, non-private KB write)
+Role membership is configured per deployment via the env vars
+`KB_SUPERADMINS` / `KB_ADMINS` / `KB_COORDINATORS` / `KB_RESIDENTS`
+(comma-separated lowercase usernames), resolved against the active profile's
+`people/` files. The usernames below are **placeholders** — substitute your
+org's own:
+
+- **Superadmins:** `<superadmin-usernames>` (admin dashboard, credentials)
+- **Admins:** `<admin-usernames>` (all KB, logs, manage groups/tasks)
+- **Coordinators:** `<coordinator-usernames>` (operations, cross-send, non-private KB write)
 - **Identity resolution:** user_identities table maps platform_id+platform → kb_person
 - **Tag hierarchy:** admin → {leadership, engineering, creative, operations, community}; leadership → {engineering, creative, operations, community}
 

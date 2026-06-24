@@ -1,18 +1,22 @@
-# Breadbrich Engels routing rules
+# Example routing rules (illustrative — NOT live config).
 # Loaded by the central orchestrator at startup. Changes require PR + merge + safe-deploy.
 # Schema: see schema comment at bottom.
+#
+# EXAMPLE ONLY: the identity usernames below are placeholders, not a real org.
+# Populate `identities` with your own usernames (resolved against the profile's
+# people/ files) when adapting this for a deployment.
 
 version: 1
 updated: 2026-04-21
 
 # Sender identity groups — referenced by rules below
 identities:
-  main_user: [ops]       # ops.localstark — superadmin
-  admins: [alice, bob, carol, dave]
-  coordinators: [nina, kai]
-  members: [alex, alexandra, kai, carol, dmarz, sam, nina, ren, john-fagan, lana, matt, mira, dave, tariq, bob]
-  guests: []                # transient, not registered
-  system: [big_breadbrich, observer, reflector, curator, scheduler]
+  main_user: [<main-user>] # superadmin
+  admins: [<admin-1>, <admin-2>]
+  coordinators: [<coordinator-1>, <coordinator-2>]
+  members: [<member-1>, <member-2>, <member-3>]
+  guests: [] # transient, not registered
+  system: [orchestrator, observer, reflector, curator, scheduler]
 
 # Request type taxonomy — what the classifier can output
 request_types:
@@ -306,7 +310,7 @@ post_hooks:
     action: append_to_audit_log
     file: artifacts/cross-chat-reads.log
   route_to_approval_chain:
-    description: For financial requests, notify relevant approver (Alice for <$500, leadership for more)
+    description: For financial requests, notify relevant approver (a designated approver for <$500, leadership for more)
     action: conditional_notify
   calendar_sync:
     description: Pull new event into Google Calendar if event_logging action created it

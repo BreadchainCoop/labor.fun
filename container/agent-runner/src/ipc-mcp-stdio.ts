@@ -319,7 +319,15 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+    // Delivery is async (the orchestrator routes the queued message). For a
+    // cross-channel send this tool cannot confirm the target is reachable, so
+    // don't over-promise: the orchestrator surfaces any delivery failure back
+    // into this chat (see issue #95 — undeliverable sends used to vanish
+    // silently). Same-chat sends are routed to the live current chat.
+    const text = args.target_jid
+      ? `Message queued for delivery to ${args.target_jid}. If it can't be delivered (e.g. that channel isn't connected here), the failure will be reported back in this chat.`
+      : 'Message sent.';
+    return { content: [{ type: 'text' as const, text }] };
   },
 );
 
@@ -1004,7 +1012,7 @@ Call AFTER save_meeting_summary -- pass the summary_id you got back. One call co
           proposed_assignee: z
             .string()
             .optional()
-            .describe('KB person name if identified, e.g. "dave"'),
+            .describe('KB person name if identified, e.g. "jane-doe"'),
           proposed_due_date: z
             .string()
             .optional()

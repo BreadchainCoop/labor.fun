@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 import { marked } from 'marked';
+import { buildUserRoster, readPeopleDir } from './roster.mjs';
 import { createRequire } from 'module';
 // better-sqlite3 is in the parent /opt/breadbrich/node_modules, not kb-ui's
 let Database;
@@ -1642,7 +1643,7 @@ app.get('/logs', (req, res) => {
   res.send(layout('Request Logs', body, username));
 });
 
-// --- Admin Dashboard (superadmin only: alice, bob) ---
+// --- Admin Dashboard (superadmin only — see KB_SUPERADMINS) ---
 
 app.get('/admin', (req, res) => {
   const username = req.auth.user;
@@ -1653,20 +1654,16 @@ app.get('/admin', (req, res) => {
 
   const users = loadUsers();
 
-  // Display-only roster for the superadmin /admin page. Slack/Telegram IDs are
-  // intentionally not hardcoded here \u2014 the source of truth is each person's KB
-  // file (groups/slack_main/context/people/<name>.md) and the JID rosters in
-  // groups/*/CLAUDE.md. The dashes below render as "\u2014" in the table; if you
-  // need richer per-user identity display, derive it from those files at
-  // request time.
-  const userData = {
-    alice: { display: 'Alice Adams', tags: ['admin', 'leadership'], admin: true, superadmin: true, slack: '\u2014', telegram: '\u2014', kb: 'All docs', crossSend: 'Yes' },
-    bob: { display: 'Bob Baker', tags: ['admin', 'leadership', 'engineering'], admin: true, superadmin: true, slack: '\u2014', telegram: '\u2014', kb: 'All docs', crossSend: 'Yes' },
-    carol: { display: 'Carol Cole', tags: ['admin', 'leadership'], admin: true, superadmin: false, slack: '\u2014', telegram: '\u2014', kb: 'All docs', crossSend: 'Yes' },
-    ops: { display: 'Ops', tags: ['admin', 'engineering'], admin: true, superadmin: false, slack: '\u2014', telegram: '\u2014', kb: 'All docs', crossSend: 'Yes' },
-    dave: { display: 'Dave Doyle', tags: ['coordinator', 'operations', 'engineering'], admin: true, superadmin: false, slack: '\u2014', telegram: '\u2014', kb: 'All docs', crossSend: 'Yes' },
-    guest: { display: 'Guest', tags: [], admin: false, superadmin: false, slack: '\u2014', telegram: '\u2014', kb: 'Open only', crossSend: 'No' },
-  };
+  // Display-only roster for the superadmin /admin page, derived at request
+  // time from the active profile's people files (CONTEXT_DIR/people/<slug>.md)
+  // + the env-driven role lists. Nothing is hardcoded here (issue #95): an
+  // empty/dev profile simply yields the users.json accounts with role-derived
+  // tags and "\u2014" identities, never fictional placeholder members.
+  const userData = buildUserRoster(
+    Object.keys(users),
+    readPeopleDir(path.join(CONTEXT_DIR, 'people')),
+    { isAdmin, isSuperAdmin, isCoordinator },
+  );
 
   let userRows = '';
   for (const [uname, pwd] of Object.entries(users)) {
@@ -2059,7 +2056,7 @@ app.get('/architecture', (req, res) => {
           <rect class="box" x="484" y="60" width="200" height="80" fill="#162216" stroke="#1a3a1a"/>
           <text x="494" y="78" class="box-header">\u{1F465} people/</text>
           <line x1="484" y1="84" x2="684" y2="84" stroke="#1a3a1a"/>
-          <text x="494" y="98" class="field">bob.md, alice.md, carol.md, ...</text>
+          <text x="494" y="98" class="field">jane-doe.md, john-doe.md, ...</text>
           <text x="494" y="112" class="field">Personnel Notes (admin-only section)</text>
           <text x="494" y="124" class="box-sub">visibility: restricted</text>
 
