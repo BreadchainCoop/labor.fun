@@ -93,6 +93,7 @@ beforeEach(() => {
 
   deps = {
     sendMessage: async () => {},
+    canDeliver: () => true,
     deleteMessage: async () => {},
     editMessage: async () => {},
     registeredGroups: () => groups,

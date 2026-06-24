@@ -105,7 +105,7 @@ Maps platform-specific IDs to KB person names — the identity-resolution allowl
 |---|---|---|
 | **platform_id** | TEXT | Platform-specific user ID (composite PK) |
 | **platform** | TEXT | slack, telegram, discord, cli, etc. |
-| kb_person | TEXT | KB person identifier (e.g. bob, alice) |
+| kb_person | TEXT | KB person identifier (e.g. jane-doe) |
 
 ### app_users
 People records used for assignment and identity resolution.
