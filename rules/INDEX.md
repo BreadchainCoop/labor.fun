@@ -11,6 +11,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Task scheduling**: [Scheduling](scheduling/README.md)
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
+- **Needs deploy/operator access or a human decision**: [Escalation](escalation.md)
 - **GitHub operations**: [GitHub Integration](integrations/github.md)
 - **Linear operations**: [Linear Integration](integrations/linear.md)
 - **Reading Discord channel history**: [Discord Integration](integrations/discord.md)
@@ -32,6 +33,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Channel Formatting](messaging/channel-formatting.md) | `rules/messaging/channel-formatting.md` | Before sending any message |
 | [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
+| [Escalation](escalation.md) | `rules/escalation.md` | A request needs deploy/operator access or a human decision the assistant can't make |
 | [Identity & Allowlist](identity/README.md) | `rules/identity/` | Resolving who is asking; allowlisted vs unknown |
 | [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
