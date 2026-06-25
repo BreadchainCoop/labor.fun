@@ -45,19 +45,24 @@ groups/
 - Limits: 30min timeout, 10MB max output, 5 max concurrent containers
 - Base image: node:22-slim + Chromium + fonts + agent-browser
 
-## RBAC
+## Access control (flat model)
 
-Role membership is configured per deployment via the env vars
-`KB_SUPERADMINS` / `KB_ADMINS` / `KB_COORDINATORS` / `KB_RESIDENTS`
-(comma-separated lowercase usernames), resolved against the active profile's
-`people/` files. The usernames below are **placeholders** — substitute your
-org's own:
+Permissions are **flat**. An **allowlisted user** — anyone who resolves to a KB
+person (present in the allowlist and carrying the configured platform allowlist
+role) — has full access to every gated operation. Unknown senders have none.
+There are **no Admin / Coordinator / Resident / Guest tiers**, and `tags:` on
+people files are descriptive labels only (no permission effect). See
+`container/skills/access-control` and the CHANGELOG entry *"Flattened the
+permission hierarchy."*
 
-- **Superadmins:** `<superadmin-usernames>` (admin dashboard, credentials)
-- **Admins:** `<admin-usernames>` (all KB, logs, manage groups/tasks)
-- **Coordinators:** `<coordinator-usernames>` (operations, cross-send, non-private KB write)
-- **Identity resolution:** user_identities table maps platform_id+platform → kb_person
-- **Tag hierarchy:** admin → {leadership, engineering, creative, operations, community}; leadership → {engineering, creative, operations, community}
+- **Identity resolution:** the `user_identities` table maps platform_id+platform → kb_person.
+- **Per-document `visibility:`** (`open` / `restricted` / `private`) controls what gets *surfaced*, not who can write.
+- **KB dashboard credentials page (`/admin`):** the one remaining gate — restricted to `KB_SUPERADMINS` because it exposes secrets.
+
+> **Legacy:** the KB dashboard code still reads `KB_ADMINS` / `KB_COORDINATORS` /
+> `KB_RESIDENTS` and renders the old role tiers. These predate the flattening and
+> are slated to be collapsed to the flat model (authenticated user = full access;
+> `KB_SUPERADMINS` keeps only the credentials page). Tracked separately.
 
 ## Versioning
 
