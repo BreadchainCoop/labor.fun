@@ -926,6 +926,18 @@ async function main(): Promise<void> {
               error: `unknown group for jid ${chatJid}`,
             };
           }
+          // The agent-runner emits its one-shot result marker and then LINGERS
+          // (MCP/credential-proxy handles keep the process alive — it does not
+          // self-exit; normal message runs are torn down by the group queue). A
+          // bridge step has no queue lifecycle, so we manage the container here:
+          // capture the streamed result, then SIGTERM the process as soon as the
+          // result (or an error) arrives. Without this the container orphans and
+          // runContainerAgent waits out the hard timeout. Streaming mode also
+          // returns result:null on the return value, so we read it off the
+          // stream rather than the resolved output.
+          let proc: import('child_process').ChildProcess | undefined;
+          let streamedResult: string | null = null;
+          let streamedError = false;
           const output = await runContainerAgent(
             group,
             {
@@ -937,9 +949,28 @@ async function main(): Promise<void> {
               modelOverride,
               allowedTools,
             },
-            () => {},
+            (p) => {
+              proc = p;
+            },
+            async (out) => {
+              if (out.status === 'error') {
+                streamedError = true;
+                proc?.kill('SIGTERM');
+                return;
+              }
+              if (out.result != null) {
+                streamedResult = out.result;
+                proc?.kill('SIGTERM');
+              }
+            },
           );
-          return { status: output.status, result: output.result };
+          if (streamedResult != null) {
+            return { status: 'success', result: streamedResult };
+          }
+          return {
+            status: streamedError || output.status === 'error' ? 'error' : 'success',
+            result: output.result,
+          };
         },
       });
     }

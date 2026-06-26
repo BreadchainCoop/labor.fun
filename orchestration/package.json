@@ -13,6 +13,6 @@
   },
   "dependencies": {
     "smithers-orchestrator": "*",
-    "zod": "^3.23.0"
+    "zod": "^4"
   }
 }
