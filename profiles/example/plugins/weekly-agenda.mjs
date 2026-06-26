@@ -190,9 +190,15 @@ function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl) {
 }
 
 function escalationPost(slug, asks, weekKey, mentions) {
+  // Recovery-oriented, not a call-out: the most common cause of an "unfilled"
+  // section is an update that was sent but never filed (see the file-an-update
+  // routine). Offer the self-heal path and stop nudging — never frame it as the
+  // person being behind. (Aligns with the shared-mirror voice rule.)
+  const who = mentionFor(slug, mentions);
   return (
-    `⚠️ ${mentionFor(slug, mentions)} hasn't filled their agenda section for ${weekKey} after ${asks} DM reminders. ` +
-    `Please follow up directly — I'll stop nudging them.`
+    `📝 I don't have ${who}'s agenda section for ${weekKey} yet, and I've stopped DMing them. ` +
+    `If you already shared an update and it isn't in the doc, it may not have been filed — ` +
+    `${who}, just reply "file my agenda update" (restating it) and I'll capture it. No rush.`
   );
 }
 

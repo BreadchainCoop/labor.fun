@@ -198,7 +198,11 @@ describe('planActions — build → verify → announce → nudge', () => {
     run(); // asks → 2
     const esc = run(); // maxNudges reached → escalate
     expect(esc.dms).toHaveLength(0);
-    expect(esc.posts.some((t) => /hasn't filled/.test(t))).toBe(true);
+    // Recovery-oriented escalation: offers the "file my agenda update" self-heal
+    // and avoids the old shaming "hasn't filled / follow up directly" framing.
+    const escPost = esc.posts.find((t) => /file my agenda update/.test(t));
+    expect(escPost).toBeTruthy();
+    expect(escPost).not.toMatch(/hasn't filled|follow up directly/);
     expect(esc.state.members.ruben.escalated).toBe(true);
     const after = run();
     expect(after.dms).toHaveLength(0);
