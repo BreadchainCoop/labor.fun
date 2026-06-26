@@ -139,6 +139,12 @@ export function parseConfig(mdText) {
     // GitHub org to mine for each owner's recent merged PRs / closed issues
     // (else the build agent falls back to its profile's configured org).
     githubOrg: typeof fm.github_org === 'string' ? fm.github_org.trim() : '',
+    // Corrector page (the agenda-web service). When both are set, the kickoff
+    // post links the StatiCrypt page so members can correct the optimistic draft.
+    // Base URL (no trailing slash); the page lives at <base>/<week>.html.
+    correctorBaseUrl: typeof fm.corrector_base_url === 'string' ? fm.corrector_base_url.trim().replace(/\/$/, '') : '',
+    // Shared StatiCrypt password (must match the agenda-web service's AGENDA_WEB_PASSWORD).
+    correctorPassword: typeof fm.corrector_password === 'string' ? fm.corrector_password : '',
   };
 }
 
@@ -176,16 +182,22 @@ export function resolveDiscordIds(ctxDir, slugs) {
   return out;
 }
 
-function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl) {
+function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl, correctorUrl, correctorPassword) {
   const who = slugs.map((s) => mentionFor(s, mentions)).join(', ');
   const fac = facilitator ? mentionFor(facilitator, mentions) : 'TBD';
   const link = docUrl ? ` ${docUrl}` : '';
+  // The corrector page lets owners fix the optimistic draft and copy it back —
+  // a lower-friction path than the doc, and on-message (it's a draft, not a verdict).
+  const corrector = correctorUrl
+    ? `\n📝 Or correct my draft in one place — filter to your name, edit, then copy → DM it back to me: ` +
+      `${correctorUrl}/${weekKey}.html` +
+      (correctorPassword ? ` (password: ${correctorPassword})` : '')
+    : '';
   return (
     `🗓️ Weekly Core Meeting agenda for ${weekKey} is up.${link}\n` +
-    `Facilitator: ${fac}. I've pre-filled it with each project's merged PRs/closed issues (linked), ` +
-    `upcoming deadlines, and a goals-review read against the Q directives — ` +
-    `owners (${who}), please add your project updates before the meeting. ` +
-    `I'll DM each of you and check back until your section is in (silence isn't consent 🙂).`
+    `Facilitator: ${fac}. I've drafted each project's merged PRs/closed issues (linked), ` +
+    `upcoming deadlines, and a goals read against the Q directives — it's a starting point, ` +
+    `owners (${who}) please add what I missed before the meeting. I'll DM each of you and check back.${corrector}`
   );
 }
 
@@ -251,7 +263,17 @@ export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state
   // true), then run the owner nudge ladder.
   if (!st.announcedAt) {
     st.announcedAt = new Date(nowMs).toISOString();
-    out.posts.push(kickoffPost(cfg.weekKey, facilitator, slugs, mentions, docUrl));
+    out.posts.push(
+      kickoffPost(
+        cfg.weekKey,
+        facilitator,
+        slugs,
+        mentions,
+        docUrl,
+        cfg.correctorBaseUrl,
+        cfg.correctorPassword,
+      ),
+    );
   }
 
   const nudgeMs = cfg.nudgeEveryDays * DAY_MS;
@@ -339,12 +361,21 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `3. QUALITY BAR: terse but informative — one line per bullet, every PR/issue/deadline is a clickable link, ` +
     `project and priority labels are bold. It should read like a polished agenda a facilitator can run the meeting ` +
     `from, not a raw dump. Owners still flesh out their own narrative — you give them the scaffolding + the facts.\n` +
-    `4. VERIFY: re-read the "This Week" tab and confirm the real content landed (dated header, the Goals Review ` +
+    `4. CORRECTOR PAGE DATA: write the SAME agenda as structured JSON to weekly-agenda/page-data/${weekKey}.json ` +
+    `via modify_kb_file, so members can review and correct their sections on the corrector page. Use EXACTLY this ` +
+    `shape (valid JSON only): {"week":"${weekKey}","facilitator":"<name>","docUrl":"<the doc url>","brief":"<the ` +
+    `This Week in Brief text>","goals":[{"priority":"<P# — name>","read":"<one-line status on the work>"}],` +
+    `"deadlines":[{"text":"<title>","date":"<YYYY-MM-DD>","owner":"<name>","url":"<github url or empty>",` +
+    `"pastDue":true|false}],"members":[{"slug":"<slug>","name":"<display name>","projects":[{"project":"<Project>",` +
+    `"items":[{"text":"<what shipped>","ref":"#<num or empty>","url":"<github url or empty>"}]}]}]}. One members[] ` +
+    `entry per owner, one projects[] entry per project they own, items[] = their merged PRs / closed issues (an EMPTY ` +
+    `array if none — the page renders an invitation, never a "did nothing" line).\n` +
+    `5. VERIFY: re-read the "This Week" tab and confirm the real content landed (dated header, the Goals Review ` +
     `bullets, the Upcoming Deadlines list, and the per-project activity — not just empty section headers). ONLY if ` +
     `it did, mark the build done by writing the marker file weekly-agenda/built/${weekKey}.md via modify_kb_file ` +
     `(a one-line note is fine). Do NOT post anything to the channel on success — the flow announces it once the ` +
     `marker exists.\n` +
-    `5. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
+    `6. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
     `instead post a short message in this channel saying the agenda build failed and why, so a human can fix it.\n\n` +
     `Tone: a shared mirror, not a scoreboard. You're a peer tool inside a cooperative, not a manager over it — point ` +
     `the agenda at the WORK and what it needs, never at ranking people. Helpful and crisp; a rich starting point the ` +

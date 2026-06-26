@@ -1,0 +1,24 @@
+[Unit]
+Description=labor.fun weekly-agenda corrector web (StatiCrypt, public port)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${DEPLOY_ROOT}
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Non-secret config in the per-org deploy env; the shared StatiCrypt password
+# (AGENDA_WEB_PASSWORD) and the dir paths (AGENDA_WEB_DIR, AGENDA_PAGEDATA_DIR,
+# AGENDA_WEB_PORT) are set there too. The page is encrypted client-side, so the
+# port is safe to expose publicly — only ciphertext is ever served.
+EnvironmentFile=-${DEPLOY_ENV_FILE}
+ExecStart=/usr/bin/node ${DEPLOY_ROOT}/tools/agenda-page/serve.mjs
+Restart=always
+RestartSec=5
+StandardOutput=append:${DEPLOY_ROOT}/logs/agenda-web.log
+StandardError=append:${DEPLOY_ROOT}/logs/agenda-web.error.log
+
+[Install]
+WantedBy=multi-user.target

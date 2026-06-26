@@ -91,6 +91,19 @@ describe('parseConfig', () => {
     expect(c.deadlineDigest).toBe('deadlines.md');
     expect(c.githubOrg).toBe('AcmeCoop');
   });
+
+  it('reads corrector page config (and strips a trailing slash)', () => {
+    const c = parseConfig(
+      [
+        '---',
+        'corrector_base_url: http://203.0.113.5:8091/',
+        'corrector_password: bread-solidarity',
+        '---',
+      ].join('\n'),
+    );
+    expect(c.correctorBaseUrl).toBe('http://203.0.113.5:8091'); // trailing / stripped
+    expect(c.correctorPassword).toBe('bread-solidarity');
+  });
 });
 
 describe('assignmentsBySlug', () => {
@@ -159,6 +172,22 @@ describe('planActions — build → verify → announce → nudge', () => {
     expect(p.posts[0]).toContain('2026-06-10');
     expect(p.dms.map((d) => d.slug).sort()).toEqual(['bren', 'ruben']);
     expect(p.state.announcedAt).toBeTruthy();
+  });
+
+  it('built: kickoff links the corrector page + password when configured', () => {
+    const p = planActions(
+      base({
+        built: true,
+        cfg: { ...cfg, correctorBaseUrl: 'http://203.0.113.5:8091', correctorPassword: 'bread-solidarity' },
+      }),
+    );
+    expect(p.posts[0]).toContain('http://203.0.113.5:8091/2026-06-10.html');
+    expect(p.posts[0]).toContain('password: bread-solidarity');
+  });
+
+  it('built: no corrector line when not configured', () => {
+    const p = planActions(base({ built: true }));
+    expect(p.posts[0]).not.toMatch(/\.html|password:/);
   });
 
   it('built + already announced, within the nudge interval: no repeats', () => {
@@ -291,6 +320,7 @@ describe('tick — end to end against a temp profile', () => {
     expect(t.prompt).toMatch(/space for <name>'s update/); // invitation, not verdict
     expect(t.prompt).toMatch(/partial proxy/i); // PRs are eng-only proxy
     expect(t.prompt).toMatch(/This Week in Brief/); // bot-written narrative digest
+    expect(t.prompt).toMatch(/page-data\/2026-06-10\.json/); // corrector page data
   });
 
   it('once the built marker exists: posts the kickoff and DMs owners', () => {
