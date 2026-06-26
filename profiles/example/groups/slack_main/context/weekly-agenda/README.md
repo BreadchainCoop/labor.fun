@@ -50,7 +50,7 @@ max_nudges: 3                          # then escalate once in the channel (defa
 directives_doc: artifacts/breadchain-strategy-directives-q2-2026.md  # optional — KB path to the quarter's strategic directives; drives the agenda's "Goals Review"
 deadline_digest: deadline-digest.md    # optional — KB path to the auto-maintained deadline list (default deadline-digest.md); drives "Upcoming Deadlines"
 github_org: BreadchainCoop             # optional — GitHub org to mine for each owner's recent merged PRs / closed issues (else the agent's profile org)
-corrector_base_url: http://203.0.113.5:8091  # optional — base URL of the agenda-web service; kickoff links <base>/<week>.html so members can correct the draft
+corrector_base_url: https://203.0.113.5:8091  # optional — base URL of the agenda-web service (HTTPS — StatiCrypt needs a secure context); kickoff links <base>/<week>.html so members can correct the draft
 corrector_password: bread-solidarity   # optional — shared StatiCrypt password posted with the link (must match the agenda-web service's AGENDA_WEB_PASSWORD)
 owners:                                # project label -> KB people slug
   Design: ruben
