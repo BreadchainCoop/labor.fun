@@ -52,6 +52,11 @@ const MENTION_REASONS = new Set(['mention', 'team_mention']);
 const MEMBERSHIP_TTL_MS = 10 * 60_000;
 /** Defensive cap so one poll can't fan out unboundedly. */
 const MAX_PER_POLL = 20;
+/** A delivered mention awaiting its reply is re-delivered (retried) only after
+ * this long — long enough for the agent to answer, short enough to recover an
+ * interrupted run (e.g. an orchestrator restart mid-reply). A posted reply marks
+ * the thread read, which ends the cycle before this fires. */
+const DELIVER_RETRY_MS = 15 * 60_000;
 
 export interface GithubJid {
   owner: string;
@@ -107,6 +112,11 @@ export class GithubMentionsChannel implements Channel {
   private connected = false;
   private polling = false;
   private membership = new Map<string, { member: boolean; at: number }>();
+  // jid → the thread-id of a delivered mention awaiting the agent's reply. We
+  // mark the GitHub thread read only once the reply is posted (sendMessage), so
+  // an interrupted/failed run leaves it unread and the next poll retries it
+  // instead of silently dropping it.
+  private pending = new Map<string, { threadId: string; at: number }>();
 
   constructor(opts: ChannelOpts, deps: GithubChannelDeps) {
     this.opts = opts;
@@ -174,6 +184,14 @@ export class GithubMentionsChannel implements Channel {
         { jid, status: res.status },
         'GitHub sendMessage: comment post failed',
       );
+      return; // leave the thread unread so the next poll retries it
+    }
+    // The reply landed — only now mark the originating notification read, so the
+    // poll stops re-delivering it. Until this point an interrupted run retries.
+    const p = this.pending.get(jid);
+    if (p) {
+      this.pending.delete(jid);
+      await this.markRead(p.threadId);
     }
   }
 
@@ -255,6 +273,20 @@ export class GithubMentionsChannel implements Channel {
     }
 
     const jid = makeGithubJid(owner, repo, number);
+
+    // Dedup / retry guard: if this thread was already delivered and we're still
+    // waiting for the agent's reply, don't re-deliver (no spam) — unless it's
+    // been long enough that the run likely died, in which case retry. A posted
+    // reply marks the thread read (sendMessage), clearing it before this fires.
+    const inflight = this.pending.get(jid);
+    if (
+      inflight &&
+      inflight.threadId === n.id &&
+      this.now() - inflight.at < DELIVER_RETRY_MS
+    ) {
+      return; // still working — leave unread, don't re-deliver
+    }
+
     const ts = new Date(this.now()).toISOString();
     this.opts.onChatMetadata(jid, ts, `${fullName}#${number}`, 'github', true);
 
@@ -286,8 +318,11 @@ export class GithubMentionsChannel implements Channel {
       { jid, author, repo: fullName, number },
       'GitHub mention from org member — delivering to agent',
     );
+    // Record as pending and deliver — but do NOT mark read here. We mark read in
+    // sendMessage once the reply actually posts, so an interrupted run (e.g. an
+    // orchestrator restart mid-reply) is retried by the next poll, not dropped.
+    this.pending.set(jid, { threadId: n.id, at: this.now() });
     this.opts.onMessage(jid, msg);
-    await this.markRead(n.id);
   }
 
   /** Cached org-membership check. GET /orgs/{org}/members/{user} → 204 member. */
