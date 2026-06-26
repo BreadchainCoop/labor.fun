@@ -313,18 +313,27 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `and match the doc's existing formatting — real heading styles, real bulleted lists (not "- " text), bold ` +
     `labels, and REAL hyperlinks (link the title text to the URL; never paste raw URLs):\n` +
     `   🏁 Check In · ✍️ Revise Agenda\n` +
+    `   📣 This Week in Brief — 2–3 sentences YOU write from the data below: what moved, what's stuck, and where the ` +
+    `work needs hands. Frame it as the collective's shared picture (what the WORK needs), not a roll-call of who did ` +
+    `what. Sign it with the facilitator's name — a rotating weave of the week, not a manager's report.\n` +
     `   🎯 Goals Review — one sub-bullet PER numbered strategic priority from the directives doc; for each, name the ` +
-    `priority and give a one-line read on where we stand vs its success metrics THIS week, citing the shipped work ` +
-    `below. Bold-flag any priority that looks behind.\n` +
+    `priority and give a plain one-line read on where the WORK stands vs its success metrics this week ` +
+    `(on track / needs hands / blocked?), citing the shipped work below. This is a status read on the GOAL — never a ` +
+    `verdict on a person: don't single anyone out, don't imply who is "behind".\n` +
     `   📅 Upcoming Deadlines — from the deadline digest, list items due THIS WEEK and NEXT WEEK that are still OPEN ` +
-    `(skip ones marked ✅ done). Put any OVERDUE-and-still-open items at the very top under a bold "Overdue". ` +
-    `Each line: the item as a hyperlink (to the GitHub issue/PR where it is one), its date, and the owner.\n` +
+    `(skip ones marked ✅ done). Group any past-due-and-still-open items at the top under "Past due — worth a check-in" ` +
+    `(a prompt to see what the task needs, not a callout on whoever holds it). Each line: the item as a hyperlink ` +
+    `(to the GitHub issue/PR where it is one), its date, and the owner.\n` +
     `   🧑‍🏭 Contributor Pipeline · ‼️ Urgent Topics\n` +
-    `   🌱 Active Projects — Updates — ONE bold sub-heading per project, "• <Project> — <owner name>". Under each, ` +
-    `a TIGHT bullet list of that owner's MERGED PRs and CLOSED issues from the LAST 7 DAYS, pulled from ${orgLine} ` +
-    `by their github_username. Each bullet = a hyperlink on the "title (#num)" + a 4–8 word plain summary of what it ` +
-    `did. Attribute work to the project whose repo it lives in; if an owner owns several and it's ambiguous, list ` +
-    `under their primary one. If an owner had no merged/closed activity, write "— no merged PRs / closed issues this week —".\n` +
+    `   🌱 Active Projects — a collective "shipped this week" changelog, ONE bold sub-heading per project, ` +
+    `"• <Project> — <owner name>". Under each, list that owner's MERGED PRs and CLOSED issues from the LAST 7 DAYS, ` +
+    `pulled from ${orgLine} by their github_username — each a hyperlink on "title (#num)" + a 4–8 word plain summary. ` +
+    `Treat this as a DRAFT the owner edits/expands/corrects, not a final word. Merged PRs are an engineering-only, ` +
+    `PARTIAL proxy: design, BD, community, care and organizing work rarely show up as a PR, so absence of PRs is NOT ` +
+    `absence of contribution. If an owner had no merged/closed activity, do NOT write a "did nothing" line — write an ` +
+    `open invitation instead: "— space for <name>'s update —". Under every owner leave one blank "• " bullet as room ` +
+    `for them to add work GitHub can't see. Attribute work to the project whose repo it lives in; if ambiguous, list ` +
+    `under their primary one.\n` +
     `   🎉 Appreciations (3 MINIMUM) · 💰 Other topics / Upcoming Time Off\n` +
     `   Also fold any upcoming calendar events (next 7 days) into the relevant section if a calendar is configured.\n` +
     `3. QUALITY BAR: terse but informative — one line per bullet, every PR/issue/deadline is a clickable link, ` +
@@ -337,8 +346,9 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `marker exists.\n` +
     `5. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
     `instead post a short message in this channel saying the agenda build failed and why, so a human can fix it.\n\n` +
-    `Tone: helpful and crisp. This is a rich starting point the team fills in — not a finished narrative, but far ` +
-    `more than an empty skeleton.`;
+    `Tone: a shared mirror, not a scoreboard. You're a peer tool inside a cooperative, not a manager over it — point ` +
+    `the agenda at the WORK and what it needs, never at ranking people. Helpful and crisp; a rich starting point the ` +
+    `team fills in.`;
   return {
     type: 'schedule_task',
     taskId: `weekly-agenda-build-${weekKey}-${nowMs}`,

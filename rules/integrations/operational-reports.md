@@ -91,6 +91,8 @@ no API spend (contrast the PM-orchestration loop, which does act and DM).
 
 ## Related Rules
 
+- [Voice & Register](../identity/voice.md) — the shared-mirror principle this
+  report's soft-flag framing follows: status on the work, never a verdict on a person.
 - [Task Management](../knowledge-base/tasks.md) — task schema, `estimate`,
   dependency edges, and the PM-orchestration loop this report reads from.
 - [Identity & RBAC](../identity/README.md) — people files / display-name
