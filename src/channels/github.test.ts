@@ -38,6 +38,7 @@ function harness(opts: {
   // logins considered org members
   members?: string[];
   login?: string;
+  now?: number;
 }) {
   const calls: { method: string; path: string; body?: unknown }[] = [];
   const members = new Set((opts.members ?? []).map((m) => m.toLowerCase()));
@@ -84,16 +85,20 @@ function harness(opts: {
     },
   };
 
+  const clock = { t: opts.now ?? 1_000 };
   const channel = new GithubMentionsChannel(channelOpts, {
     request,
     org: 'BreadchainCoop',
     login: opts.login ?? 'bot-account',
     logger: silentLogger,
-    now: () => 1_000,
+    now: () => clock.t,
   });
 
-  return { channel, request, calls, delivered, registered };
+  return { channel, request, calls, delivered, registered, clock };
 }
+
+const markedRead = (calls: { method: string; path: string }[], id = 'th-1') =>
+  calls.some((c) => c.method === 'PATCH' && c.path.includes(`/threads/${id}`));
 
 function mentionNotif(over: Partial<any> = {}): any {
   return {
@@ -114,21 +119,24 @@ const COMMENT_URL =
   'https://api.github.com/repos/BreadchainCoop/labor.fun/issues/comments/777';
 
 describe('GithubMentionsChannel.poll', () => {
-  it('delivers a mention from an org member and marks it read', async () => {
-    const h = harness({
+  function memberMention(login = 'cypherbren') {
+    return {
       notifications: [mentionNotif()],
       sources: {
         [COMMENT_URL]: {
           id: 777,
-          user: { login: 'cypherbren' },
+          user: { login },
           body: '@bot-account can you summarize this?',
           html_url:
             'https://github.com/BreadchainCoop/labor.fun/issues/42#c777',
         },
       },
-      members: ['cypherbren'],
-    });
+      members: [login],
+    };
+  }
 
+  it('delivers a mention but does NOT mark it read until the reply posts', async () => {
+    const h = harness(memberMention());
     await h.channel.poll();
 
     expect(h.delivered).toHaveLength(1);
@@ -136,16 +144,39 @@ describe('GithubMentionsChannel.poll', () => {
     expect(jid).toBe('gh:BreadchainCoop/labor.fun/42');
     expect(msg.sender).toBe('cypherbren');
     expect(msg.content).toContain('summarize this');
-    expect(msg.content).toContain('BreadchainCoop/labor.fun#42');
-    // group auto-registered, no trigger required (the @-mention is the ask)
     expect(h.registered[jid]?.requiresTrigger).toBe(false);
     expect(h.registered[jid]?.folder).toBe('github');
-    // thread marked read
-    expect(
-      h.calls.some(
-        (c) => c.method === 'PATCH' && c.path.includes('/threads/th-1'),
-      ),
-    ).toBe(true);
+    // NOT marked read yet — an interrupted run must be able to retry (#104 bug).
+    expect(markedRead(h.calls)).toBe(false);
+
+    // The reply posting is what marks the thread read.
+    await h.channel.sendMessage(jid, 'Here is the summary.');
+    expect(markedRead(h.calls)).toBe(true);
+  });
+
+  it('does NOT re-deliver a mention while its reply is still pending', async () => {
+    const h = harness(memberMention());
+    await h.channel.poll();
+    await h.channel.poll(); // same unread thread on the next tick
+    expect(h.delivered).toHaveLength(1); // not re-delivered — no agent spam
+  });
+
+  it('re-delivers (retries) a mention whose reply never posted, after the retry window', async () => {
+    const h = harness(memberMention());
+    await h.channel.poll();
+    expect(h.delivered).toHaveLength(1);
+    h.clock.t += 16 * 60_000; // past DELIVER_RETRY_MS, reply never came (e.g. a restart)
+    await h.channel.poll();
+    expect(h.delivered).toHaveLength(2); // retried — never silently dropped
+  });
+
+  it('a failed reply post leaves the thread unread (retryable)', async () => {
+    const h = harness(memberMention());
+    await h.channel.poll();
+    // Make the comment POST fail.
+    h.request.mockImplementationOnce(async () => ({ status: 502, data: null }));
+    await h.channel.sendMessage('gh:BreadchainCoop/labor.fun/42', 'reply');
+    expect(markedRead(h.calls)).toBe(false); // not marked read → next poll retries
   });
 
   it('ignores a mention from a NON-member but still marks it read', async () => {
