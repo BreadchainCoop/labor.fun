@@ -78,9 +78,18 @@ export default smithers((ctx) => {
   // graph`) throws on `participants.map`. (Documented Smithers input gotcha.)
   const participants = ctx.input.participants ?? [];
 
-  // Calendar reads are read-only; booking needs the calendar write tool.
-  const calRead = ['Read', 'mcp__google-calendar__get-freebusy', 'mcp__google-calendar__list-calendars'];
-  const calWrite = ['Read', 'mcp__google-calendar__create-event'];
+  // Calendar via the container's `gws` MCP (Google Workspace CLI, --tool-mode
+  // compact: one `mcp__gws__calendar` tool per service + `gws_discover`). Reads
+  // are read-only; booking adds the KB-write tool for the meeting task.
+  // (Verified end-to-end through the bridge: `mcp__gws__calendar` returns real
+  // free/busy from the org's Google account.)
+  const calRead = ['Read', 'Grep', 'Glob', 'mcp__gws__calendar', 'mcp__gws__gws_discover'];
+  const calWrite = [
+    'Read',
+    'mcp__gws__calendar',
+    'mcp__gws__gws_discover',
+    'mcp__nanoclaw__modify_kb_file',
+  ];
 
   return (
     <Workflow name="meeting-scheduling">
