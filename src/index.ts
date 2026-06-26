@@ -977,7 +977,8 @@ async function main(): Promise<void> {
             return { status: 'success', result: streamedResult };
           }
           return {
-            status: streamedError || output.status === 'error' ? 'error' : 'success',
+            status:
+              streamedError || output.status === 'error' ? 'error' : 'success',
             result: output.result,
           };
         },
