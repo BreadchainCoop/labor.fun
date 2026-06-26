@@ -158,6 +158,13 @@ export function startSmithersBridge(
     })();
   });
 
+  // A /run-step holds the connection open for a whole container agent run
+  // (minutes). Node's http.Server defaults requestTimeout to 5 min and would
+  // abort long steps (reconcile), so disable both timeouts — this is a
+  // localhost-only, token-authed endpoint, so slowloris isn't a concern.
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {

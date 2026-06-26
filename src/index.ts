@@ -1,3 +1,4 @@
+import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -926,6 +927,26 @@ async function main(): Promise<void> {
               error: `unknown group for jid ${chatJid}`,
             };
           }
+          // The agent-runner emits its one-shot result marker and then LINGERS
+          // (MCP/credential-proxy handles keep the process alive — it does not
+          // self-exit; normal message runs are torn down by the group queue). A
+          // bridge step has no queue lifecycle, so we manage the container here:
+          // capture the streamed result, then STOP the container as soon as the
+          // result (or an error) arrives. We `docker kill` by container NAME —
+          // killing the `docker run` client process does NOT stop the container
+          // (that's the known orphan leak). Without this the container orphans
+          // and runContainerAgent waits out the hard timeout. Streaming mode also
+          // returns result:null on the resolved value, so we read it off the
+          // stream rather than the resolved output.
+          let containerName: string | undefined;
+          let streamedResult: string | null = null;
+          let streamedError = false;
+          const stopContainer = () => {
+            if (containerName) {
+              execFile('docker', ['kill', containerName], () => {});
+              containerName = undefined; // once
+            }
+          };
           const output = await runContainerAgent(
             group,
             {
@@ -937,9 +958,29 @@ async function main(): Promise<void> {
               modelOverride,
               allowedTools,
             },
-            () => {},
+            (_p, name) => {
+              containerName = name;
+            },
+            async (out) => {
+              if (out.status === 'error') {
+                streamedError = true;
+                stopContainer();
+                return;
+              }
+              if (out.result != null) {
+                streamedResult = out.result;
+                stopContainer();
+              }
+            },
           );
-          return { status: output.status, result: output.result };
+          if (streamedResult != null) {
+            return { status: 'success', result: streamedResult };
+          }
+          return {
+            status:
+              streamedError || output.status === 'error' ? 'error' : 'success',
+            result: output.result,
+          };
         },
       });
     }
