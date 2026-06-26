@@ -192,9 +192,16 @@ async function runTask(
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
+          // Always record the result for the run log / audit trail, but only
+          // post it to the channel when the task's delivery mode allows it.
+          // 'silent' tasks (private reminders / DM-only work) suppress the
+          // narration so it can't leak into the bound chat/thread — the real
+          // output goes out via dm_user/send_message during the run. See #46.
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          if (shouldNarrateToChannel(task.delivery)) {
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
@@ -244,6 +251,20 @@ async function runTask(
       ? result.slice(0, 200)
       : 'Completed';
   updateTaskAfterRun(task.id, nextRun, resultSummary);
+}
+
+/**
+ * Whether a scheduled task's result narration should be posted to its bound
+ * `chat_jid`. 'silent' tasks (private reminders / DM-only work) suppress the
+ * narration entirely so bookkeeping text can't leak into a channel/thread;
+ * everything else (default 'channel') posts as before. Anything other than the
+ * literal 'silent' is treated as 'channel' so undefined/legacy rows keep the
+ * prior behavior. See issue #46.
+ */
+export function shouldNarrateToChannel(
+  delivery: ScheduledTask['delivery'],
+): boolean {
+  return delivery !== 'silent';
 }
 
 let schedulerRunning = false;

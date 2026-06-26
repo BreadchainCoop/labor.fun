@@ -552,6 +552,41 @@ describe('task CRUD', () => {
     expect(task!.status).toBe('active');
   });
 
+  it('defaults delivery to "channel" when omitted', () => {
+    createTask({
+      id: 'task-delivery-default',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'do something',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    expect(getTaskById('task-delivery-default')!.delivery).toBe('channel');
+  });
+
+  it('persists delivery "silent" for private reminders', () => {
+    createTask({
+      id: 'task-delivery-silent',
+      group_folder: 'main',
+      chat_jid: 'group@g.us',
+      prompt: 'DM the requester',
+      schedule_type: 'once',
+      schedule_value: '2024-06-01T00:00:00.000Z',
+      context_mode: 'group',
+      delivery: 'silent',
+      next_run: null,
+      status: 'active',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    expect(getTaskById('task-delivery-silent')!.delivery).toBe('silent');
+  });
+
   it('updates task status', () => {
     createTask({
       id: 'task-2',

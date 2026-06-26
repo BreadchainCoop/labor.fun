@@ -477,6 +477,8 @@ MESSAGING BEHAVIOR - The task agent's output is sent to the user or group. It ca
 \u2022 Only send a message when there's something to report (e.g., "notify me if...")
 \u2022 Never send a message (background maintenance tasks)
 
+DELIVERY (privacy) - For a PRIVATE reminder/DM (e.g. "remind ME in 2 days"), set delivery:"silent" AND have the prompt deliver via dm_user to the requester. 'silent' guarantees the orchestrator never posts the task's result narration to the bound chat/thread, so a confirmation like "DM sent ✅" can't leak to other people in that channel. Use the default delivery:"channel" only when the result is genuinely meant for everyone in the chat (daily briefings, in-channel reminders).
+
 SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 \u2022 cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *" for daily at 9am LOCAL time)
 \u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
@@ -502,6 +504,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       .default('group')
       .describe(
         'group=runs with chat history and memory, isolated=fresh session (include context in prompt)',
+      ),
+    delivery: z
+      .enum(['channel', 'silent'])
+      .default('channel')
+      .describe(
+        "Where the task's result is delivered. 'channel'=post the result to the chat (daily briefings, in-channel reminders meant for the whole group). 'silent'=do NOT post the result to any channel — use for PRIVATE reminders/DMs whose real output goes out via dm_user. With 'silent' the orchestrator guarantees no narration leaks into the chat/thread, so you don't have to rely on <internal> tags. Default 'channel'.",
       ),
     target_group_jid: z
       .string()
@@ -588,6 +596,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       schedule_type: args.schedule_type,
       schedule_value: args.schedule_value,
       context_mode: args.context_mode || 'group',
+      delivery: args.delivery || 'channel',
       targetJid,
       createdBy: groupFolder,
       timestamp: new Date().toISOString(),
