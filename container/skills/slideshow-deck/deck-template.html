@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DECK TITLE</title>
+<!--
+  House slideshow template for Breadrich Engels decks.
+  - Self-contained: inline CSS + JS, no build, no external assets.
+  - One <section class="slide"> per slide; the first has class="slide active".
+  - Navigation: ← / → / Space / PageUp-Down / Home / End, click anywhere, or the
+    on-screen ‹ › buttons. Progress bar + counter update automatically.
+  - Fill in slides, restyle the :root palette to taste, then encrypt + publish
+    per the slideshow-deck skill. NEVER publish a deck unencrypted.
+-->
+<style>
+  :root{
+    --bg1:#0e1116; --bg2:#141b24; --panel:#1a232e; --ink:#eaf2fb; --muted:#9fb2c6;
+    --accent:#e8a04a; --accent2:#5ad1c4; --accent3:#9a8cff; --line:rgba(120,150,180,.22);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:"Inter","Helvetica Neue",Arial,sans-serif;
+    background:radial-gradient(ellipse at 50% -10%,var(--bg2),var(--bg1));color:var(--ink);overflow:hidden}
+  .stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:5.5vh 7vw}
+  .slide{display:none;max-width:1040px;width:100%;animation:fade .5s ease both}
+  .slide.active{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  .kicker{letter-spacing:.26em;text-transform:uppercase;font-size:.72rem;color:var(--accent);font-weight:700;margin-bottom:1rem}
+  h1{font-size:clamp(2.1rem,5.4vw,4rem);line-height:1.05;font-weight:800;letter-spacing:-.02em;
+     background:linear-gradient(110deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  h2{font-size:clamp(1.6rem,3.7vw,2.6rem);line-height:1.12;font-weight:800;margin-bottom:1.1rem}
+  p.lead{font-size:clamp(1.05rem,2vw,1.4rem);line-height:1.55;max-width:50ch}
+  p.sub{font-size:1.02rem;line-height:1.5;color:var(--muted);max-width:54ch;margin-top:.9rem}
+  ul{list-style:none;margin-top:1.1rem}
+  li{font-size:clamp(1rem,1.8vw,1.22rem);line-height:1.45;padding:.45rem 0 .45rem 1.8rem;position:relative}
+  li::before{content:"";position:absolute;left:0;top:1rem;width:.62rem;height:.62rem;border-radius:2px;background:linear-gradient(135deg,var(--accent2),var(--accent3))}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-top:1.4rem}
+  @media(max-width:860px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1.2rem 1.3rem}
+  .card h3{font-size:1.05rem;color:#fff;margin-bottom:.4rem}
+  .card p{font-size:.97rem;line-height:1.45;color:var(--muted)}
+  .hud{position:fixed;bottom:22px;left:0;right:0;display:flex;align-items:center;justify-content:center;gap:16px;z-index:10}
+  .btn{background:var(--panel);border:1px solid var(--line);color:var(--ink);width:44px;height:44px;border-radius:50%;font-size:1.2rem;cursor:pointer;transition:.18s}
+  .btn:hover{background:#24303d;transform:scale(1.07)}
+  .counter{font-size:.82rem;color:var(--muted);letter-spacing:.18em;min-width:60px;text-align:center}
+  .progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--accent),var(--accent2),var(--accent3));transition:width .35s ease;z-index:11}
+  .hint{position:fixed;top:16px;right:20px;font-size:.7rem;color:var(--muted);letter-spacing:.12em;opacity:.7}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="hint">← → or click to navigate</div>
+<div class="stage" id="stage">
+
+  <!-- ===== one <section class="slide"> per slide; first is active ===== -->
+  <section class="slide active">
+    <div class="kicker">Kicker · context</div>
+    <h1>Deck title goes here</h1>
+    <p class="lead" style="margin-top:1.4rem">One-sentence framing of what this deck is about and why it matters.</p>
+    <p class="sub">A supporting line for extra context.</p>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Section</div>
+    <h2>A point with bullets</h2>
+    <ul>
+      <li>First supporting point</li>
+      <li>Second supporting point</li>
+      <li>Third supporting point</li>
+    </ul>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Section</div>
+    <h2>A two-up comparison</h2>
+    <div class="grid2">
+      <div class="card"><h3>Option A</h3><p>What it means / the trade-off.</p></div>
+      <div class="card"><h3>Option B</h3><p>What it means / the trade-off.</p></div>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Close</div>
+    <h2>The takeaway in one line</h2>
+    <p class="lead">End on the single thing you want people to remember.</p>
+  </section>
+
+</div>
+
+<div class="hud">
+  <button class="btn" id="prev" aria-label="Previous">‹</button>
+  <span class="counter" id="counter">1 / 1</span>
+  <button class="btn" id="next" aria-label="Next">›</button>
+</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  let i=0;
+  const counter=document.getElementById('counter'), progress=document.getElementById('progress');
+  function show(n){
+    i=Math.max(0,Math.min(slides.length-1,n));
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    counter.textContent=(i+1)+' / '+slides.length;
+    progress.style.width=((i+1)/slides.length*100)+'%';
+  }
+  document.getElementById('next').onclick=()=>show(i+1);
+  document.getElementById('prev').onclick=()=>show(i-1);
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){show(i+1);e.preventDefault();}
+    if(e.key==='ArrowLeft'||e.key==='PageUp'){show(i-1);e.preventDefault();}
+    if(e.key==='Home')show(0); if(e.key==='End')show(slides.length-1);
+  });
+  document.getElementById('stage').addEventListener('click',e=>{ if(!e.target.closest('.btn')) show(i+1); });
+  show(0);
+</script>
+</body>
+</html>
