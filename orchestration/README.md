@@ -64,5 +64,20 @@ These are written to the documented API; pin them to the real types once install
 
 ## Status
 
-Scaffold + design. Not yet wired into the running orchestrator. Do not deploy
-until the pilot is validated and the verify-on-install items are confirmed.
+**Transcript pilot validated on remote (#110).** The durable graph runs
+end-to-end through `runContainerAgent`: parse → extract → reconcile checkpoint to
+SQLite and the run resumes from the last completed step (a reconcile retry
+continued without re-running parse/extract). Per-step model tiers
+(haiku/sonnet/opus) apply via `modelOverride`.
+
+The verify-on-install items are resolved and pinned to `smithers-orchestrator@0.25`:
+- A Smithers agent is the structural `AgentLike` (a `generate()` method), **not** a
+  `BaseAgent` to extend — see `agents/container-agent.ts`.
+- Schemas must be **Zod v4** (`package.json`).
+- The bridge must terminate each step's container itself (`docker kill` by name)
+  and allow long steps (fetch + http.Server timeouts) — see `src/index.ts`,
+  `src/smithers-bridge.ts`, and `runtime.ts`.
+
+Enable on a host via `orchestration/deploy/README.md` (Bun + `bun install`,
+`SMITHERS_BRIDGE_ENABLED`, restart). Still off by default; the orchestrator is
+unaffected until the bridge is enabled.

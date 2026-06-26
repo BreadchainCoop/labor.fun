@@ -28,10 +28,23 @@ export function setRunStep(fn: RunStep): void {
 /**
  * Build an HTTP RunStep that posts to the orchestrator's Smithers bridge.
  */
-export function makeHttpRunStep(opts?: { url?: string; token?: string }): RunStep {
+export function makeHttpRunStep(opts?: {
+  url?: string;
+  token?: string;
+  timeoutMs?: number;
+}): RunStep {
   const url =
     opts?.url ?? process.env.SMITHERS_BRIDGE_URL ?? 'http://127.0.0.1:3002';
   const token = opts?.token ?? process.env.SMITHERS_BRIDGE_TOKEN ?? '';
+  // A workflow step is a whole container agent run — a heavy reasoning step
+  // (e.g. reconcile on a large KB) legitimately takes many minutes. `fetch`
+  // imposes a ~5-min default timeout that aborts these, so the engine sees
+  // "operation timed out" and retries forever. Use a generous explicit timeout
+  // (default 20m, override via SMITHERS_BRIDGE_STEP_TIMEOUT_MS) so the step is
+  // bounded only by the orchestrator's own container timeout (30m default).
+  const timeoutMs =
+    opts?.timeoutMs ??
+    (Number(process.env.SMITHERS_BRIDGE_STEP_TIMEOUT_MS) || 1_200_000);
 
   return async ({ group, chatJid, prompt, modelOverride, allowedTools }) => {
     const res = await fetch(`${url}/run-step`, {
@@ -47,6 +60,7 @@ export function makeHttpRunStep(opts?: { url?: string; token?: string }): RunSte
         modelOverride,
         allowedTools,
       }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');

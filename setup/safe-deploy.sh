@@ -135,6 +135,7 @@ rsync -a --delete \
   --exclude='node_modules/' \
   --exclude='dist/' \
   --exclude='logs/' \
+  --exclude='.smithers/' \
   "$GIT_DIR"/ "$APP_DIR"/
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
