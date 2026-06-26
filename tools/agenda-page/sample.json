@@ -1,0 +1,49 @@
+{
+  "week": "2026-07-01",
+  "facilitator": "Marv",
+  "docUrl": "https://docs.google.com/document/d/EXAMPLE/edit",
+  "brief": "The storefront redesign landed and embedded-wallet work is moving on Stacks; the Signal-bot grant deliverables still need hands this week. Solidarity Fund peer-flow update is in review. — Marv",
+  "goals": [
+    { "priority": "P2 — Product (Stacks & Solidarity Fund)", "read": "on track — embedded-wallet integration and account dashboard both moved", "optimistic": true },
+    { "priority": "P3 — Signal Bot", "read": "needs hands — no grant-deliverable movement logged this week", "optimistic": true },
+    { "priority": "P4 — Marketing & Community", "read": "needs hands — no published artifacts this week", "optimistic": true }
+  ],
+  "deadlines": [
+    { "text": "Record an end-to-end user demo (#132)", "date": "2026-06-25", "owner": "ruben", "url": "https://github.com/example/crowdstake.fun/issues/132", "pastDue": true },
+    { "text": "Define 2-3 marketing workflows (#55)", "date": "2026-07-03", "owner": "marv", "url": "https://github.com/example/labor.fun/issues/55", "pastDue": false }
+  ],
+  "members": [
+    {
+      "slug": "ruben", "name": "Ruben",
+      "projects": [
+        { "project": "Design", "items": [
+          { "text": "Services page on Bread landing", "ref": "#422", "url": "https://github.com/example/landing/pull/422", "optimistic": true },
+          { "text": "Account page live & merged", "ref": "#418", "url": "https://github.com/example/stacks/pull/418", "optimistic": true }
+        ] },
+        { "project": "CoopStable", "items": [] }
+      ]
+    },
+    {
+      "slug": "marv", "name": "Marv",
+      "projects": [
+        { "project": "Marketing", "items": [] }
+      ]
+    },
+    {
+      "slug": "bren", "name": "Bren",
+      "projects": [
+        { "project": "Stacks", "items": [
+          { "text": "Embedded wallet (Privy) integration", "ref": "#401", "url": "https://github.com/example/stacks/pull/401", "optimistic": true }
+        ] }
+      ]
+    },
+    {
+      "slug": "blessing", "name": "Blessing",
+      "projects": [
+        { "project": "Solidarity Fund", "items": [
+          { "text": "Peer-flow update", "ref": "#105", "url": "https://github.com/example/solidarity/pull/105", "optimistic": true }
+        ] }
+      ]
+    }
+  ]
+}
