@@ -127,3 +127,80 @@ describe('resolveDmTarget — string matching', () => {
     expect('error' in resolveDmTarget('   ', CANDIDATES)).toBe(true);
   });
 });
+
+describe('resolveDmTarget — given-name inference (real-world display forms)', () => {
+  // Real people files keep the full display form in `title`/`discordDisplayName`
+  // (the Discord-members sync doesn't strip it to a bare given name), so a bare
+  // first name must still resolve.
+  const REAL: PersonCandidate[] = [
+    {
+      slug: 'josh-tbs',
+      discordId: '511575159929438224',
+      title: 'Josh | TBS',
+      discordUsername: 'theblockchainsocialist',
+      discordDisplayName: 'Josh | TBS',
+    },
+    {
+      slug: 'unai-mettodo',
+      discordId: '379260345228722176',
+      title: 'Unai',
+      discordUsername: 'mettodo',
+      discordDisplayName: 'Unai | Mettodo',
+    },
+    {
+      slug: 'liron',
+      discordId: '887633879614246912',
+      title: 'Liron 💖',
+      discordUsername: 'lirona1',
+      discordDisplayName: 'Liron 💖',
+    },
+  ];
+
+  it('resolves a bare given name from a "Name | Org" title ("josh" → josh-tbs)', () => {
+    const r = resolveDmTarget('josh', REAL);
+    expect('person' in r && r.person.slug).toBe('josh-tbs');
+  });
+
+  it('is case-insensitive on the given name ("Josh")', () => {
+    const r = resolveDmTarget('Josh', REAL);
+    expect('person' in r && r.person.slug).toBe('josh-tbs');
+  });
+
+  it('infers the given name from the display name when the title also has a suffix', () => {
+    const r = resolveDmTarget('unai', REAL);
+    expect('person' in r && r.person.slug).toBe('unai-mettodo');
+  });
+
+  it('strips an emoji-suffixed display form ("liron" → liron)', () => {
+    const r = resolveDmTarget('liron', REAL);
+    expect('person' in r && r.person.slug).toBe('liron');
+  });
+
+  it('still prefers an exact field match over given-name inference', () => {
+    // Full display name is an exact display-name match — must win directly.
+    const r = resolveDmTarget('Josh | TBS', REAL);
+    expect('person' in r && r.person.slug).toBe('josh-tbs');
+  });
+
+  it('flags ambiguity when two people share a given name', () => {
+    const twoJoshes: PersonCandidate[] = [
+      {
+        slug: 'josh-tbs',
+        discordId: '1',
+        title: 'Josh | TBS',
+        discordUsername: 'tbs',
+        discordDisplayName: 'Josh | TBS',
+      },
+      {
+        slug: 'josh-design',
+        discordId: '2',
+        title: 'Josh | Design',
+        discordUsername: 'joshd',
+        discordDisplayName: 'Josh | Design',
+      },
+    ];
+    const r = resolveDmTarget('josh', twoJoshes);
+    expect('error' in r && r.error).toMatch(/Ambiguous DM target/);
+    expect('suggestions' in r && r.suggestions?.length).toBe(2);
+  });
+});
