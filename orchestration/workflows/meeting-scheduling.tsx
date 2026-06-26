@@ -71,8 +71,12 @@ function agentsFor(kind: TaskKind, group: string, chatJid: string, allowedTools?
 }
 
 export default smithers((ctx) => {
-  const { group, chatJid, title, participants, windowStartIso, windowEndIso, durationMinutes } =
+  const { group, chatJid, title, windowStartIso, windowEndIso, durationMinutes } =
     ctx.input;
+  // ctx.input fields arrive as their raw value or null (NOT their Zod default),
+  // so coalesce the array we iterate — otherwise a no-input render (`smithers
+  // graph`) throws on `participants.map`. (Documented Smithers input gotcha.)
+  const participants = ctx.input.participants ?? [];
 
   // Calendar reads are read-only; booking needs the calendar write tool.
   const calRead = ['Read', 'mcp__google-calendar__get-freebusy', 'mcp__google-calendar__list-calendars'];
