@@ -2,6 +2,12 @@
 node_modules/
 .npm-cache/
 
+# Smithers orchestration sidecar — local runtime state (SQLite checkpoint DB,
+# the init-generated .smithers/ dir). Code is tracked; run state is not.
+orchestration/.smithers/
+orchestration/*.db
+orchestration/bun.lockb
+
 # Build output
 dist/
 

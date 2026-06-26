@@ -109,6 +109,13 @@ export interface ContainerInput {
    * in addition to the global CLAUDE.md.
    */
   systemPromptAppend?: string;
+  /**
+   * Override the orchestrator model for this single run, taking precedence
+   * over the global NANOCLAW_MODEL. Lets a durable-workflow step (see
+   * orchestration/) route an individual task to a cheaper/local or stronger
+   * model without changing global config. Unset = current global behavior.
+   */
+  modelOverride?: string;
 }
 
 export interface ContainerOutput {
@@ -481,6 +488,7 @@ function resolveGoogleWorkspaceCredsPath(): string | undefined {
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  modelOverride?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -504,9 +512,12 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
-  // Model routing: pass orchestrator and subagent models to container
-  if (NANOCLAW_MODEL) {
-    args.push('-e', `NANOCLAW_MODEL=${NANOCLAW_MODEL}`);
+  // Model routing: pass orchestrator and subagent models to container.
+  // A per-run modelOverride (from a durable-workflow step) wins over the
+  // global NANOCLAW_MODEL; falling back to it preserves current behavior.
+  const orchestratorModel = modelOverride || NANOCLAW_MODEL;
+  if (orchestratorModel) {
+    args.push('-e', `NANOCLAW_MODEL=${orchestratorModel}`);
   }
   if (NANOCLAW_SUBAGENT_MODEL) {
     args.push('-e', `NANOCLAW_SUBAGENT_MODEL=${NANOCLAW_SUBAGENT_MODEL}`);
@@ -587,7 +598,11 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
+    input.modelOverride,
+  );
 
   logger.debug(
     {
