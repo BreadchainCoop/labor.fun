@@ -191,13 +191,15 @@ the follow-up infra tasks (tracked as backlog issues).
 - A **systemd unit** (e.g. `breadbrich-smithers`) for the sidecar, added to
   `safe-deploy.sh`; honor push → merge → deploy.
 
-**Wiring the sidecar to the container runner** (`orchestration/runtime.ts`)
-- Option A (in-process): the sidecar imports the built runner — it must run as a
-  user that can spawn Docker containers and reach the same DB/state as the
-  orchestrator.
-- Option B (over IPC/HTTP, preferred for prod): add a small authenticated
-  "run step" endpoint to the orchestrator that calls `runContainerAgent` and
-  returns the result. Keeps the sidecar decoupled; nothing else in `src/` moves.
+**Wiring the sidecar to the container runner** — IMPLEMENTED (Option B).
+- `src/smithers-bridge.ts` is a localhost-only, token-authed HTTP endpoint that
+  runs one workflow step through `runContainerAgent`. It is **inert unless
+  `SMITHERS_BRIDGE_ENABLED=true`** (mounted in `src/index.ts` after the
+  credential proxy, closed on shutdown). `orchestration/runtime.ts` posts each
+  step to it (`makeHttpRunStep`). Operational steps: `orchestration/deploy/README.md`.
+- Known limitation: the bridge calls `runContainerAgent` directly, not through
+  the `GroupQueue`, so a workflow step and a live chat message for the same group
+  can run concurrently. Treat as experimental; queue-routing is a follow-up.
 
 **Approval bridge** (Pattern B — expense, meeting-task)
 - A hook from the chat IPC layer (where `expense_decision` /

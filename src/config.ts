@@ -51,6 +51,10 @@ const envConfig = readEnvFile([
   'OPS_REPORT_PERIOD',
   'OPS_REPORT_DUE_SOON_DAYS',
   'OPS_REPORT_OVERLOAD_RATIO',
+  // Smithers durable-workflow bridge (orchestration/). Inert unless enabled.
+  'SMITHERS_BRIDGE_ENABLED',
+  'SMITHERS_BRIDGE_PORT',
+  'SMITHERS_BRIDGE_TOKEN',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -387,3 +391,13 @@ export const NANOCLAW_SUBAGENT_MODEL =
   process.env.NANOCLAW_SUBAGENT_MODEL ||
   envConfig.NANOCLAW_SUBAGENT_MODEL ||
   undefined;
+
+// Smithers durable-workflow bridge (orchestration/). Off by default; when
+// enabled, exposes a localhost-only, token-authed endpoint that runs one
+// workflow step through runContainerAgent. See docs/SMITHERS-ORCHESTRATION.md.
+export const SMITHERS_BRIDGE_ENABLED =
+  envVal('SMITHERS_BRIDGE_ENABLED') === 'true';
+export const SMITHERS_BRIDGE_PORT = Number(
+  envVal('SMITHERS_BRIDGE_PORT') || 3002,
+);
+export const SMITHERS_BRIDGE_TOKEN = envVal('SMITHERS_BRIDGE_TOKEN') || '';
