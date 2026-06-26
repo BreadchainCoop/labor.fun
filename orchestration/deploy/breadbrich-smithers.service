@@ -1,0 +1,30 @@
+# Template systemd unit for a RESIDENT Smithers sidecar runner.
+#
+# OPTIONAL — only needed if you want a long-lived/queued workflow runner rather
+# than invoking `bunx smithers-orchestrator up ...` on demand (see deploy/README.md
+# step 5/6). Set ExecStart to your chosen trigger model before enabling, and add
+# this unit to safe-deploy.sh so deploys restart it.
+#
+# Install:
+#   sudo cp breadbrich-smithers.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now breadbrich-smithers
+
+[Unit]
+Description=Breadbrich Smithers durable-workflow sidecar
+After=network.target breadbrich.service
+Wants=breadbrich.service
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/breadbrich/orchestration
+# Reads SMITHERS_BRIDGE_URL / SMITHERS_BRIDGE_TOKEN (must match the orchestrator).
+EnvironmentFile=/opt/breadbrich/.env
+# TODO: set the actual runner command for your trigger model. Placeholder keeps
+# the unit from silently no-opping if enabled before that decision is made.
+ExecStart=/usr/bin/env bash -c 'echo "set ExecStart in breadbrich-smithers.service" >&2; exit 1'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
