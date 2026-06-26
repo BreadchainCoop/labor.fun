@@ -17,6 +17,7 @@ import {
   SHARED_KB_GROUP,
   TIMEZONE,
 } from './config.js';
+import { findChatFlow } from './chat-flows/registry.js';
 import { PersonCandidate, resolveDmTarget } from './integrations/dm-resolve.js';
 import { readEnvFile } from './env.js';
 import { AvailableGroup } from './container-runner.js';
@@ -307,13 +308,37 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     const registeredGroups = deps.registeredGroups();
 
-    // Build folder→isMain lookup from registered groups
+    // Build folder→isMain lookup from registered groups, and the set of folders
+    // belonging to external chat-flow channels (untrusted/sandboxed).
     const folderIsMain = new Map<string, boolean>();
-    for (const group of Object.values(registeredGroups)) {
+    const chatFlowFolders = new Set<string>();
+    for (const [jid, group] of Object.entries(registeredGroups)) {
       if (group.isMain) folderIsMain.set(group.folder, true);
+      if (findChatFlow(jid)) chatFlowFolders.add(group.folder);
     }
 
     for (const sourceGroup of groupFolders) {
+      // External chat-flow channels are sandboxed and have no IPC write
+      // tools; defense in depth — ignore ALL IPC from them so a
+      // prompt-injected flow run can never reach a privileged op.
+      if (chatFlowFolders.has(sourceGroup)) {
+        try {
+          for (const sub of ['messages', 'tasks']) {
+            const d = path.join(ipcBaseDir, sourceGroup, sub);
+            if (!fs.existsSync(d)) continue;
+            for (const f of fs.readdirSync(d)) {
+              if (f.endsWith('.json')) fs.unlinkSync(path.join(d, f));
+            }
+          }
+        } catch {
+          /* best-effort cleanup */
+        }
+        logger.warn(
+          { sourceGroup },
+          'Ignoring IPC from external chat-flow channel (sandboxed)',
+        );
+        continue;
+      }
       // Flat-access (cooperative) mode: every group authorizes IPC ops as
       // main. Restore the sandbox with FLAT_ACCESS=false.
       const isMain = folderIsMain.get(sourceGroup) === true || FLAT_ACCESS;

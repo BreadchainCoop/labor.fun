@@ -72,7 +72,18 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startEmailPoller } from './email-poller.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  findChannel,
+  formatMessages,
+  formatOutbound,
+  stripInternalTags,
+} from './router.js';
+import './chat-flows/index.js';
+import {
+  findChatFlow,
+  type ChatFlow,
+  type ChatFlowHost,
+} from './chat-flows/registry.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -244,6 +255,116 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+/** Resolve the shared-KB group's chat JID, if it's registered. */
+function sharedKbGroupJid(): string | null {
+  const entry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === SHARED_KB_GROUP,
+  );
+  return entry?.[0] ?? null;
+}
+
+/** Privileged operations lent to a chat flow's onAgentResult. */
+const chatFlowHost: ChatFlowHost = {
+  async notify(jid: string, text: string): Promise<void> {
+    const ch = findChannel(channels, jid);
+    if (ch) await ch.sendMessage(jid, formatOutbound(text));
+  },
+  sharedKbChatJid: sharedKbGroupJid,
+};
+
+/**
+ * Run a registered chat flow on its (external) channel. Suppresses the general
+ * assistant: runs a sandboxed (non-privileged) agent restricted to the flow's
+ * tools with the flow's persona appended, responds to anyone (no trigger
+ * gate), and lets the flow post-process the output on the privileged side.
+ */
+async function processChatFlow(
+  chatJid: string,
+  group: RegisteredGroup,
+  channel: Channel,
+  flow: ChatFlow,
+): Promise<boolean> {
+  const missedMessages = getMessagesSince(
+    chatJid,
+    getOrRecoverCursor(chatJid),
+    ASSISTANT_NAME,
+    MAX_MESSAGES_PER_PROMPT,
+  );
+  if (missedMessages.length === 0) return true;
+
+  const inbound = missedMessages.filter((m) => !m.is_from_me);
+  const lastTs = missedMessages[missedMessages.length - 1].timestamp;
+  if (inbound.length === 0) {
+    lastAgentTimestamp[chatJid] = lastTs;
+    saveState();
+    return true;
+  }
+
+  const previousCursor = lastAgentTimestamp[chatJid] || '';
+  lastAgentTimestamp[chatJid] = lastTs;
+  saveState();
+
+  const triggerMsg = inbound[inbound.length - 1];
+  const prompt = formatMessages(missedMessages, TIMEZONE);
+
+  await channel.setTyping?.(chatJid, true);
+  let hadError = false;
+  let sentReply = false;
+
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // A broken flow must not take down message processing.
+        let reply = '';
+        try {
+          reply = await flow.onAgentResult(
+            stripInternalTags(raw),
+            triggerMsg,
+            chatJid,
+            chatFlowHost,
+          );
+        } catch (err) {
+          logger.error(
+            { err, chatJid, flow: flow.name },
+            'Chat flow failed to handle agent result',
+          );
+        }
+        if (reply) {
+          await channel.sendMessage(chatJid, reply, {
+            replyToMessageId: triggerMsg.id,
+          });
+          sentReply = true;
+        }
+      }
+      if (result.status === 'error') hadError = true;
+    },
+    {
+      forceNonPrivileged: true,
+      allowedTools: flow.allowedTools,
+      systemPromptAppend: flow.systemPrompt,
+    },
+  );
+
+  await channel.setTyping?.(chatJid, false);
+
+  if (output === 'error' || hadError) {
+    // Roll back the cursor for retry only if we never replied (avoid dupes).
+    if (!sentReply) {
+      lastAgentTimestamp[chatJid] = previousCursor;
+      saveState();
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -256,6 +377,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!channel) {
     logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
     return true;
+  }
+
+  // Chat-flow channel (e.g. membership intake, #30): the general assistant is
+  // suppressed entirely; only the sandboxed flow runs here.
+  const chatFlow = findChatFlow(chatJid);
+  if (chatFlow) {
+    return await processChatFlow(chatJid, group, channel, chatFlow);
   }
 
   const isMainGroup = group.isMain === true;
@@ -498,11 +626,20 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  opts?: {
+    /** Force a non-privileged (sandboxed) run regardless of FLAT_ACCESS. */
+    forceNonPrivileged?: boolean;
+    /** Restrict the agent to exactly these tools. */
+    allowedTools?: string[];
+    /** Append this to the system prompt (e.g. an intake persona). */
+    systemPromptAppend?: string;
+  },
 ): Promise<'success' | 'error'> {
   // Flat-access (cooperative) mode elevates every group to main-equivalent
   // mounts/IPC auth. isMain here drives container mounts, the NANOCLAW_IS_MAIN
-  // env, and the tasks/groups snapshots.
-  const isMain = isPrivilegedGroup(group);
+  // env, and the tasks/groups snapshots. External/sandboxed flows force this
+  // off so an untrusted channel never gets privileged mounts/IPC.
+  const isMain = opts?.forceNonPrivileged ? false : isPrivilegedGroup(group);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -552,6 +689,8 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        allowedTools: opts?.allowedTools,
+        systemPromptAppend: opts?.systemPromptAppend,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -867,8 +1006,16 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+      // Sender allowlist drop mode: discard messages from denied senders before
+      // storing. Chat-flow channels (e.g. membership intake) are exempt — they
+      // are public by design and accept messages from unknown senders (the flow
+      // is sandboxed, so there's no privileged surface to protect there).
+      if (
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        registeredGroups[chatJid] &&
+        !findChatFlow(chatJid)
+      ) {
         const cfg = loadSenderAllowlist();
         if (
           shouldDropMessage(chatJid, cfg) &&

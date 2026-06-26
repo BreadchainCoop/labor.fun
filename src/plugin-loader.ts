@@ -3,6 +3,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 
 import { registerChannel } from './channels/registry.js';
+import { registerChatFlow } from './chat-flows/registry.js';
 import { PROFILE_DIR } from './config.js';
 import { readEnvFile } from './env.js';
 import { registerIntegration } from './integrations/registry.js';
@@ -17,6 +18,8 @@ import { logger } from './logger.js';
 export interface PluginApi {
   registerChannel: typeof registerChannel;
   registerIntegration: typeof registerIntegration;
+  /** Claim a chat for a sandboxed, assistant-suppressing flow. */
+  registerChatFlow: typeof registerChatFlow;
   /** Read keys from the install's .env without leaking them to process.env. */
   readEnvFile: typeof readEnvFile;
   logger: typeof logger;
@@ -26,7 +29,13 @@ export interface PluginApi {
 export type PluginRegister = (api: PluginApi) => void | Promise<void>;
 
 function defaultApi(): PluginApi {
-  return { registerChannel, registerIntegration, readEnvFile, logger };
+  return {
+    registerChannel,
+    registerIntegration,
+    registerChatFlow,
+    readEnvFile,
+    logger,
+  };
 }
 
 /**

@@ -22,6 +22,7 @@ describe('loadProfilePlugins', () => {
     return {
       registerChannel: vi.fn(),
       registerIntegration: vi.fn(),
+      registerChatFlow: vi.fn(),
       readEnvFile: vi.fn(() => ({})),
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
     };
