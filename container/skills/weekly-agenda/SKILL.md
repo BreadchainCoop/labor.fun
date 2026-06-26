@@ -100,18 +100,36 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
 
 ## File-an-update routine
 
-When a project owner replies in DM with their weekly update:
+**When this fires.** Any time a project owner sends you something that reads
+like their update on their project(s) during an active agenda cycle — a list of
+what they shipped, a status, "for design: …", "my update:", a paragraph about
+their work — that **is** a weekly update. Treat it as one even if they didn't
+say "weekly agenda" and even if the flow didn't just nudge them. If you're
+unsure whether a message counts, assume it does and file it; over-filing is
+harmless, a silent drop is not.
 
-1. Identify the current `<week>` (next meeting date from the config) and the
-   owner's slug.
-2. Insert their bullets under the matching `• <Project> (<owner>)` line(s) in the
-   **This Week** tab (append, don't overwrite — they may add more later).
-3. Write the marker file `weekly-agenda/inputs/<week>/<slug>.md` via
-   `modify_kb_file` containing what they sent. **This is what stops their
-   nudges** — the flow treats the file's existence as "responded", so always
-   write it, even if the doc edit partially failed (note any failure in your
-   reply).
-4. Reply confirming where it landed. Light touch — a sentence is enough.
+**Discussing the update is NOT filing it.** Drafting agenda points back to them,
+summarizing what they said, or saying "got it, I'll add that" does **nothing**
+on its own — the flow only sees a reply once the marker file exists. So:
+
+1. **Identify** the current `<week>` (next meeting date from the config) and the
+   owner's slug (from their identity → `people/<slug>.md`).
+2. **Write the marker FIRST** — before any Docs work. Write
+   `weekly-agenda/inputs/<week>/<slug>.md` via `modify_kb_file`, containing the
+   verbatim text they sent. **This is the only thing that stops their nudges**
+   and records their contribution; do it first so a slow or failing Docs step
+   can never cause a silent drop. (If the file already exists, append the new
+   content — they may be adding more.)
+3. **Then edit the doc.** Insert their bullets under the matching
+   `• <Project> — <owner>` line(s) in the **This Week** tab (append, don't
+   overwrite).
+4. **Verify the marker landed** — re-read `weekly-agenda/inputs/<week>/<slug>.md`
+   and confirm it contains their content. If the write didn't land, retry it;
+   the marker is non-negotiable.
+5. **Reply** confirming it's filed and where it landed — one sentence. If the
+   doc edit failed but the marker is written, say so plainly ("recorded your
+   update; the doc edit hit an error, I'll sort it") — never imply success you
+   didn't achieve.
 
 ## Tone
 
