@@ -53,32 +53,48 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
    agenda dated `<week>` with these sections, in order:
    - `🏁 Check In (5min)`
    - `✍️ Revise Agenda`
+   - `📣 This Week in Brief` — 2–3 sentences **you** write from the data below:
+     what moved, what's stuck, where the work needs hands. Frame it as the
+     collective's shared picture (what the *work* needs), not a roll-call of who
+     did what. Sign it with the facilitator's name — a rotating weave, not a
+     manager's report.
    - `🎯 Goals Review` — one sub-bullet **per numbered strategic priority** from
-     the `directives_doc`; for each, a one-line read on where we stand vs its
-     success metrics this week, citing the shipped work in Active Projects.
-     Bold-flag any priority that looks behind.
+     the `directives_doc`; for each, a plain one-line read on where the *work*
+     stands vs its success metrics this week (on track / needs hands / blocked?),
+     citing the shipped work in Active Projects. This is a status read on the
+     **goal** — never a verdict on a person; don't single anyone out or imply who
+     is "behind".
    - `📅 Upcoming Deadlines` — from the `deadline_digest`, the items due **this
-     week and next week that are still open** (skip ✅-done ones), with anything
-     **overdue-and-still-open** at the top under a bold "Overdue". Each line is a
-     hyperlink (to the GitHub issue/PR where it is one) + date + owner.
+     week and next week that are still open** (skip ✅-done ones); group any
+     **past-due-and-still-open** items at the top under "Past due — worth a
+     check-in" (a prompt to see what a task needs, not a callout on whoever holds
+     it). Each line is a hyperlink (to the GitHub issue/PR where it is one) +
+     date + owner.
    - `🧑‍🏭 Contributor Pipeline`
    - `‼️ Urgent Topics`
-   - `🌱 Active Projects — Updates` — one bold sub-heading per **owners** entry,
-     labelled `• <Project> — <owner name>`, with the pre-fill below under each.
+   - `🌱 Active Projects` — a collective **"shipped this week" changelog**, one
+     bold sub-heading per **owners** entry, labelled `• <Project> — <owner name>`,
+     with the pre-fill below under each.
    - `🎉 Appreciations — 3 MINIMUM`
    - `💰 Other topics / Upcoming Time Off`
    Put the facilitator on the header line (`Facilitator: <name>`), or
    `Facilitator: TBD — claim it` when none is set.
-4. **Pre-fill context** — make it rich, not a stub:
+4. **Pre-fill context** — a draft the owners build on, not a verdict:
    - GitHub: read each owner's `github_username` from `people/<slug>.md`, then
      mine `github_org`'s repos for their **merged PRs and closed issues in the
      last 7 days**. Under each project, write a tight bullet list — every bullet
-     a **real hyperlink** on `title (#num)` plus a 4–8 word summary of what it
-     did. No activity → `— no merged PRs / closed issues this week —`.
+     a **real hyperlink** on `title (#num)` plus a 4–8 word summary. This is a
+     **draft the owner edits/expands/corrects**, never a final word.
+   - **Merged PRs are an engineering-only, partial proxy.** Design, BD, community,
+     care and organizing work rarely show up as a PR, so **absence of PRs is not
+     absence of contribution**. If an owner has no merged/closed activity, do NOT
+     write a "did nothing" line — write an open invitation: `— space for <name>'s
+     update —`. Under every owner, leave one blank `• ` bullet as room for them to
+     add work GitHub can't see.
    - Calendar: add upcoming events in the next 7 days to the relevant section
      (Community/Events) if a calendar is configured.
-   Terse but informative — one line per bullet. This is the scaffolding + facts
-   owners build their narrative on, so give them real signal, not placeholders.
+   Terse but informative — one line per bullet. Give owners real signal to build
+   on; never let an empty section read as a judgement.
 5. **Formatting quality.** Use the Docs API to make **real** bulleted lists
    (`createParagraphBullets`) and **real hyperlinks** (`updateTextStyle` with a
    `link.url` over the title text — never paste raw URLs). Bold the project and
@@ -133,6 +149,15 @@ on its own — the flow only sees a reply once the marker file exists. So:
 
 ## Tone
 
-Helpful and low-friction. The agenda is a shared scratchpad the team fills in,
-never a finished document you author for them. Don't over-format, don't nag
-beyond what the flow already does.
+**A shared mirror, not a scoreboard.** The agenda is a tool the cooperative uses
+to see its own work together — not a surveillance or performance-review artifact,
+and you are a peer tool inside the co-op, not a manager over it. Point everything
+at the *work* and what it needs, never at ranking or grading people. Merged-PR
+counts are an engineering-only proxy; never let them stand in for someone's worth
+or effort (members do different kinds of work, in different amounts, and are not
+all paid the same). Empty sections are invitations, not verdicts. Status reads
+land on goals/tasks, never on individuals. This mirrors the same principle the
+[operational reports](../../../rules/integrations/operational-reports.md) follow —
+"a soft flag to check in, not a verdict" — and the assistant's
+[voice rule](../../../rules/identity/voice.md). Helpful and low-friction; the team
+fills it in. Don't over-format, don't nag beyond what the flow already does.

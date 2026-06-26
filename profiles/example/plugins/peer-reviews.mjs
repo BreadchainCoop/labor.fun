@@ -211,9 +211,13 @@ function announcePost(label, members, dir) {
 
 function escalationPost(slug, items, label, dir) {
   const left = renderItems(items, dir).join('; ');
+  const who = mentionFor(slug, dir);
+  // Recovery-oriented, not a call-out (shared-mirror voice rule): the work may
+  // be done and just not recorded. Offer the self-heal, stop DMing, no shaming.
   return (
-    `⚠️ ${mentionFor(slug, dir)} still has outstanding ${label} review items ` +
-    `after several DM reminders: ${left}. Please follow up — I'll stop DMing them.`
+    `📝 I don't have ${who}'s ${label} review items recorded yet (${left}), and I've ` +
+    `stopped DMing them. If they're already done and just not filed, ${who}, reply ` +
+    `here and I'll capture them — no rush.`
   );
 }
 
@@ -251,12 +255,15 @@ function summaryPost(label, members, assignments, selfEvalDone, reviewsDone, dir
   const lines = members.map((slug) => {
     const items = outstandingFor(slug, assignments, selfEvalDone, reviewsDone);
     if (items.length === 0) return `• ${nameFor(slug, dir)}: ✅ complete`;
-    return `• ${mentionFor(slug, dir)}: missing ${renderItems(items, dir).join(', ')}`;
+    return `• ${mentionFor(slug, dir)}: still to file ${renderItems(items, dir).join(', ')}`;
   });
+  // A supportive check-in tied to the eligibility window, not a call-out
+  // (shared-mirror voice rule): offer help rather than pressure.
   return (
     `⏰ Peer-review status for **${label}** (payment-proposal window opening):\n` +
     lines.join('\n') +
-    `\n\nThose still missing items — please wrap up so you're eligible.`
+    `\n\nStill wrapping up? Reply to my DM and I'll pull up your goals and record ` +
+    `your reviews — happy to help you get there before the window.`
   );
 }
 
