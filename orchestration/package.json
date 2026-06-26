@@ -1,0 +1,18 @@
+{
+  "name": "labor-orchestration",
+  "private": true,
+  "type": "module",
+  "description": "Durable Smithers workflows for labor.fun, executed through the container runner. Isolated Bun sidecar — NOT part of the src/ TypeScript build.",
+  "scripts": {
+    "init": "bunx smithers-orchestrator init",
+    "transcript": "bunx smithers-orchestrator up workflows/transcript.tsx",
+    "expense": "bunx smithers-orchestrator up workflows/expense.tsx",
+    "meeting": "bunx smithers-orchestrator up workflows/meeting-scheduling.tsx",
+    "ps": "bunx smithers-orchestrator ps",
+    "resume": "bunx smithers-orchestrator up workflows/transcript.tsx --run-id $RUN_ID --resume true"
+  },
+  "dependencies": {
+    "smithers-orchestrator": "*",
+    "zod": "^3.23.0"
+  }
+}
