@@ -112,9 +112,12 @@ function kickoffPost(label, members, mentions) {
 }
 
 function escalationPost(slug, asks, label, mentions) {
+  // Recovery-oriented, not a call-out (shared-mirror voice rule): offer the
+  // self-heal, stop nudging, never frame the person as behind.
+  const who = mentionFor(slug, mentions);
   return (
-    `⚠️ ${mentionFor(slug, mentions)} hasn't provided Strategic Directives input for ${label} after ${asks} DM reminders. ` +
-    `Committee: please follow up directly — I'll stop nudging them.`
+    `📝 I don't have ${who}'s Strategic Directives input for ${label} yet, and I've stopped DMing them. ` +
+    `If you already shared it and it isn't recorded, ${who}, reply here and I'll capture it — no rush.`
   );
 }
 

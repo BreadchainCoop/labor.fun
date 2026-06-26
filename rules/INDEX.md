@@ -5,7 +5,7 @@ Operational rules, access control policies, and process definitions. The assista
 ## How the assistant Uses These Rules
 
 When the assistant starts a conversation, it reads the relevant rules based on context:
-- **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md)
+- **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md), [Voice & Register](identity/voice.md)
 - **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
 - **Cross-channel requests**: [Messaging](messaging/README.md)
 - **Task scheduling**: [Scheduling](scheduling/README.md)
@@ -33,6 +33,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
 | [Identity & Allowlist](identity/README.md) | `rules/identity/` | Resolving who is asking; allowlisted vs unknown |
+| [Voice & Register](identity/voice.md) | `rules/identity/voice.md` | Every message — peer/co-op tone, shared-mirror not scoreboard |
 | [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Approval gate for tasks proposed from meeting transcripts |

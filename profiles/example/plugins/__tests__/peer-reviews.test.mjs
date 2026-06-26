@@ -331,7 +331,7 @@ describe('planActions — nudge + tracking state machine', () => {
     const summary = p.posts.find((x) => x.includes('status'));
     expect(summary).toBeDefined();
     expect(summary).toContain('✅ complete'); // alice fully done
-    expect(summary).toMatch(/<@2> \(Bob\): missing/); // bob owes a review
+    expect(summary).toMatch(/<@2> \(Bob\): still to file/); // bob owes a review
   });
 });
 

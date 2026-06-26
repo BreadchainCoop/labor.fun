@@ -285,6 +285,12 @@ describe('tick — end to end against a temp profile', () => {
     expect(t.prompt).toMatch(/hyperlink/i);
     expect(t.prompt).toMatch(/deadline-digest\.md/); // default digest path
     expect(t.prompt).toMatch(/merged PRs and closed issues/i);
+    // #91 — shared mirror, not a scoreboard: de-shamed framing is in the prompt.
+    expect(t.prompt).not.toMatch(/no merged PRs \/ closed issues this week/);
+    expect(t.prompt).not.toMatch(/[Bb]old-flag any priority that looks behind/);
+    expect(t.prompt).toMatch(/space for <name>'s update/); // invitation, not verdict
+    expect(t.prompt).toMatch(/partial proxy/i); // PRs are eng-only proxy
+    expect(t.prompt).toMatch(/This Week in Brief/); // bot-written narrative digest
   });
 
   it('once the built marker exists: posts the kickoff and DMs owners', () => {
