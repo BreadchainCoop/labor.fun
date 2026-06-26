@@ -23,9 +23,13 @@ import {
   REMINDER_SWEEP_INTERVAL_MS,
   REMINDER_TARGET_JID,
   SHARED_KB_GROUP,
+  SMITHERS_BRIDGE_ENABLED,
+  SMITHERS_BRIDGE_PORT,
+  SMITHERS_BRIDGE_TOKEN,
   TIMEZONE,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
+import { startSmithersBridge } from './smithers-bridge.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -49,6 +53,7 @@ import {
 import {
   getAllChats,
   getAllRegisteredGroups,
+  getRegisteredGroup,
   getAllSessions,
   deleteSession,
   getAllTasks,
@@ -899,6 +904,47 @@ async function main(): Promise<void> {
     PROXY_BIND_HOST,
   );
 
+  // Optionally start the Smithers durable-workflow bridge (orchestration/).
+  // Off by default; runs one workflow step through runContainerAgent so the
+  // step keeps the container sandbox/proxy/RBAC. See docs/SMITHERS-ORCHESTRATION.md.
+  let smithersBridge: import('http').Server | undefined;
+  if (SMITHERS_BRIDGE_ENABLED) {
+    if (!SMITHERS_BRIDGE_TOKEN) {
+      logger.warn(
+        'SMITHERS_BRIDGE_ENABLED but SMITHERS_BRIDGE_TOKEN is empty — bridge NOT started',
+      );
+    } else {
+      smithersBridge = await startSmithersBridge({
+        port: SMITHERS_BRIDGE_PORT,
+        token: SMITHERS_BRIDGE_TOKEN,
+        runStep: async ({ chatJid, prompt, modelOverride, allowedTools }) => {
+          const group = getRegisteredGroup(chatJid);
+          if (!group) {
+            return {
+              status: 'error',
+              result: null,
+              error: `unknown group for jid ${chatJid}`,
+            };
+          }
+          const output = await runContainerAgent(
+            group,
+            {
+              prompt,
+              groupFolder: group.folder,
+              chatJid,
+              isMain: isPrivilegedGroup(group),
+              isScheduledTask: true,
+              modelOverride,
+              allowedTools,
+            },
+            () => {},
+          );
+          return { status: output.status, result: output.result };
+        },
+      });
+    }
+  }
+
   // Graceful shutdown handlers
   //
   // Tear the channel gateways down FIRST and make sure that step actually
@@ -944,6 +990,7 @@ async function main(): Promise<void> {
     //    detaches (does not kill) in-flight agent containers — it does not drain,
     //    so it takes no grace period.
     proxyServer.close();
+    smithersBridge?.close();
     await queue.shutdown(0);
 
     clearTimeout(force);
