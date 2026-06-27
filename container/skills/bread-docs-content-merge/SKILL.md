@@ -1,12 +1,12 @@
 ---
-name: github-content-merge
-description: Semi-automated, content-only PR review/merge for a docs repo, plus idle-branch merge-assist nudges. Use when running the scheduled github-content-merge gate tasks, or when asked to review/merge a documentation-content PR. Acts only on content (src/content/**.{md,mdx}); code changes always go to a human.
+name: bread-docs-content-merge
+description: Semi-automated, content-only PR review/merge for the Bread Cooperative docs repo (BreadchainCoop/bread-docs), plus idle-branch merge-assist nudges. Use when running the bread-docs-content-merge gate tasks, or when asked to review or merge a bread-docs documentation-content PR. Acts only on content (src/content/**.{md,mdx}); code changes always go to a human.
 ---
 
-# github-content-merge
+# bread-docs-content-merge
 
-An agentic alternative to a CI auto-merge bot. Two scheduled tasks poll a docs
-repo with a cheap **script gate** (`scripts/gate.mjs`) and only wake the agent
+An agentic alternative to a CI auto-merge bot, scoped to **BreadchainCoop/bread-docs**.
+Two scheduled tasks poll the repo with a cheap **script gate** (`scripts/gate.mjs`) and only wake the agent
 when there's something to do. The build stays on the repo's own checks (e.g.
 Netlify) — this skill only **reads** check results and acts on the result.
 
@@ -22,7 +22,7 @@ else (including `_meta.yml` sidebar/nav files, `astro.config.*`,
 
 ## Configuration
 
-Copy `config.example.json` → `config.json` (or point `$GITHUB_CONTENT_MERGE_CONFIG`
+Copy `config.example.json` → `config.json` (or point `$BREAD_DOCS_CONTENT_MERGE_CONFIG`
 at one) and edit. Fields: `repo`, `mode` (`watch`|`live`), `contentPaths`,
 `contentExtensions`, `requiredChecks`, `mergeMethod`, `branchPrefix`,
 `idleMinutes`, `maintainer`, `consentOptoutPath`, `statePath`.
@@ -122,11 +122,11 @@ separate observations namespace).
 1. Copy `config.example.json` → `config.json`; set `repo`, `maintainer`, and keep
    `mode: "watch"` to start.
 2. Register the two tasks (off-round minutes to avoid fleet pile-ups):
-   - `schedule_task` cron `19,39,59 * * * *` → prompt: *"Run github-content-merge
-     Workflow A. Follow the github-content-merge skill."*, `script`:
+   - `schedule_task` cron `19,39,59 * * * *` → prompt: *"Run bread-docs-content-merge
+     Workflow A. Follow the bread-docs-content-merge skill."*, `script`:
      `node ${CLAUDE_SKILL_DIR}/scripts/gate.mjs --mode=idle-branches`
    - `schedule_task` cron `7,22,37,52 * * * *` → prompt: *"Run
-     github-content-merge Workflow B. Follow the github-content-merge skill."*,
+     bread-docs-content-merge Workflow B. Follow the bread-docs-content-merge skill."*,
      `script`: `node ${CLAUDE_SKILL_DIR}/scripts/gate.mjs --mode=content-prs`
 3. Watch the digests. When they look right, set `mode: "live"`.
 
@@ -134,4 +134,4 @@ separate observations namespace).
 
 Pure gate helpers are unit-tested in `tests/gate.test.mjs`
 (`isContentOnly`, `isIdle`, `requiredChecksState`, `parseBranchUser`). Run with
-`npx vitest run container/skills/github-content-merge/tests`.
+`npx vitest run container/skills/bread-docs-content-merge/tests`.

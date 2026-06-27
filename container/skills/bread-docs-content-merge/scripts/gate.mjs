@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * github-content-merge — gate script
+ * bread-docs-content-merge — gate script
  *
- * Cheap, deterministic detector for the github-content-merge skill. Run as a
+ * Cheap, deterministic detector for the bread-docs-content-merge skill. Run as a
  * scheduled-task `script` gate: it polls GitHub via `gh api` (the container
  * has GH_TOKEN injected) and prints a single JSON line:
  *
@@ -17,7 +17,7 @@
  *                          have no open PR, and haven't been nudged at this HEAD
  *   --mode=content-prs     open PRs that touch ONLY content (src/content/**.{md,mdx})
  *
- * Config: JSON at $GITHUB_CONTENT_MERGE_CONFIG, else ../config.json beside this
+ * Config: JSON at $BREAD_DOCS_CONTENT_MERGE_CONFIG, else ../config.json beside this
  * script, else the built-in DEFAULTS below (which target bread-docs).
  */
 import { execFileSync } from 'node:child_process';
@@ -84,11 +84,11 @@ const DEFAULTS = {
   branchPrefix: 'keystatic/',
   idleMinutes: 60,
   maintainer: 'rathermercurial',
-  statePath: '.github-content-merge-state.json',
+  statePath: '.bread-docs-content-merge-state.json',
 };
 
 function loadConfig() {
-  const envPath = process.env.GITHUB_CONTENT_MERGE_CONFIG;
+  const envPath = process.env.BREAD_DOCS_CONTENT_MERGE_CONFIG;
   const local = path.join(HERE, '..', 'config.json');
   let fileCfg = {};
   if (envPath && existsSync(envPath)) fileCfg = JSON.parse(readFileSync(envPath, 'utf8'));
