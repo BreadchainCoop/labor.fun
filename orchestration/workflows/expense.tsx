@@ -31,9 +31,9 @@
 import { createSmithers, Sequence, Branch } from 'smithers-orchestrator';
 import { z } from 'zod';
 
-import { ContainerAgent } from '../agents/container-agent.js';
-import { chainFor } from '../model-router.js';
-import { getRunStep } from '../runtime.js';
+import { ContainerAgent } from '../agents/container-agent';
+import { chainFor } from '../model-router';
+import { getRunStep } from '../runtime';
 
 const { Workflow, Task, smithers, outputs } = createSmithers({
   input: z.object({

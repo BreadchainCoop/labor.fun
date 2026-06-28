@@ -17,9 +17,9 @@
 import { createSmithers, Sequence } from 'smithers-orchestrator';
 import { z } from 'zod';
 
-import { ContainerAgent } from '../agents/container-agent.js';
-import { chainFor, type TaskKind } from '../model-router.js';
-import { getRunStep } from '../runtime.js';
+import { ContainerAgent } from '../agents/container-agent';
+import { chainFor, type TaskKind } from '../model-router';
+import { getRunStep } from '../runtime';
 
 const actionItem = z.object({
   description: z.string(),

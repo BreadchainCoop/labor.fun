@@ -33,7 +33,7 @@
  * ────────────────────────────────────────────────────────────────────────────
  */
 
-import type { ModelSpec } from '../model-router.js';
+import type { ModelSpec } from '../model-router';
 
 /**
  * Port for the host-side container runner. We inject it rather than importing

@@ -16,7 +16,7 @@
  * with the same SMITHERS_BRIDGE_TOKEN. See orchestration/deploy/README.md.
  */
 
-import type { RunStep } from './agents/container-agent.js';
+import type { RunStep } from './agents/container-agent';
 
 let bound: RunStep | null = null;
 
