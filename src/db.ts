@@ -196,6 +196,46 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_proposal_approvals_pending ON proposal_approvals(status, booking_id);
   `);
 
+  // --- Safe{Wallet} on-chain payouts (issue #108) ---
+  // A SEPARATE table from `expenses` by design: the legacy off-chain expense
+  // lifecycle is untouched. A row here is one ERC-20 reimbursement proposed to
+  // the org's Safe multisig. The agent is a PROPOSER ONLY — it sets safe_tx_hash
+  // at propose time and thereafter only MIRRORS the on-chain confirmation state
+  // it observes; it never confirms or executes. The Safe threshold is the
+  // approval. amount_raw is base units (wei) as a decimal string so we never
+  // lose precision through JS numbers.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS safe_payouts (
+      id TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      requester_user_id TEXT NOT NULL,
+      recipient_slug TEXT,
+      recipient_address TEXT NOT NULL,
+      token_address TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      safe_address TEXT NOT NULL,
+      amount_raw TEXT NOT NULL,
+      amount_display TEXT,
+      description TEXT,
+      safe_nonce INTEGER,
+      safe_tx_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'requested',
+      confirmations INTEGER NOT NULL DEFAULT 0,
+      threshold INTEGER,
+      exec_tx_hash TEXT,
+      last_error TEXT,
+      expense_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      proposed_at TEXT,
+      executed_at TEXT,
+      updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_safe_payouts_status ON safe_payouts(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_safe_payouts_txhash
+      ON safe_payouts(safe_tx_hash) WHERE safe_tx_hash IS NOT NULL;
+  `);
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -1634,6 +1674,177 @@ export function cancelExpense(id: string, requesterUserId: string): void {
      SET status = 'cancelled', resolved_by = ?, resolved_at = ?
      WHERE id = ?`,
   ).run(requesterUserId, now, id);
+}
+
+// --- Safe{Wallet} on-chain payout accessors (issue #108) ---
+//
+// Lifecycle (the agent only ever moves a row FORWARD by observation; it never
+// represents an approval decision — the Safe threshold does):
+//   requested  → a payout asked for; recipient address validated & stored.
+//   proposed   → safe_tx_hash set; the proposal is live on the Tx Service.
+//   confirming → at least one signer has confirmed (mirror N/threshold).
+//   executed   → threshold met and the transfer executed on-chain (terminal).
+//   failed     → propose error (retryable; last_error explains).
+//   cancelled  → request withdrawn before propose (terminal).
+//   rejected   → signers replaced/voided the nonce (terminal).
+export type SafePayoutStatus =
+  | 'requested'
+  | 'proposed'
+  | 'confirming'
+  | 'executed'
+  | 'failed'
+  | 'cancelled'
+  | 'rejected';
+
+export interface SafePayout {
+  id: string;
+  chat_jid: string;
+  group_folder: string;
+  requester_user_id: string;
+  recipient_slug: string | null;
+  recipient_address: string;
+  token_address: string;
+  chain_id: number;
+  safe_address: string;
+  /** Base units (wei) as a decimal string — never a JS number. */
+  amount_raw: string;
+  amount_display: string | null;
+  description: string | null;
+  safe_nonce: number | null;
+  safe_tx_hash: string | null;
+  status: SafePayoutStatus;
+  confirmations: number;
+  threshold: number | null;
+  exec_tx_hash: string | null;
+  last_error: string | null;
+  expense_id: string | null;
+  created_at: string;
+  proposed_at: string | null;
+  executed_at: string | null;
+  updated_at: string | null;
+}
+
+export function createSafePayout(data: {
+  id: string;
+  chat_jid: string;
+  group_folder: string;
+  requester_user_id: string;
+  recipient_slug?: string | null;
+  recipient_address: string;
+  token_address: string;
+  chain_id: number;
+  safe_address: string;
+  amount_raw: string;
+  amount_display?: string | null;
+  description?: string | null;
+  expense_id?: string | null;
+}): void {
+  db.prepare(
+    `INSERT INTO safe_payouts
+       (id, chat_jid, group_folder, requester_user_id, recipient_slug,
+        recipient_address, token_address, chain_id, safe_address, amount_raw,
+        amount_display, description, expense_id, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', ?, ?)`,
+  ).run(
+    data.id,
+    data.chat_jid,
+    data.group_folder,
+    data.requester_user_id,
+    data.recipient_slug ?? null,
+    data.recipient_address,
+    data.token_address,
+    data.chain_id,
+    data.safe_address,
+    data.amount_raw,
+    data.amount_display ?? null,
+    data.description ?? null,
+    data.expense_id ?? null,
+    new Date().toISOString(),
+    new Date().toISOString(),
+  );
+}
+
+export function getSafePayout(id: string): SafePayout | undefined {
+  return db.prepare('SELECT * FROM safe_payouts WHERE id = ?').get(id) as
+    | SafePayout
+    | undefined;
+}
+
+/** Rows in any non-terminal status — the reconcile loop's work queue. */
+export function getActiveSafePayouts(): SafePayout[] {
+  return db
+    .prepare(
+      `SELECT * FROM safe_payouts
+       WHERE status IN ('requested', 'proposed', 'confirming')
+       ORDER BY created_at`,
+    )
+    .all() as SafePayout[];
+}
+
+/** Record a successful proposal: pins the idempotency key (safe_tx_hash). */
+export function markSafePayoutProposed(
+  id: string,
+  fields: {
+    safe_tx_hash: string;
+    safe_nonce: number;
+    threshold: number | null;
+  },
+): void {
+  db.prepare(
+    `UPDATE safe_payouts
+       SET status = 'proposed', safe_tx_hash = ?, safe_nonce = ?, threshold = ?,
+           last_error = NULL, proposed_at = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    fields.safe_tx_hash,
+    fields.safe_nonce,
+    fields.threshold ?? null,
+    new Date().toISOString(),
+    new Date().toISOString(),
+    id,
+  );
+}
+
+/** Reflect observed on-chain state. Status only ever advances. */
+export function updateSafePayoutMirror(
+  id: string,
+  fields: {
+    status: SafePayoutStatus;
+    confirmations: number;
+    threshold: number | null;
+    exec_tx_hash?: string | null;
+    executed_at?: string | null;
+  },
+): void {
+  db.prepare(
+    `UPDATE safe_payouts
+       SET status = ?, confirmations = ?, threshold = ?,
+           exec_tx_hash = COALESCE(?, exec_tx_hash),
+           executed_at = COALESCE(?, executed_at), updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    fields.status,
+    fields.confirmations,
+    fields.threshold ?? null,
+    fields.exec_tx_hash ?? null,
+    fields.executed_at ?? null,
+    new Date().toISOString(),
+    id,
+  );
+}
+
+export function markSafePayoutFailed(id: string, error: string): void {
+  db.prepare(
+    `UPDATE safe_payouts SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?`,
+  ).run(error.slice(0, 500), new Date().toISOString(), id);
+}
+
+/** Monotonic per-group id: PAY-1, PAY-2, … (scoped by group_folder). */
+export function nextSafePayoutId(groupFolder: string): string {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS n FROM safe_payouts WHERE group_folder = ?`)
+    .get(groupFolder) as { n: number };
+  return `PAY-${row.n + 1}`;
 }
 
 // --- Proposal approval accessors ---

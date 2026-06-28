@@ -1237,6 +1237,64 @@ server.tool(
 );
 
 server.tool(
+  'request_safe_payout',
+  "Propose an ON-CHAIN reimbursement from the org's Safe{Wallet} multisig (#108). " +
+    'Use ONLY for crypto payouts in the org token (not fiat expenses — use request_expense for those). ' +
+    'You are a PROPOSER ONLY: this just drafts the proposal; it pays out only once the ' +
+    "Safe's signers reach their threshold in their own wallets. NEVER claim a payout is done " +
+    'until the chain confirms it. Provide either recipient_slug (a KB people slug — preferred, ' +
+    'the address is read from their profile) or a checksummed recipient_address. If neither a ' +
+    'slug with an address nor a valid address is available, ASK the member for their wallet address — do not guess.',
+  {
+    amount: z
+      .string()
+      .describe('Human token amount, e.g. "100" or "0.5" (not base units)'),
+    recipient_slug: z
+      .string()
+      .optional()
+      .describe(
+        'KB people slug; the payout address is read from their profile frontmatter',
+      ),
+    recipient_address: z
+      .string()
+      .optional()
+      .describe(
+        'Checksummed 0x… address; use only if no slug/profile address exists',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe('What the reimbursement is for'),
+    expense_id: z
+      .string()
+      .optional()
+      .describe('Link to a prior expense row if this settles one'),
+  },
+  async (args) => {
+    const data = {
+      type: 'safe_payout_request',
+      chatJid,
+      amount: args.amount,
+      recipient_slug: args.recipient_slug || undefined,
+      recipient_address: args.recipient_address || undefined,
+      description: args.description || null,
+      expense_id: args.expense_id || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Payout request filed. I'll propose it to the Safe and post the confirmation link — it pays out only once signers reach the threshold.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   'approve_expense',
   'Approve an expense as-submitted. Any allowlisted sender may approve (the orchestrator rejects unknown callers and self-approval).',
   {
