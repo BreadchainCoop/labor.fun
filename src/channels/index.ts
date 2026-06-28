@@ -9,6 +9,9 @@ import './github.js';
 
 // gmail
 
+// signal (signal-cli JSON-RPC daemon; opt-in via SIGNAL_ACCOUNT)
+import './signal.js';
+
 // slack
 import './slack.js';
 
