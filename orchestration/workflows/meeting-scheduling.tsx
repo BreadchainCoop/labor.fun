@@ -103,9 +103,11 @@ export default smithers((ctx) => {
               output={outputs.availability}
               agent={agentsFor('availability', group, chatJid, calRead)}
             >
-              {`Read ${person}'s timezone from context/people/${person}.md and their ` +
-                `calendar free/busy between ${windowStartIso} and ${windowEndIso}. ` +
-                `Return timezone + busy intervals only.`}
+              {`From context/people/${person}.md frontmatter read their \`timezone\` ` +
+                `(default to "UTC" if absent) and \`calendar_email\` (if absent, use ` +
+                `the org's primary calendar). Using the gws calendar tool, fetch ` +
+                `free/busy for that calendar between ${windowStartIso} and ` +
+                `${windowEndIso}. Return the timezone + busy intervals only.`}
             </Task>
           ))}
         </Parallel>
