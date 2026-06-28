@@ -31,9 +31,9 @@
 import { createSmithers, Sequence, Parallel } from 'smithers-orchestrator';
 import { z } from 'zod';
 
-import { ContainerAgent } from '../agents/container-agent.js';
-import { chainFor, type TaskKind } from '../model-router.js';
-import { getRunStep } from '../runtime.js';
+import { ContainerAgent } from '../agents/container-agent';
+import { chainFor, type TaskKind } from '../model-router';
+import { getRunStep } from '../runtime';
 
 const slot = z.object({
   startIso: z.string(),
