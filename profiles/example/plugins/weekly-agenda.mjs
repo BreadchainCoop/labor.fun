@@ -150,6 +150,16 @@ export function parseConfig(mdText) {
     // GitHub org to mine for each owner's recent merged PRs / closed issues
     // (else the build agent falls back to its profile's configured org).
     githubOrg: typeof fm.github_org === 'string' ? fm.github_org.trim() : '',
+    // Corrector page (tools/agenda-page): base URL + shared StatiCrypt password
+    // so the kickoff links members to the review/correct UI. Empty disables the
+    // link. The build agent always writes the page-data JSON regardless; the URL
+    // only controls whether we advertise it in the channel.
+    agendaWebUrl:
+      typeof fm.agenda_web_url === 'string'
+        ? fm.agenda_web_url.trim().replace(/\/+$/, '')
+        : '',
+    agendaWebPassword:
+      typeof fm.agenda_web_password === 'string' ? fm.agenda_web_password : '',
   };
 }
 
@@ -187,16 +197,24 @@ export function resolveDiscordIds(ctxDir, slugs) {
   return out;
 }
 
-function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl) {
+function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl, correctorUrl, correctorPassword) {
   const who = slugs.map((s) => mentionFor(s, mentions)).join(', ');
   const fac = facilitator ? mentionFor(facilitator, mentions) : 'TBD';
   const link = docUrl ? ` ${docUrl}` : '';
+  // Optional: link the encrypted review/correct UI (tools/agenda-page) when a
+  // base URL is configured. The per-week page lives at <base>/<week>.html.
+  const corrector = correctorUrl
+    ? `\n🛠️ Prefer a UI? Review & correct your section here: ${correctorUrl}/${weekKey}.html` +
+      (correctorPassword ? ` (password: ${correctorPassword})` : '') +
+      ` — then hit "Copy my updates" and paste it back to me in a DM and I'll file it.`
+    : '';
   return (
     `🗓️ Weekly Core Meeting agenda for ${weekKey} is up.${link}\n` +
     `Facilitator: ${fac}. I've pre-filled it with each project's merged PRs/closed issues (linked), ` +
     `upcoming deadlines, and a goals-review read against the Q directives — ` +
     `owners (${who}), please add your project updates before the meeting. ` +
-    `I'll DM each of you and check back until your section is in (silence isn't consent 🙂).`
+    `I'll DM each of you and check back until your section is in (silence isn't consent 🙂).` +
+    corrector
   );
 }
 
@@ -259,7 +277,17 @@ export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state
   // true), then run the owner nudge ladder.
   if (!st.announcedAt) {
     st.announcedAt = new Date(nowMs).toISOString();
-    out.posts.push(kickoffPost(cfg.weekKey, facilitator, slugs, mentions, docUrl));
+    out.posts.push(
+      kickoffPost(
+        cfg.weekKey,
+        facilitator,
+        slugs,
+        mentions,
+        docUrl,
+        cfg.agendaWebUrl,
+        cfg.agendaWebPassword,
+      ),
+    );
   }
 
   // Refresh pass — once the refresh window opens (refreshDue, computed by the
@@ -354,7 +382,17 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `it did, mark the build done by writing the marker file weekly-agenda/built/${weekKey}.md via modify_kb_file ` +
     `(a one-line note is fine). Do NOT post anything to the channel on success — the flow announces it once the ` +
     `marker exists.\n` +
-    `5. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
+    `5. ALSO write the corrector-page data so the review/correct web page (tools/agenda-page) regenerates: save the ` +
+    `SAME agenda content as JSON to weekly-agenda/page-data/${weekKey}.json via modify_kb_file, matching this schema: ` +
+    `{ "week": "${weekKey}", "facilitator": "<name or empty>", "docUrl": "<the doc URL>", "brief": "<1–2 sentence ` +
+    `week brief>", "goals": [{ "priority": "<label>", "read": "<one-line status>", "optimistic": true }], ` +
+    `"deadlines": [{ "text": "<item>", "date": "YYYY-MM-DD", "owner": "<slug>", "url": "<link>", "pastDue": true }], ` +
+    `"members": [{ "slug": "<slug>", "name": "<name>", "projects": [{ "project": "<label>", "items": ` +
+    `[{ "text": "<what it did>", "ref": "#123", "url": "<link>", "optimistic": true }] }] }] }. Use the SAME per-project ` +
+    `items, goals and deadlines you put in the doc; an empty items[] renders the "space for <name>'s update" ` +
+    `invitation. Every owner in the config must appear in members[]. This feeds the encrypted page the flow links in ` +
+    `the kickoff — write it whenever the doc build succeeds.\n` +
+    `6. If the doc write or verification FAILED (e.g. tab not found, no Docs access), do NOT write the marker — ` +
     `instead post a short message in this channel saying the agenda build failed and why, so a human can fix it.\n\n` +
     `Tone: helpful and crisp. This is a rich starting point the team fills in — not a finished narrative, but far ` +
     `more than an empty skeleton.`;
@@ -387,7 +425,9 @@ function refreshTaskIpc({ cfg, weekKey, nowMs }) {
     `MERGED PRs and CLOSED issues from the LAST 7 DAYS from ${orgLine} (by their people/<slug>.md github_username) ` +
     `and update the auto-pulled activity bullets — the linked "title (#num) — summary" lines, or the ` +
     `"space for <name>'s update" placeholder. Keep real hyperlinks and real bullets.\n` +
-    `  • Refresh "📅 Upcoming Deadlines" from \`${cfg.deadlineDigest}\` (open items due this/next week; overdue on top).\n\n` +
+    `  • Refresh "📅 Upcoming Deadlines" from \`${cfg.deadlineDigest}\` (open items due this/next week; overdue on top).\n` +
+    `  • If weekly-agenda/page-data/${weekKey}.json exists, update its auto-pulled facts the same way (same schema) so ` +
+    `the corrector page stays in sync; leave any owner-edited fields alone.\n\n` +
     `CRITICAL — preserve human content: only replace bullets you can clearly tell are auto-pulled GitHub/deadline ` +
     `facts. If an owner has added their own narrative under a project, leave it and update the GitHub bullets ` +
     `alongside it — never overwrite it. If you cannot cleanly tell auto-pulled from human content in a section, ` +
