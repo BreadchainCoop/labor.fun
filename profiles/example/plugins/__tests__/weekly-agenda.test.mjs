@@ -71,6 +71,7 @@ describe('parseConfig', () => {
     // defaults
     expect(c.meetingHour).toBe(16);
     expect(c.maxNudges).toBe(3);
+    expect(c.refreshHoursBefore).toBe(0); // refresh pass disabled by default
     // optional context sources: deadline_digest defaults, the rest empty
     expect(c.deadlineDigest).toBe('deadline-digest.md');
     expect(c.directivesDoc).toBe('');
@@ -84,12 +85,14 @@ describe('parseConfig', () => {
         'directives_doc: artifacts/strategy-q2.md',
         'deadline_digest: deadlines.md',
         'github_org: AcmeCoop',
+        'refresh_hours_before: 7',
         '---',
       ].join('\n'),
     );
     expect(c.directivesDoc).toBe('artifacts/strategy-q2.md');
     expect(c.deadlineDigest).toBe('deadlines.md');
     expect(c.githubOrg).toBe('AcmeCoop');
+    expect(c.refreshHoursBefore).toBe(7);
   });
 
   it('reads corrector page config (and strips a trailing slash)', () => {
@@ -239,6 +242,50 @@ describe('planActions — build → verify → announce → nudge', () => {
   });
 });
 
+describe('planActions — Wednesday-morning refresh pass', () => {
+  const cfg = { weekKey: '2026-06-10', nudgeEveryDays: 1, maxNudges: 2 };
+  const owners = { Design: 'ruben', Stacks: 'bren' };
+  const assignments = assignmentsBySlug(owners);
+  const slugs = Object.keys(assignments);
+  const base = (over) => ({
+    nowMs: IN_WINDOW,
+    cfg,
+    slugs,
+    assignments,
+    facilitator: 'josh',
+    state: {},
+    filled: new Set(),
+    built: true,
+    refreshDue: false,
+    mentions: {},
+    docUrl: 'https://docs.google.com/document/d/DOC123/edit',
+    ...over,
+  });
+
+  it('does not refresh before the refresh window opens', () => {
+    const p = planActions(base({ refreshDue: false }));
+    expect(p.requestRefresh).toBe(false);
+    expect(p.state.refreshedAt).toBeUndefined();
+  });
+
+  it('refreshes exactly once when the window is open and the doc is built', () => {
+    const first = planActions(base({ refreshDue: true }));
+    expect(first.requestRefresh).toBe(true);
+    expect(first.state.refreshedAt).toBeTruthy();
+    // already refreshed → no repeat on a later tick
+    const second = planActions(
+      base({ refreshDue: true, state: first.state, nowMs: IN_WINDOW + 3600_000 }),
+    );
+    expect(second.requestRefresh).toBe(false);
+  });
+
+  it('never refreshes before the doc is built (stays in build phase)', () => {
+    const p = planActions(base({ refreshDue: true, built: false }));
+    expect(p.requestRefresh).toBe(false);
+    expect(p.requestBuild).toBe(true);
+  });
+});
+
 describe('tick — end to end against a temp profile', () => {
   let dir;
   beforeEach(() => {
@@ -283,6 +330,11 @@ describe('tick — end to end against a temp profile', () => {
   function taskTypes() {
     return ipcFiles('tasks').map((f) =>
       JSON.parse(fs.readFileSync(path.join(dir, 'data/ipc/slack_main/tasks', f))).type,
+    );
+  }
+  function tasks() {
+    return ipcFiles('tasks').map((f) =>
+      JSON.parse(fs.readFileSync(path.join(dir, 'data/ipc/slack_main/tasks', f))),
     );
   }
   // The build agent writes this marker after verifying the doc; simulate it.
@@ -331,6 +383,33 @@ describe('tick — end to end against a temp profile', () => {
     expect(plan.requestBuild).toBe(false);
     expect(ipcFiles('messages')).toHaveLength(1); // kickoff now
     expect(plan.dms.map((d) => d.slug).sort()).toEqual(['bren', 'ruben']);
+  });
+
+  it('does not emit a refresh task when refresh_hours_before is unset', () => {
+    writeConfig();
+    markBuilt();
+    const plan = tick({ profileDir: dir, logger, nowMs: IN_WINDOW });
+    expect(plan.requestRefresh).toBe(false);
+    expect(tasks().some((t) => /^weekly-agenda-refresh-/.test(t.taskId || ''))).toBe(false);
+  });
+
+  it('emits ONE refresh task inside the refresh window (built, not yet refreshed)', () => {
+    writeConfig('refresh_hours_before: 8');
+    markBuilt();
+    // Wed Jun 10, 09:00 local — meeting is 16:00, so within 8h of it and still
+    // inside the prep window (opened Mon 16:00).
+    const wedMorning = new Date(2026, 5, 10, 9, 0, 0).getTime();
+    const plan = tick({ profileDir: dir, logger, nowMs: wedMorning });
+    expect(plan.requestRefresh).toBe(true);
+    expect(plan.requestBuild).toBe(false);
+    const refreshTasks = tasks().filter((t) => /^weekly-agenda-refresh-/.test(t.taskId || ''));
+    expect(refreshTasks).toHaveLength(1);
+    expect(refreshTasks[0].prompt).toMatch(/REFRESH/);
+    expect(refreshTasks[0].prompt).toMatch(/DO NOT/);
+    expect(refreshTasks[0].prompt).toMatch(/LEAVE THAT SECTION UNTOUCHED/);
+    // A second tick the same morning must NOT re-emit (refreshedAt guard).
+    const plan2 = tick({ profileDir: dir, logger, nowMs: wedMorning + 3600_000 });
+    expect(plan2.requestRefresh).toBe(false);
   });
 
   it('outside the prep window: no-op', () => {
