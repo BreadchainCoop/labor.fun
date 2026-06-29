@@ -58,6 +58,33 @@ deployment rule in `CLAUDE.md`:
   they're allowlisted before acting on a write request. See
   [Access Control](../access-control/README.md).
 
+## Applying labels, tags & batch edits — act, verify, report
+
+A confirmation is **not** an action. The failure mode to avoid is confirming in
+chat that you labelled/edited issues while nothing actually changed on GitHub
+("confirm-without-acting" — see issue #93). Whenever you add/remove labels or do
+any batch edit across issues, hold yourself to this protocol:
+
+1. **Call the tool for every targeted issue.** Don't narrate an intention —
+   invoke `mcp__github__*` once per issue. A natural-language "done" with no
+   underlying tool call is a silent no-op.
+2. **Create the label first if it's missing.** Applying a label the repo doesn't
+   have can error or no-op. If the label doesn't exist, create it (or, if you
+   can't, say so) — never silently skip the issue.
+3. **Verify by reading back.** After applying, re-read the issue's labels and
+   confirm the change landed. Trust the read-back, not the apply call's
+   optimistic response.
+4. **Report per issue, not in bulk.** State which issues succeeded and which
+   failed (and why) — e.g. "labelled #1, #2, #3; #4 failed (label didn't exist,
+   created + applied)". Never a blanket "added it to all of them" unless you
+   verified each one.
+5. **Never claim success you didn't verify.** If a tool errors, or the read-back
+   doesn't show the change, report the failure and what you'll do — don't paper
+   over it with a confident confirmation.
+
+This generalizes to any write you make on a user's behalf: file the action,
+confirm it took, then report what actually happened — not what you intended.
+
 ## Inbound: responding to @-mentions
 
 Everything above is **outbound** — the agent acting on GitHub when a user asks
