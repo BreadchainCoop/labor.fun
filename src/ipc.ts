@@ -12,6 +12,8 @@ import {
   FLAT_ACCESS,
   GROUPS_DIR,
   IPC_POLL_INTERVAL,
+  PROFILE,
+  PROFILE_DIR,
   PROJECT_ROOT,
   SERVICE_USER,
   SHARED_KB_GROUP,
@@ -39,10 +41,14 @@ import {
   cancelExpense,
   Expense,
   ExpenseStatus,
+  createSafePayout,
+  nextSafePayoutId,
   isBotMessage,
   getRecentBotMessages,
   logKbAudit,
 } from './db.js';
+import { parseAmount, formatAmount, validateAddress } from './safe/payout.js';
+import { resolveRecipient } from './safe/recipient.js';
 import { writeApprovedTaskFile } from './kb-tasks.js';
 import { writeOutboundSnapshot } from './container-runner.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
@@ -1261,6 +1267,12 @@ export async function processTaskIpc(
     approver_notes?: string | null;
     receipt_path?: string | null;
     reimbursement_method?: string;
+    // For safe_payout_request (#108): on-chain reimbursement via the Safe.
+    recipient_slug?: string;
+    recipient_address?: string;
+    amount?: string | number; // human amount of the token (e.g. "100")
+    amount_raw?: string; // base units; overrides `amount` if present
+    token_symbol?: string;
     // For dm_user
     target?: string;
     text?: string;
@@ -2366,6 +2378,112 @@ export async function processTaskIpc(
           reason: cancelReason || undefined,
         },
         'Expense cancelled',
+      );
+      break;
+    }
+
+    case 'safe_payout_request': {
+      // On-chain reimbursement via the Safe multisig (#108). The agent only
+      // FILES the request here; the safe-payouts reconcile loop proposes it to
+      // the Safe. We never confirm/execute — the Safe threshold is the approval.
+      if (!PROFILE.safe?.safeAddress) {
+        logger.warn(
+          { sourceGroup },
+          'safe_payout_request: no `safe` config — on-chain payouts disabled',
+        );
+        if (data.chatJid) {
+          await deps.sendMessage(
+            data.chatJid,
+            'On-chain payouts are not configured for this org yet.',
+          );
+        }
+        break;
+      }
+      if (!data.chatJid || (data.amount == null && !data.amount_raw)) {
+        logger.warn({ sourceGroup }, 'safe_payout_request: missing fields');
+        break;
+      }
+
+      const decimals = PROFILE.safe.tokenDecimals ?? 18;
+      const symbol = data.token_symbol || PROFILE.safe.tokenSymbol || 'tokens';
+
+      // Resolve + validate the recipient. REFUSE (and ask) on a bad/missing
+      // address rather than guessing — never send funds to an unverified target.
+      let recipientAddress: string;
+      let recipientSlug: string | null = data.recipient_slug ?? null;
+      try {
+        if (data.recipient_address) {
+          recipientAddress = validateAddress(data.recipient_address);
+        } else if (data.recipient_slug) {
+          const r = resolveRecipient(
+            PROFILE_DIR,
+            SHARED_KB_GROUP,
+            data.recipient_slug,
+          );
+          recipientAddress = r.address;
+          recipientSlug = r.slug;
+        } else {
+          throw new Error('no recipient_slug or recipient_address provided');
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(
+          { sourceGroup, err: msg },
+          'safe_payout_request: recipient unresolved',
+        );
+        await deps.sendMessage(
+          data.chatJid,
+          `I can't set up that payout — ${msg}. Please share a checksummed wallet address.`,
+        );
+        break;
+      }
+
+      let amountRaw: string;
+      try {
+        amountRaw = data.amount_raw
+          ? BigInt(data.amount_raw).toString()
+          : parseAmount(String(data.amount), decimals).toString();
+        if (BigInt(amountRaw) <= 0n) throw new Error('amount must be positive');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await deps.sendMessage(
+          data.chatJid,
+          `I couldn't read that payout amount — ${msg}.`,
+        );
+        break;
+      }
+
+      const senderCtx = readSenderContext(sourceGroup);
+      const requesterUserId =
+        senderCtx?.user_id || data.groupFolder || sourceGroup;
+      const groupFolder = data.groupFolder || sourceGroup;
+      const payoutId = nextSafePayoutId(groupFolder);
+      const amountDisplay = `${formatAmount(amountRaw, decimals, symbol)}`;
+
+      createSafePayout({
+        id: payoutId,
+        chat_jid: data.chatJid,
+        group_folder: groupFolder,
+        requester_user_id: requesterUserId,
+        recipient_slug: recipientSlug,
+        recipient_address: recipientAddress,
+        token_address: PROFILE.safe.tokenAddress,
+        chain_id: PROFILE.safe.chainId,
+        safe_address: PROFILE.safe.safeAddress,
+        amount_raw: amountRaw,
+        amount_display: amountDisplay,
+        description: data.description ?? null,
+        expense_id: data.expense_id ?? null,
+      });
+
+      await deps.sendMessage(
+        data.chatJid,
+        `📝 Recorded ${payoutId}: ${amountDisplay} to ${recipientSlug ?? recipientAddress}. ` +
+          `I'll propose it to the Safe — it pays out only once signers reach the threshold. You'll see the proposal link shortly.`,
+      );
+      logger.info(
+        { payoutId, requester: requesterUserId, amountRaw },
+        'safe_payout_request: recorded',
       );
       break;
     }
