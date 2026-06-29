@@ -10,6 +10,7 @@ import { startGroupDigestLoop } from '../group-digest.js';
 import { startDiscordMembersSyncLoop } from './discord-members-sync.js';
 import { startGitHubProjectSyncLoop } from './github-project-sync.js';
 import { registerIntegration } from './registry.js';
+import { startSafePayoutsLoop, stopSafePayoutsLoop } from './safe-payouts.js';
 
 registerIntegration({
   name: 'group-digest',
@@ -24,4 +25,10 @@ registerIntegration({
 registerIntegration({
   name: 'discord-members-sync',
   start: () => startDiscordMembersSyncLoop(),
+});
+
+registerIntegration({
+  name: 'safe-payouts',
+  start: () => startSafePayoutsLoop(),
+  stop: () => stopSafePayoutsLoop(),
 });

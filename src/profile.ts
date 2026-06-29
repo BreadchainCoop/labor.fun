@@ -56,6 +56,33 @@ export interface ProfileConfig {
    * See container-runner.ts (skill sync) and docs/PLUGINS.md.
    */
   enabledSkills?: string[];
+  /**
+   * On-chain reimbursement via a Safe{Wallet} multisig (issue #108). Absent →
+   * the safe-payouts integration stays dormant (no-op). Org-agnostic: the
+   * concrete Safe/token addresses live here, never in `src/`. The proposer
+   * private key is NOT here — it comes from the env/vault (`SAFE_PROPOSER_KEY`)
+   * so it is never committed. The agent is a *proposer only*: it can propose a
+   * transfer but can never confirm or execute — the Safe threshold is the
+   * approval. See rules/finance/safe-payouts.md.
+   */
+  safe?: {
+    /** EVM chain id (Gnosis Chain = 100). */
+    chainId: number;
+    /** The Safe multisig address (checksummed). */
+    safeAddress: string;
+    /** ERC-20 reimbursement token contract (e.g. BREAD), checksummed. */
+    tokenAddress: string;
+    /** Token symbol for human-facing mirrors (default "tokens"). */
+    tokenSymbol?: string;
+    /** Token decimals (default 18). */
+    tokenDecimals?: number;
+    /** JSON-RPC endpoint for the chain. */
+    rpcUrl: string;
+    /** Safe Transaction Service base URL (propose + confirmation reads). */
+    txServiceUrl?: string;
+    /** Safe{Wallet} UI base, used to build a "confirm in your wallet" link. */
+    safeWalletBaseUrl?: string;
+  };
 }
 
 const DEFAULTS: ProfileConfig = {
