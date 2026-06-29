@@ -29,6 +29,15 @@ diverged:
 Make the smallest correct change. Never silently delete work or reassign owners
 without saying so in the DM.
 
+**Optimistic ≠ unverified.** After every GitHub write (label, assignment,
+status, comment), confirm the tool call actually succeeded — read the issue back
+and check the change landed — *before* you tell anyone it's done. A chat/DM
+confirmation with no successful underlying tool call is a silent no-op (issue
+#93). For labels specifically: create the label first if the repo doesn't have
+it, apply per issue, verify by read-back, and report which issues changed and
+which failed. Full protocol: `/workspace/project/rules/integrations/github.md`
+("Applying labels, tags & batch edits").
+
 ## Who to DM (and who not to)
 
 Use the brief's **"DM these people"** list as the ground truth for *who*:
@@ -75,7 +84,9 @@ for different tasks, only address the fresh ones.
 ## Tools
 
 - `dm_user` — DM a person by name.
-- `mcp__github__*` — comment on / update / label issues.
+- `mcp__github__*` — comment on / update / label issues. Verify each write by
+  reading it back; create a missing label before applying it (never silently
+  skip).
 - `modify_kb_file` — apply estimate/deadline/status updates to KB task files.
 
 ## Related
