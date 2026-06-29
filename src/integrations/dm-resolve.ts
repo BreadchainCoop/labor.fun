@@ -41,6 +41,30 @@ function normalize(s: string): string {
 }
 
 /**
+ * Nickname / given-name forms derived from a candidate's human-facing fields.
+ *
+ * Real people files routinely keep the full display form in `title` /
+ * `discordDisplayName` — `"Josh | TBS"`, `"Unai | Mettodo"`, `"Liron 💖"` — so a
+ * bare first name (`"josh"`) never *exactly* matches any field and resolution
+ * fails even though the intent is obvious. This derives the leading name by
+ * splitting on common display separators (`|`, `(`, `/`, en/em dash) and also
+ * taking that segment's first whitespace token, so `"Josh | TBS"` yields
+ * `"josh"`. Used as a matching tier below (after exact matches, so exact always
+ * wins; multiple people sharing a given name still surface as ambiguous).
+ */
+function givenNameForms(c: PersonCandidate): string[] {
+  const out = new Set<string>();
+  for (const raw of [c.title, c.discordDisplayName]) {
+    const segment = (raw || '').split(/[|(/\u2013\u2014]/)[0].trim();
+    if (!segment) continue;
+    out.add(normalize(segment));
+    const firstWord = segment.split(/\s+/)[0];
+    if (firstWord) out.add(normalize(firstWord));
+  }
+  return [...out];
+}
+
+/**
  * Match priority:
  *   1. Numeric ID → exact `discordId` match.
  *   2. Otherwise: case-insensitive equality against slug, title,
@@ -90,6 +114,19 @@ export function resolveDmTarget(
         suggestions: hits.map((h) => `${h.slug} (${h.discordDisplayName})`),
       };
     }
+  }
+
+  // Tier 2: leading given-name derived from the display form (handles
+  // "Josh | TBS" → "josh"). Runs only after every exact tier missed, so it
+  // never overrides a precise match; multiple people sharing a given name are
+  // surfaced as ambiguous rather than silently picking one.
+  const nameHits = candidates.filter((c) => givenNameForms(c).includes(tn));
+  if (nameHits.length === 1) return { person: nameHits[0] };
+  if (nameHits.length > 1) {
+    return {
+      error: `Ambiguous DM target "${t}" — matches ${nameHits.length} members by given name. Use a slug or Discord ID.`,
+      suggestions: nameHits.map((h) => `${h.slug} (${h.discordDisplayName})`),
+    };
   }
 
   // Fuzzy-suggest as a courtesy on a miss — pick up to 5 candidates whose
