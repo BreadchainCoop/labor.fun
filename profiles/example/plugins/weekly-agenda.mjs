@@ -47,6 +47,7 @@ import { fileURLToPath } from 'url';
 import matter from 'gray-matter';
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 /** Re-request the build this often until the agent confirms it (writes the
  * `built` marker) — so a failed/incomplete build self-heals instead of
  * stalling the week with no agenda. */
@@ -125,6 +126,10 @@ export function parseConfig(mdText) {
     prepDaysBefore: Number(fm.prep_days_before) || 2,
     nudgeEveryDays: Number(fm.nudge_every_days) || 1,
     maxNudges: Number(fm.max_nudges) || 3,
+    // Optional second pass: hours before the meeting to run a light "refresh"
+    // that re-pulls GitHub/deadline facts into the already-built doc without
+    // re-nudging or resetting owner content. 0 (default) disables it.
+    refreshHoursBefore: Number(fm.refresh_hours_before) || 0,
     owners,
     facilitators,
     // Optional context sources the build agent weaves into the agenda (all
@@ -236,8 +241,8 @@ function askText(weekKey, projects, askNumber, docUrl) {
  * the build/nudge ladder is unit-testable. Returns the actions plus the next
  * state (never mutates the input state).
  */
-export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state, filled, built, mentions, docUrl }) {
-  const out = { dms: [], posts: [], requestBuild: false };
+export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state, filled, built, refreshDue, mentions, docUrl }) {
+  const out = { dms: [], posts: [], requestBuild: false, requestRefresh: false };
   const st = {
     ...state,
     members: Object.fromEntries(
@@ -274,6 +279,15 @@ export function planActions({ nowMs, cfg, slugs, assignments, facilitator, state
         cfg.correctorPassword,
       ),
     );
+  }
+
+  // Refresh pass — once the refresh window opens (refreshDue, computed by the
+  // caller), re-pull fresh GitHub/deadline facts into the already-built doc.
+  // Fires exactly once per week (the `refreshedAt` guard) and NEVER re-nudges
+  // or resets owner content — that's enforced by the refresh task prompt.
+  if (refreshDue && !st.refreshedAt) {
+    st.refreshedAt = new Date(nowMs).toISOString();
+    out.requestRefresh = true;
   }
 
   const nudgeMs = cfg.nudgeEveryDays * DAY_MS;
@@ -392,6 +406,42 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
   };
 }
 
+function refreshTaskIpc({ cfg, weekKey, nowMs }) {
+  const orgLine = cfg.githubOrg
+    ? `the "${cfg.githubOrg}" GitHub org`
+    : `your profile's configured GitHub org`;
+  const prompt =
+    `Weekly Core Meeting agenda REFRESH for ${weekKey}. The agenda was already built earlier this week and ` +
+    `owners may have filled in their sections since — this is a LIGHT refresh of the AUTO-PULLED facts only, ` +
+    `NOT a rebuild.\n\n` +
+    `DO NOT: archive anything, reset or replace the "This Week" tab, change the facilitator line, or touch ` +
+    `Goals Review prose, Appreciations, Urgent Topics, owner-written narrative, or any human edit. DO NOT DM ` +
+    `anyone, post a kickoff, or write any marker file (the build marker already exists).\n\n` +
+    `DO: In Google Doc ${cfg.docId}, "This Week" tab (tabId ${cfg.thisWeekTabId}), update ONLY the auto-pulled ` +
+    `facts so the agenda is current for today's meeting:\n` +
+    `  • Under "🌱 Active Projects — Updates", for each "• <Project> — <owner>" sub-heading, re-pull that owner's ` +
+    `MERGED PRs and CLOSED issues from the LAST 7 DAYS from ${orgLine} (by their people/<slug>.md github_username) ` +
+    `and update the auto-pulled activity bullets — the linked "title (#num) — summary" lines, or the ` +
+    `"space for <name>'s update" placeholder. Keep real hyperlinks and real bullets.\n` +
+    `  • Refresh "📅 Upcoming Deadlines" from \`${cfg.deadlineDigest}\` (open items due this/next week; overdue on top).\n\n` +
+    `CRITICAL — preserve human content: only replace bullets you can clearly tell are auto-pulled GitHub/deadline ` +
+    `facts. If an owner has added their own narrative under a project, leave it and update the GitHub bullets ` +
+    `alongside it — never overwrite it. If you cannot cleanly tell auto-pulled from human content in a section, ` +
+    `LEAVE THAT SECTION UNTOUCHED.\n\n` +
+    `When done: do NOT write a marker and do NOT message the channel — just stop. Only if the doc can't be ` +
+    `read/written, post one short line in this channel explaining why.`;
+  return {
+    type: 'schedule_task',
+    taskId: `weekly-agenda-refresh-${weekKey}-${nowMs}`,
+    prompt,
+    schedule_type: 'once',
+    schedule_value: localStamp(nowMs + 2 * 60_000),
+    context_mode: 'isolated',
+    targetJid: cfg.channelJid,
+    timestamp: new Date(nowMs).toISOString(),
+  };
+}
+
 /** Atomic write: IPC watchers only pick up `*.json`, so write `.tmp` first. */
 function writeIpcFile(dir, data) {
   fs.mkdirSync(dir, { recursive: true });
@@ -447,6 +497,12 @@ export function tick({ profileDir, logger, nowMs }) {
   );
   if (nowMs < windowStartMs || nowMs >= meetingMs) return null; // outside prep window
 
+  // The refresh window opens `refresh_hours_before` hours before the meeting
+  // (disabled when 0). We're already inside the prep window and before the
+  // meeting here, so this is always a sub-window of it.
+  const refreshDue =
+    cfg.refreshHoursBefore > 0 && nowMs >= meetingMs - cfg.refreshHoursBefore * HOUR_MS;
+
   const assignments = assignmentsBySlug(cfg.owners);
   const slugs = Object.keys(assignments);
   const facilitator = cfg.facilitators[weekKey] || '';
@@ -485,6 +541,7 @@ export function tick({ profileDir, logger, nowMs }) {
     state,
     filled,
     built,
+    refreshDue,
     mentions,
     docUrl,
   });
@@ -496,6 +553,12 @@ export function tick({ profileDir, logger, nowMs }) {
     writeIpcFile(
       path.join(ipcDir, 'tasks'),
       buildTaskIpc({ cfg: { weekKey, ...cfg }, weekKey, facilitator, nowMs }),
+    );
+  }
+  if (plan.requestRefresh) {
+    writeIpcFile(
+      path.join(ipcDir, 'tasks'),
+      refreshTaskIpc({ cfg: { weekKey, ...cfg }, weekKey, nowMs }),
     );
   }
   for (const dm of plan.dms) {
@@ -519,13 +582,14 @@ export function tick({ profileDir, logger, nowMs }) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   atomicWrite(statePath, JSON.stringify(plan.state, null, 2));
 
-  if (plan.dms.length || plan.posts.length || plan.requestBuild) {
+  if (plan.dms.length || plan.posts.length || plan.requestBuild || plan.requestRefresh) {
     logger.info(
       {
         weekKey,
         dms: plan.dms.length,
         posts: plan.posts.length,
         buildRequested: plan.requestBuild,
+        refreshRequested: plan.requestRefresh,
       },
       'weekly-agenda: actions emitted',
     );
