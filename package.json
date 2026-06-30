@@ -16,6 +16,7 @@
     "setup": "tsx setup/index.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "sync-discord-members": "tsx scripts/sync-discord-members.ts",
+    "sync-slack-members": "tsx scripts/sync-slack-members.ts",
     "pm-preview": "tsx scripts/pm-preview.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
