@@ -390,6 +390,50 @@ describe('SlackChannel', () => {
       );
     });
 
+    it('resolves <@U…> mentions in the message text to readable names', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          user: 'U_USER_456',
+          text: 'set up a biweekly with <@U08J28F8FL5> please',
+        }),
+      );
+
+      expect(currentApp().client.users.info).toHaveBeenCalledWith({
+        user: 'U08J28F8FL5',
+      });
+      // The mock resolves every user to "Alice Smith", so the raw mention ID
+      // is replaced by a readable @name the agent can act on.
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: 'set up a biweekly with @Alice Smith please',
+        }),
+      );
+    });
+
+    it('leaves a mention untouched when the user cannot be resolved', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+      currentApp().client.users.info.mockRejectedValue(new Error('no scope'));
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          user: 'U_USER_456',
+          text: 'ping <@U08J28F8FL5>',
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ content: 'ping <@U08J28F8FL5>' }),
+      );
+    });
+
     it('caches user names to avoid repeated API calls', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
