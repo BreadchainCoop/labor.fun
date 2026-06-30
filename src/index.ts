@@ -77,6 +77,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startEmailPoller } from './email-poller.js';
+import { startSlackMembersSyncLoop } from './integrations/slack-members-sync.js';
 import { startIpcWatcher } from './ipc.js';
 import {
   findChannel,
@@ -1426,6 +1427,11 @@ async function main(): Promise<void> {
       'EMAIL_FORWARD_SLACK_CHANNEL not set — email→Slack relay disabled',
     );
   }
+
+  // Keep KB people files + identity rows in sync with the Slack workspace
+  // roster. Opt-in via SLACK_MEMBERS_SYNC_INTERVAL_MS; no-op when disabled or
+  // no Slack token is configured.
+  startSlackMembersSyncLoop();
 
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

@@ -30,6 +30,7 @@ const envConfig = readEnvFile([
   'GITHUB_PROJECT_SYNC_INTERVAL_MS',
   'GITHUB_PROJECT_HIDE_TITLE_PATTERNS',
   'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
+  'SLACK_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
   'ENABLED_SKILLS',
@@ -315,6 +316,15 @@ export const DISCORD_MEMBERS_SYNC_INTERVAL_MS = Math.max(
   0,
   parseInt(envVal('DISCORD_MEMBERS_SYNC_INTERVAL_MS') || '3600000', 10) ||
     3600000,
+);
+
+// How often the Slack-members → KB people sync re-runs in the background.
+// Default 0 (disabled — opt-in): blanket-syncing every workspace member is
+// opinionated, so installs enable it explicitly. The one-shot
+// `npm run sync-slack-members` works regardless of this setting.
+export const SLACK_MEMBERS_SYNC_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('SLACK_MEMBERS_SYNC_INTERVAL_MS') || '0', 10) || 0,
 );
 
 // How often to re-verify role membership for already-registered DM groups.

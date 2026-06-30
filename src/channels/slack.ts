@@ -145,6 +145,9 @@ export class SlackChannel implements Channel {
             content = `@${ASSISTANT_NAME} ${content}`;
           }
         }
+        // Resolve any remaining <@U…> mentions to readable names so the agent
+        // can identify who was mentioned (e.g. for calendar invitees).
+        content = await this.resolveMentions(content);
 
         // Track thread context for edited messages too
         const threadTs = inner.thread_ts;
@@ -294,6 +297,9 @@ export class SlackChannel implements Channel {
           content = `@${ASSISTANT_NAME} ${content}`;
         }
       }
+      // Resolve any remaining <@U…> mentions to readable names so the agent
+      // can identify who was mentioned (e.g. for calendar invitees).
+      content = await this.resolveMentions(content);
 
       // Track thread context so replies go back to the thread.
       // thread_ts === ts means this IS the parent; only track actual replies.
@@ -611,6 +617,40 @@ export class SlackChannel implements Channel {
       logger.debug({ userId, err }, 'Failed to resolve Slack user name');
       return undefined;
     }
+  }
+
+  /**
+   * Replace Slack user mentions (`<@U123>` or `<@U123|handle>`) in message text
+   * with a readable `@Name`, so the agent sees who was mentioned instead of an
+   * opaque ID it cannot map. The bot's own mention resolves to ASSISTANT_NAME;
+   * others resolve via users.info (cached). IDs that don't resolve are left
+   * untouched. Brings Slack to parity with Discord/Telegram, which already hand
+   * the agent display names rather than raw IDs.
+   */
+  private async resolveMentions(content: string): Promise<string> {
+    if (!content) return content;
+    // User mentions are `<@U…>` (or `<@W…>` on Enterprise Grid), optionally
+    // `<@U…|handle>`. Channel (`<#C…>`) and special (`<!here>`) mentions are
+    // intentionally left untouched.
+    const MENTION_RE = /<@([UW][A-Z0-9]+)(?:\|[^>]+)?>/g;
+    const ids = new Set<string>();
+    for (const m of content.matchAll(MENTION_RE)) ids.add(m[1]);
+    if (ids.size === 0) return content;
+
+    const names = new Map<string, string>();
+    for (const id of ids) {
+      if (id === this.botUserId) {
+        names.set(id, ASSISTANT_NAME);
+        continue;
+      }
+      const name = await this.resolveUserName(id);
+      if (name) names.set(id, name);
+    }
+
+    return content.replace(MENTION_RE, (full, id) => {
+      const name = names.get(id);
+      return name ? `@${name}` : full;
+    });
   }
 
   private async flushOutgoingQueue(): Promise<void> {
