@@ -10,5 +10,7 @@
   "serviceUser": "laborfun",
   "telegramBotUsername": "your_bot_username",
   "timezone": "UTC",
+  "escalationContact": "",
+  "escalationChannel": "",
   "enabledSkills": []
 }
