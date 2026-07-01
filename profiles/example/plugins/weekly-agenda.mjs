@@ -346,8 +346,9 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `(tabId ${cfg.thisWeekTabId}) by appending them, under a "### ${weekKey}" heading, to the TOP of ` +
     `the Archive tab (tabId ${cfg.archiveTabId}). Never create a new tab — write only into these two existing tabs.\n` +
     `2. Replace the "This Week" tab with a fresh agenda dated ${weekKey}. ${facLine} Use these sections IN ORDER, ` +
-    `and match the doc's existing formatting — real heading styles, real bulleted lists (not "- " text), bold ` +
-    `labels, and REAL hyperlinks (link the title text to the URL; never paste raw URLs):\n` +
+    `and format for READABILITY — clear sections from real heading styles (H1 title, H2 per section, H3 per ` +
+    `project), real bulleted lists (not "- " text), and REAL hyperlinks (link the title text to the URL; never ` +
+    `paste raw URLs). Use bold SPARINGLY — the headings are the emphasis; do NOT bold labels or whole lines:\n` +
     `   🏁 Check In · ✍️ Revise Agenda\n` +
     `   📣 This Week in Brief — 2–3 sentences YOU write from the data below: what moved, what's stuck, and where the ` +
     `work needs hands. Frame it as the collective's shared picture (what the WORK needs), not a roll-call of who did ` +
@@ -361,8 +362,9 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `(a prompt to see what the task needs, not a callout on whoever holds it). Each line: the item as a hyperlink ` +
     `(to the GitHub issue/PR where it is one), its date, and the owner.\n` +
     `   🧑‍🏭 Contributor Pipeline · ‼️ Urgent Topics\n` +
-    `   🌱 Active Projects — a collective "shipped this week" changelog, ONE bold sub-heading per project, ` +
-    `"• <Project> — <owner name>". Under each, list that owner's MERGED PRs and CLOSED issues from the LAST 7 DAYS, ` +
+    `   🌱 Active Projects — a collective "shipped this week" changelog, one H3 sub-heading per project reading ` +
+    `"<Project> — <owner name>" (a real heading — no leading "•", no manual bold). Under each, list that owner's ` +
+    `MERGED PRs and CLOSED issues from the LAST 7 DAYS, ` +
     `pulled from ${orgLine} by their github_username — each a hyperlink on "title (#num)" + a 4–8 word plain summary. ` +
     `Treat this as a DRAFT the owner edits/expands/corrects, not a final word. Merged PRs are an engineering-only, ` +
     `PARTIAL proxy: design, BD, community, care and organizing work rarely show up as a PR, so absence of PRs is NOT ` +
@@ -372,9 +374,11 @@ function buildTaskIpc({ cfg, weekKey, facilitator, nowMs }) {
     `under their primary one.\n` +
     `   🎉 Appreciations (3 MINIMUM) · 💰 Other topics / Upcoming Time Off\n` +
     `   Also fold any upcoming calendar events (next 7 days) into the relevant section if a calendar is configured.\n` +
-    `3. QUALITY BAR: terse but informative — one line per bullet, every PR/issue/deadline is a clickable link, ` +
-    `project and priority labels are bold. It should read like a polished agenda a facilitator can run the meeting ` +
-    `from, not a raw dump. Owners still flesh out their own narrative — you give them the scaffolding + the facts.\n` +
+    `3. QUALITY BAR: easy to READ — clear heading sections, one line per bullet, every PR/issue/deadline a ` +
+    `clickable link, and bold used SPARINGLY (past feedback: "everything is in bold and there are no clear ` +
+    `sections" — so keep body text normal weight and let headings carry the structure). It should read like a ` +
+    `clean, skimmable agenda a facilitator can run the meeting from, not a raw dump. Owners still flesh out their ` +
+    `own narrative — you give them the scaffolding + the facts.\n` +
     `4. CORRECTOR PAGE DATA: write the SAME agenda as structured JSON to weekly-agenda/page-data/${weekKey}.json ` +
     `via modify_kb_file, so members can review and correct their sections on the corrector page. Use EXACTLY this ` +
     `shape (valid JSON only): {"week":"${weekKey}","facilitator":"<name>","docUrl":"<the doc url>","brief":"<the ` +
@@ -419,7 +423,7 @@ function refreshTaskIpc({ cfg, weekKey, nowMs }) {
     `anyone, post a kickoff, or write any marker file (the build marker already exists).\n\n` +
     `DO: In Google Doc ${cfg.docId}, "This Week" tab (tabId ${cfg.thisWeekTabId}), update ONLY the auto-pulled ` +
     `facts so the agenda is current for today's meeting:\n` +
-    `  • Under "🌱 Active Projects — Updates", for each "• <Project> — <owner>" sub-heading, re-pull that owner's ` +
+    `  • Under "🌱 Active Projects", for each project sub-heading ("<Project> — <owner>"), re-pull that owner's ` +
     `MERGED PRs and CLOSED issues from the LAST 7 DAYS from ${orgLine} (by their people/<slug>.md github_username) ` +
     `and update the auto-pulled activity bullets — the linked "title (#num) — summary" lines, or the ` +
     `"space for <name>'s update" placeholder. Keep real hyperlinks and real bullets.\n` +
