@@ -80,6 +80,27 @@ The authoritative **operating rules** (access control, messaging, scheduling,
 identity, integrations) live in the framework `rules/` directory and apply to
 every org. Don't copy them into your profile; reference them.
 
+### Declare your operator roles (required)
+
+The agent routes real-world actions to real people, so your `CLAUDE.md` "System
+& People" section **must declare who fills each operator role** — don't ship the
+example placeholders. At minimum, declare:
+
+- **Technical escalation** — who owns deploys and the bot's own behavior/infra
+  (e.g. "escalate technical issues to `<slug>`").
+- **Workspace / infrastructure admin** — who administers the shared accounts the
+  bot depends on (Google Workspace, dashboards, credentials).
+- **Governance body** — the group that makes strategy/budget decisions the bot
+  routes to (e.g. a strategic/steering committee), if your org has one.
+
+Reference each by their people-file slug (§5). The access model is **flat** — an
+allowlisted member has full access, there are no role tiers — so these are
+*routing* declarations, not permission tiers. Leaving an operator role undeclared
+means the agent has no real target to route to and may fall back to a
+placeholder; an un-customized profile is exactly how fictional "admins" leak into
+a live org and get "escalated" to. A guided setup wizard to collect these is
+planned (backlog: `BreadchainCoop/labor.fun#138`).
+
 ## 5. Seed your people (the allowlist)
 
 Add one markdown file per member under
