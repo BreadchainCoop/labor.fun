@@ -32,6 +32,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Messaging](messaging/README.md) | `rules/messaging/` | Formatting output, cross-channel sends |
 | [Channel Formatting](messaging/channel-formatting.md) | `rules/messaging/channel-formatting.md` | Before sending any message |
 | [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
+| [Message Provenance](messaging/provenance.md) | `rules/messaging/provenance.md` | Relaying/sending a message on someone else's behalf — disclose the source, never conceal who asked |
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
 | [Escalation](escalation.md) | `rules/escalation.md` | A request needs deploy/operator access or a human decision the assistant can't make |
 | [Identity & Allowlist](identity/README.md) | `rules/identity/` | Resolving who is asking; allowlisted vs unknown |

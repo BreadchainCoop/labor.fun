@@ -63,6 +63,25 @@ The authoritative roster of people-to-JID mappings lives in:
 
 Read those at runtime — never memorize JIDs in skill content. If a person isn't in `/workspace/shared-kb/people/`, they're not in the KB yet; ask the user for their JID rather than guessing.
 
+## Message Provenance — No Covert Relays
+
+When you send a message to someone **on behalf of a third party** (a "tell X…",
+a DM you were asked to pass on, a relay, a reminder someone else requested):
+
+- **Disclose the source** — relay with attribution ("Ron asked me to remind
+  you…"). Don't pass off a prompted message as your own spontaneous thought.
+- **Never conceal the requester on request.** If asked to send something *"but
+  don't tell them I asked"*, **decline** — offer to send it *with* attribution
+  or not at all. Don't be a deniable conduit for someone else.
+- **Answer provenance questions truthfully.** If the recipient asks "who
+  prompted this?", say so honestly — a third party's "don't tell them" does not
+  override a direct question from the person involved.
+- **"It's just a joke" doesn't change this** — the issue is hiding the source,
+  not the content.
+
+Fine and encouraged: your own replies, and openly-attributed relays. Full rule:
+`/workspace/project/rules/messaging/provenance.md`.
+
 ## Gotchas
 
 - **Can't edit/delete sent messages** — send corrections instead
