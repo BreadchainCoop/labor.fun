@@ -341,9 +341,8 @@ Each process follows the seven-layer template described in `docs/workflows/`:
 | 6 | Agent instructions | Appended to `groups/<name>/CLAUDE.md` or rule docs |
 | 7 | Container skill (optional) | `container/skills/<process>/` for deeper logic |
 
-Two processes are fully specified today:
+The reference process specified today:
 
-- **Maintenance requests** — `docs/workflows/maintenance-requests.md`. "Something is broken" → MR-NNN → triaged → in_progress → resolved.
 - **Expense flows** — `docs/expense-flows.md`. Prospective request → approval → receipt → reimbursement; retrospective submission → approval → reimbursement.
 
 When you build a new process, copy the template, fill in all seven layers, and update the routing rules so the classifier sends matching requests to your handler.
@@ -566,20 +565,20 @@ The agent:
 
 You can edit the markdown directly, or drag the card in the kb-ui swim-lane.
 
-### 13.3 "I want to report something broken"
+### 13.3 "I want to file a reimbursement"
 
 ```
-@Breadbrich Engels the shower in room 4 is leaking
+@Breadbrich Engels I spent $40 on lunch for the working group — receipt attached
 ```
 
 The agent:
 
-1. Classifies as `facility_maintenance`.
-2. Calls the IPC `report_maintenance_issue` tool with title, description, location (`room_4`), priority (`high`, inferred from "leak"), category (`plumbing`).
-3. The host creates an `MR-<timestamp>` row, writes the markdown record, and DMs the operations channel.
-4. Replies with the MR id.
+1. Classifies as `financial_tracking`.
+2. Runs the expense flow (`docs/expense-flows.md`): captures amount, description, and receipt, and files an expense record.
+3. The host writes the markdown record and routes it for approval.
+4. Replies with the expense id.
 
-Triage by any allowlisted user: `@Breadbrich Engels triage MR-XYZ to me`. Status updates: `@Breadbrich Engels mark MR-XYZ resolved, fixed the gasket`.
+Any allowlisted user can check status or approve per the expense-flows doc.
 
 ### 13.4 "I want to request reimbursement for catering"
 
