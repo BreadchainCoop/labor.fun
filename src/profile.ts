@@ -48,6 +48,17 @@ export interface ProfileConfig {
   /** IANA timezone for scheduling/formatting. */
   timezone?: string;
   /**
+   * Where to escalate things the agent can't do from its container (deploy /
+   * infra changes, framework feature requests, cross-system coordination).
+   * Identity-agnostic — set per org instead of hardcoding admin names in
+   * CLAUDE.md. `escalationContact` is a KB person slug to tag/loop in;
+   * `escalationChannel` is a registered chat JID to post the summary to.
+   * See `rules/escalation.md`. Either may be empty (escalation then degrades
+   * to "tell the user it needs a human with deploy access").
+   */
+  escalationContact?: string;
+  escalationChannel?: string;
+  /**
    * Container skills to enable for this org that ship disabled by default.
    * A skill declares itself opt-in with `default: false` in its SKILL.md
    * frontmatter; such skills are only synced into this org's containers when
