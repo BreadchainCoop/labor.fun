@@ -28,7 +28,6 @@ When you need the deepest detail, those files link out to the canonical existing
 | Debug checklist | [`docs/DEBUG_CHECKLIST.md`](../DEBUG_CHECKLIST.md) |
 | Workflow spec template | [`docs/workflows/`](../workflows/) |
 | Expense lifecycle | [`docs/expense-flows.md`](../expense-flows.md) |
-| Maintenance request lifecycle | [`docs/workflows/maintenance-requests.md`](../workflows/maintenance-requests.md) |
 | Top-level operating rules | [`CLAUDE.md`](../../CLAUDE.md) |
 | Rules index | [`rules/INDEX.md`](../../rules/INDEX.md) |
 | Group config (per group) | `groups/<name>/CLAUDE.md` |

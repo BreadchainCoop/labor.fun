@@ -22,15 +22,15 @@ identities:
 request_types:
   - task_management          # create, update, close, query tasks
   - event_logging            # calendar entries, scheduling
-  - facility_maintenance     # repairs, issues, physical space
-  - financial_tracking       # payments, receipts, budgets, reimbursements
+  - code_operations          # github issues, PRs, actions, reviews
+  - financial_tracking       # payments, receipts, budgets, reimbursements, payouts
   - information_retrieval    # KB queries, lookups, summaries
   - credential_access        # logins, onboarding, permissions
   - cross_channel_delegation # relay, coordinate across chats
   - reminder_scheduling      # time-based nudges
   - content_generation       # drafts, plans, documents
-  - people_management        # residency, room assignments, team changes
-  - purchasing_supplies      # shopping, inventory
+  - transcript_processing    # meeting notes, action-item extraction
+  - people_management        # onboarding, roles, team changes
   - meta_bot_management      # breadbrich feature requests, debugging
   - casual_social            # no action needed — react only
 
@@ -200,10 +200,10 @@ rules:
     post_hooks:
       - mirror_to_source_chat    # sender sees confirmation in their origin chat
 
-  # ─── FACILITIES / MAINTENANCE ─────────────────────────────────────
-  - id: facility_report
+  # ─── CODE / GITHUB ────────────────────────────────────────────────
+  - id: code_report
     match:
-      request_type: facility_maintenance
+      request_type: code_operations
     route: big_breadbrich
     auth: any
     share_back:
@@ -211,7 +211,6 @@ rules:
       - related_open_issues
     log_to: kb_audit_log
     post_hooks:
-      - notify_ops_coordinators
       - update_memory_pointer_index
 
   # ─── EVENTS + CALENDAR ────────────────────────────────────────────
