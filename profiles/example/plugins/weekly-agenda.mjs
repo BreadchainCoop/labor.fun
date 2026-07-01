@@ -207,15 +207,18 @@ function kickoffPost(weekKey, facilitator, slugs, mentions, docUrl, correctorUrl
 }
 
 function escalationPost(slug, asks, weekKey, mentions) {
-  // Recovery-oriented, not a call-out: the most common cause of an "unfilled"
-  // section is an update that was sent but never filed (see the file-an-update
-  // routine). Offer the self-heal path and stop nudging — never frame it as the
-  // person being behind. (Aligns with the shared-mirror voice rule.)
+  // Recovery-oriented, not a call-out. Crucially: the build ALWAYS pre-drafts
+  // every owner's section from GitHub, so "unfilled" here means "not yet
+  // confirmed/corrected by the owner" — NOT "missing from the doc". Say that
+  // accurately: telling someone their entries are "missing" when they're
+  // sitting in the doc is both wrong and demoralizing. Offer the self-heal path
+  // and stop nudging — never frame it as the person being behind. (Aligns with
+  // the shared-mirror voice rule.)
   const who = mentionFor(slug, mentions);
   return (
-    `📝 I don't have ${who}'s agenda section for ${weekKey} yet, and I've stopped DMing them. ` +
-    `If you already shared an update and it isn't in the doc, it may not have been filed — ` +
-    `${who}, just reply "file my agenda update" (restating it) and I'll capture it. No rush.`
+    `📝 ${who} hasn't confirmed their agenda section for ${weekKey} yet, and I've stopped DMing them. ` +
+    `I draft a starting point from GitHub, so their section may already be filled in — it just isn't confirmed. ` +
+    `${who}: if it looks right, nothing to do; if something's off or missing, reply "file my agenda update" (restating it) and I'll capture it. No rush.`
   );
 }
 
@@ -224,14 +227,15 @@ function askText(weekKey, projects, askNumber, docUrl) {
   const link = docUrl ? ` ${docUrl}` : '';
   if (askNumber === 1) {
     return (
-      `Hi! Weekly Core Meeting on ${weekKey} — time to fill in your agenda section${sections}. ` +
-      `Reply here with your update(s) and I'll drop them into the agenda doc${link}. ` +
-      `A few bullets is plenty. I'll check back until I hear from you (silence isn't consent 🙂).`
+      `Hi! Weekly Core Meeting on ${weekKey} — I've drafted your agenda section${sections} from GitHub; ` +
+      `please review and confirm or correct it${link}. ` +
+      `Reply with edits/additions (a few bullets is plenty) or "looks good" to confirm — GitHub only shows part of the work, so add what it missed. ` +
+      `I'll check back until I hear from you (silence isn't consent 🙂).`
     );
   }
   return (
-    `Reminder ${askNumber - 1} — still need your agenda update${sections} for ${weekKey}. ` +
-    `Reply here and I'll file it into the doc. ` +
+    `Reminder ${askNumber - 1} — still need you to confirm or correct your drafted agenda section${sections} for ${weekKey}. ` +
+    `Reply with any edits or "looks good" and I'll update the doc. ` +
     `(Already replied but it wasn't filed? Say "file my agenda update" and restate it.)`
   );
 }
