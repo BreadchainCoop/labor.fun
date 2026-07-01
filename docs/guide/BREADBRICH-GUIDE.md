@@ -123,7 +123,7 @@ Top-level source layout:
 | `src/container-runtime.ts` | Lifecycle: spawn, watch, time out, GC orphans. |
 | `src/group-queue.ts` | Per-group serial queue plus a global concurrency cap. |
 | `src/task-scheduler.ts` | Polls `scheduled_tasks` every 60 seconds, spawns one container per due task. |
-| `src/ipc.ts` | Watches the IPC fifo/dir, dispatches container requests to handlers (create_task, send_message, expense_create, maintenance_report, etc.). |
+| `src/ipc.ts` | Watches the IPC fifo/dir, dispatches container requests to handlers (create_task, send_message, expense_request, safe_payout_request, etc.). |
 | `src/credential-proxy.ts` | Bridges OneCLI Agent Vault into agent traffic. |
 | `src/mount-security.ts` | Validates mount paths against the external allowlist. |
 | `kb-ui/server.mjs` | Express app serving the KB and the Projects/Admin dashboards (separate `breadbrich-kb` service). |
@@ -172,7 +172,7 @@ Take a concrete case: a member of `slack_main` types `@Breadbrich Engels please 
 2. **Message loop** (`src/index.ts`) polls every 2 seconds for messages newer than the `router_state` cursor for `slack_main`.
 3. **Trigger check** (`src/router.ts`) — non-main group, so the leading `@Breadbrich Engels` (case-insensitive) is required. The trigger matches; the message is queued for `slack_main`.
 4. **Group queue** (`src/group-queue.ts`) serializes per-group invocations and applies the global concurrency cap (default 5).
-5. **Identity resolution** (`src/permissions.ts`) — the sender's Slack user id is looked up in `user_identities` and mapped to a KB person name (e.g. `bob`). If the sender is unknown, they are treated as a guest.
+5. **Identity resolution** (`src/permissions.ts`) — the sender's Slack user id is looked up in `user_identities` and mapped to a KB person slug (e.g. `jane-doe`). If the sender is unknown (not in the allowlist), they get no privileged access — read-only on open docs.
 6. **Container spawn** (`src/container-runner.ts`) — builds the `docker run` (or `container run`) command, mounting `groups/slack_main/`, `groups/global/`, `store/` (main only), and the container skills. Resumes the SDK session for `slack_main` from `data/sessions/slack_main/.claude/`.
 7. **Agent loop** — the Claude Agent SDK starts. The agent reads the group's `CLAUDE.md`, any relevant KB documents, the available tools (including the IPC tool for `request_expense`), and the user's message.
 8. **Classifier (when present)** — a Haiku pre-pass classifies the request type (`expense_request` here) and confidence. Per `routing-rules.yaml`, casual requests can be short-circuited to emoji reactions; substantive requests proceed.
@@ -193,7 +193,7 @@ Breadbrich Engels maintains state in two complementary stores. Understanding the
 
 ### 6.1 The markdown KB
 
-Located at `groups/<name>/context/<category>/<doc>.md`. Categories include `people/`, `tasks/`, `calendar/`, `artifacts/`, `projects/`, and `maintenance/`. Files have a YAML frontmatter:
+Located at `groups/<name>/context/<category>/<doc>.md`. Categories include `people/`, `tasks/`, `calendar/`, `artifacts/`, and `projects/`. Files have a YAML frontmatter:
 
 ```markdown
 ---
@@ -293,7 +293,7 @@ A few things people expect to find in SQL but are actually stored as markdown do
 | **Projects** | `groups/<name>/context/projects/PROJECT-*.md`. The `/projects` dashboard in `kb-ui/server.mjs` reads these files directly. |
 | **People** | `groups/<name>/context/people/<name>.md`. (`user_identities` only maps platform ids to person *names*; the rich profile lives in the markdown.) |
 | **Tasks (human view)** | `groups/<name>/context/tasks/TASK-NNN.md`. (`scheduled_tasks` is the *executable* layer.) |
-| **Maintenance requests** | `groups/<name>/context/maintenance/MR-*.md`, plus a `maintenance_requests` table (specced in the workflow doc; check `tables.md` for current state). |
+| **Expenses** | `groups/<name>/context/artifacts/` records, plus the `expenses` table (see `docs/expense-flows.md`). On-chain payouts use the separate `safe_payouts` table. |
 
 For an authoritative list of every column and index, read `schema/tables.md`.
 
@@ -333,9 +333,9 @@ Each process follows the seven-layer template described in `docs/workflows/`:
 
 | Layer | What it is | Where it lives |
 |---|---|---|
-| 1 | Database schema | `schema/tables.md` (e.g. `maintenance_requests`, `expenses`) |
-| 2 | Container MCP tools | `container/skills/<process>/` (e.g. `report_maintenance_issue`) |
-| 3 | Host IPC handlers | `src/ipc.ts` case blocks (e.g. `maintenance_report`) |
+| 1 | Database schema | `schema/tables.md` (e.g. `expenses`, `safe_payouts`) |
+| 2 | Container MCP tools | `container/skills/<process>/` (e.g. `expense-helper` → `request_expense`) |
+| 3 | Host IPC handlers | `src/ipc.ts` case blocks (e.g. `expense_request`) |
 | 4 | Agent rules | `rules/<category>/` (authorization, priority, notifications) |
 | 5 | KB documents | `groups/<name>/context/<category>/<id>.md` |
 | 6 | Agent instructions | Appended to `groups/<name>/CLAUDE.md` or rule docs |
@@ -392,8 +392,8 @@ Anything below #1 that contradicts a rule is a bug.
 
 `docs/architecture/routing-rules.yaml` is the dispatcher. It defines:
 
-- **Identity groups** — `main_user`, `admins`, `coordinators`, `members`, `guests`, `system`.
-- **Request types** — about a dozen, including `task_management`, `event_logging`, `facility_maintenance`, `financial_tracking`, `information_retrieval`, `credential_access`, `cross_channel_delegation`, `reminder_scheduling`, `content_generation`, `people_management`, `purchasing_supplies`, `meta_bot_management`, `casual_social`.
+- **Identity groups** — `allowlisted` (the `people/` allowlist — full access) and `system`; unregistered senders are `any` (read-only on open docs). There are no admin/coordinator/guest tiers — the access model is flat.
+- **Request types** — about a dozen, including `task_management`, `event_logging`, `code_operations`, `financial_tracking`, `information_retrieval`, `credential_access`, `cross_channel_delegation`, `reminder_scheduling`, `content_generation`, `transcript_processing`, `people_management`, `meta_bot_management`, `casual_social`.
 - **Urgency levels** — `immediate`, `normal`, `low`.
 - **Rules (top-down)** — each with `match` predicates (request_type, action, classifier confidence, sender role), a `route` (typically `big_breadbrich` or `reaction_only`), an `auth` clause (which identity groups are allowed), a `share_back` list (what fields the response includes), and `post_hooks`.
 - **Visibility filters** — applied to the share_back payload so private/restricted docs are not leaked back to senders who can't see them.

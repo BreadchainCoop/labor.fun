@@ -9,13 +9,11 @@
 version: 1
 updated: 2026-04-21
 
-# Sender identity groups — referenced by rules below
+# Sender identity groups — referenced by rules below. The access model is FLAT:
+# an allowlisted member has full access, there are no admin/coordinator tiers.
 identities:
-  main_user: [<main-user>] # superadmin
-  admins: [<admin-1>, <admin-2>]
-  coordinators: [<coordinator-1>, <coordinator-2>]
-  members: [<member-1>, <member-2>, <member-3>]
-  guests: [] # transient, not registered
+  allowlisted: [<member-1>, <member-2>, <member-3>] # the people/ allowlist — full access
+  # unregistered senders aren't listed here — rules use `auth: any` to include them (read-only on open docs)
   system: [orchestrator, observer, reflector, curator, scheduler]
 
 # Request type taxonomy — what the classifier can output
@@ -104,7 +102,7 @@ rules:
       request_type: information_retrieval
       scope: cross_chat
     route: big_breadbrich
-    auth: [admins, coordinators, main_user]
+    auth: allowlisted
     share_back:
       - kb_filtered_by_visibility_across_chats
     log_to: request_log
@@ -131,7 +129,7 @@ rules:
       request_type: task_management
       action: [update, close, reopen]
     route: big_breadbrich
-    auth: [owners_of_target_task, admins, coordinators]
+    auth: [owners_of_target_task, allowlisted]
     share_back:
       - confirmation
     log_to: kb_audit_log
@@ -154,9 +152,9 @@ rules:
       request_type: people_management
       action: query
     route: big_breadbrich
-    auth: [admins, main_user]
+    auth: allowlisted
     share_back:
-      - person_profile_redacted  # tg_ids hidden for non-admins
+      - person_profile_redacted  # tg_ids hidden for non-allowlisted
     log_to: kb_audit_log
     post_hooks: []
 
@@ -165,7 +163,7 @@ rules:
       request_type: people_management
       action: [create, update, delete]
     route: big_breadbrich
-    auth: [admins, main_user]
+    auth: allowlisted
     deny_conditions:
       - action: delete          # no actual deletion — status change only per memory rule
     share_back:
@@ -184,7 +182,7 @@ rules:
       - approval_status
     log_to: kb_audit_log
     post_hooks:
-      - route_to_approval_chain  # coordinator/admin gets DM
+      - route_to_approval_chain  # an allowlisted approver gets DM
       - update_budget_tracking
 
   # ─── CROSS-CHANNEL DELEGATION ─────────────────────────────────────
@@ -193,7 +191,7 @@ rules:
       request_type: cross_channel_delegation
       action: send
     route: big_breadbrich
-    auth: [admins, main_user]
+    auth: allowlisted
     share_back:
       - delivery_receipt
     log_to: kb_audit_log
@@ -267,7 +265,7 @@ rules:
       request_type: credential_access
       chat_type: [dm]
     route: big_breadbrich
-    auth: [admins, main_user]    # even in DM, only admins can ask
+    auth: allowlisted    # even in DM, only allowlisted users can ask
     share_back:
       - credential_reference_not_value  # return path/pointer, not actual secret
     log_to: kb_audit_log
@@ -277,7 +275,7 @@ rules:
     match:
       request_type: meta_bot_management
     route: big_breadbrich
-    auth: [main_user, admins]
+    auth: allowlisted
     share_back:
       - debug_output
     log_to: request_log
@@ -329,9 +327,9 @@ post_hooks:
 visibility_filter:
   rules:
     - if: "frontmatter.visibility == 'private'"
-      then: "only_if_sender_in_editable_by OR sender is admin"
+      then: "only_if_sender_in_editable_by OR sender is allowlisted"
     - if: "frontmatter.visibility == 'restricted'"
-      then: "only_if_sender_in_tags_of_file OR sender is admin"
+      then: "only_if_sender_in_tags_of_file OR sender is allowlisted"
     - if: "frontmatter.visibility == 'open'"
       then: "any"
 
