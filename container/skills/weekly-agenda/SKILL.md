@@ -72,9 +72,10 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
      date + owner.
    - `🧑‍🏭 Contributor Pipeline`
    - `‼️ Urgent Topics`
-   - `🌱 Active Projects` — a collective **"shipped this week" changelog**, one
-     bold sub-heading per **owners** entry, labelled `• <Project> — <owner name>`,
-     with the pre-fill below under each.
+   - `🌱 Active Projects` — a collective "shipped this week" changelog. Give each
+     **owners** entry its own `HEADING_3` sub-heading reading `<Project> — <owner name>`
+     — a real heading, with **no** leading "•" character and **no** manual bold (the
+     heading style is the emphasis). Put the pre-fill below each.
    - `🎉 Appreciations — 3 MINIMUM`
    - `💰 Other topics / Upcoming Time Off`
    Put the facilitator on the header line (`Facilitator: <name>`), or
@@ -95,11 +96,23 @@ Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
      (Community/Events) if a calendar is configured.
    Terse but informative — one line per bullet. Give owners real signal to build
    on; never let an empty section read as a judgement.
-5. **Formatting quality.** Use the Docs API to make **real** bulleted lists
-   (`createParagraphBullets`) and **real hyperlinks** (`updateTextStyle` with a
-   `link.url` over the title text — never paste raw URLs). Bold the project and
-   priority labels. One line per bullet. It should read like a polished agenda a
-   facilitator can run the meeting from.
+5. **Formatting quality — readable, clearly-sectioned, sparing bold.** The bar is
+   *easy to read* (facilitator feedback: "everything is in bold and there are no
+   clear sections"). So:
+   - **Sections come from heading styles, not bold.** Doc title = `HEADING_1`;
+     every top-level section (🏁 Check In, ✍️ Revise Agenda, 📣 This Week in Brief,
+     🎯 Goals Review, 📅 Upcoming Deadlines, 🧑‍🏭 Contributor Pipeline, ‼️ Urgent
+     Topics, 🌱 Active Projects, 🎉 Appreciations, 💰 Other topics) = `HEADING_2`;
+     each project under Active Projects = `HEADING_3`. The heading style *is* the
+     section break — don't also bold heading text or prefix it with "•".
+   - **Body is normal weight — do NOT bold everything.** Priority labels, project
+     names, owner names, and whole bullets stay **un-bold**. Bold at most a single
+     short lead-in word where it genuinely aids scanning, never a whole line. If the
+     doc looks mostly bold, you've overdone it — strip it back.
+   - **Real bullets** (`createParagraphBullets`), one line each; **real hyperlinks**
+     (`updateTextStyle` `link.url` over the `title (#num)` text — never raw URLs).
+   It should read like a clean, skimmable agenda: clear heading sections, light on
+   bold, that a facilitator can run the meeting from.
 6. **Verify, then mark done.** Re-read the **This Week** tab and confirm the
    real content landed — the dated header, the **Goals Review** bullets, the
    **Upcoming Deadlines** list, and the per-project activity (not just empty
