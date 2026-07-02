@@ -95,6 +95,22 @@ describe('parseConfig', () => {
     const c = parseConfig('---\nmembers: [a, b, c]\nchannel_jid: dc:1\n---');
     expect(c.assignments).toBeNull();
   });
+
+  it('reads the optional collaborators map, null when absent', () => {
+    const c = parseConfig(
+      [
+        '---',
+        'members: [a, b, c]',
+        'channel_jid: dc:1',
+        'collaborators:',
+        '  a: [c]',
+        '---',
+      ].join('\n'),
+    );
+    expect(c.collaborators).toEqual({ a: ['c'] });
+    const bare = parseConfig('---\nmembers: [a, b]\nchannel_jid: dc:1\n---');
+    expect(bare.collaborators).toBeNull();
+  });
 });
 
 describe('computeAssignments (round-robin)', () => {
@@ -117,6 +133,116 @@ describe('computeAssignments (round-robin)', () => {
   it('degrades gracefully when there are too few members for `count`', () => {
     expect(computeAssignments(['a', 'b'], 2)).toEqual({ a: ['b'], b: ['a'] });
     expect(computeAssignments(['a'], 2)).toEqual({ a: [] });
+  });
+
+  it('with no collaboration data, hybrid output is EXACTLY the old round-robin', () => {
+    const members = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const legacy = {
+      a: ['b', 'c'],
+      b: ['c', 'd'],
+      c: ['d', 'e'],
+      d: ['e', 'f'],
+      e: ['f', 'a'],
+      f: ['a', 'b'],
+    };
+    expect(computeAssignments(members, 2)).toEqual(legacy);
+    expect(computeAssignments(members, 2, null)).toEqual(legacy);
+    expect(computeAssignments(members, 2, {})).toEqual(legacy);
+  });
+});
+
+describe('computeAssignments (collaboration-seeded hybrid, issue #135)', () => {
+  // Invariants that must hold for ANY input: everyone reviews exactly
+  // min(count, n-1) people, is reviewed the same number of times, never
+  // themselves, never the same pair twice.
+  function checkBalance(asg, members, count) {
+    const per = Math.min(count, members.length - 1);
+    const received = Object.fromEntries(members.map((m) => [m, 0]));
+    for (const [reviewer, reviewees] of Object.entries(asg)) {
+      expect(reviewees).toHaveLength(per);
+      expect(new Set(reviewees).size).toBe(reviewees.length); // no dup pairs
+      expect(reviewees).not.toContain(reviewer); // no self
+      for (const r of reviewees) received[r] += 1;
+    }
+    for (const m of members) expect(received[m]).toBe(per);
+  }
+
+  it('assigns collaborators instead of alphabetical neighbors (issue #135 case)', () => {
+    // Mirrors the mispairing from the issue: rathermercurial-eth got roloide +
+    // ron purely by alphabet, while their actual collaborators (unai-mettodo,
+    // marv) weren't assigned at all.
+    const members = [
+      'marv',
+      'otreblig',
+      'rade',
+      'rathermercurial-eth',
+      'roloide',
+      'ron',
+      'unai-mettodo',
+    ];
+    const collaborators = { 'rathermercurial-eth': ['unai-mettodo', 'marv'] };
+    const asg = computeAssignments(members, 2, collaborators);
+    expect(asg['rathermercurial-eth'].sort()).toEqual(['marv', 'unai-mettodo']);
+    checkBalance(asg, members, 2);
+  });
+
+  it('treats collaboration edges as symmetric (one direction listed is enough)', () => {
+    const members = ['a', 'b', 'c', 'd'];
+    // Only a lists d — d should still prefer a right back.
+    const asg = computeAssignments(members, 2, { a: ['d'] });
+    expect(asg.a).toContain('d');
+    expect(asg.d).toContain('a');
+    checkBalance(asg, members, 2);
+  });
+
+  it('fills non-collaborator slots round-robin without losing balance', () => {
+    const members = ['a', 'b', 'c', 'd', 'e'];
+    const asg = computeAssignments(members, 2, { a: ['c'] });
+    // a's collab slot is honored (both directions); the rest is roster fill.
+    expect(asg.a).toContain('c');
+    expect(asg.c).toContain('a');
+    checkBalance(asg, members, 2);
+  });
+
+  it('ignores unknown slugs and self-edges in the collaborators map', () => {
+    const members = ['a', 'b', 'c', 'd'];
+    const asg = computeAssignments(members, 2, {
+      a: ['a', 'zed', 'c'],
+      ghost: ['b'],
+    });
+    expect(asg.a).toContain('c');
+    checkBalance(asg, members, 2);
+  });
+
+  it('keeps balance invariants on odd-sized and small cohorts', () => {
+    const cases = [
+      { members: ['a', 'b', 'c'], collab: { a: ['c'] } },
+      { members: ['a', 'b', 'c', 'd'], collab: { a: ['c'], b: ['d'] } },
+      {
+        members: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+        // Two tight cliques — everyone's preferences point inward.
+        collab: {
+          a: ['b', 'c', 'd'],
+          b: ['c', 'd'],
+          c: ['d'],
+          e: ['f', 'g', 'h'],
+          f: ['g', 'h'],
+          g: ['h'],
+        },
+      },
+    ];
+    for (const { members, collab } of cases) {
+      checkBalance(computeAssignments(members, 2, collab), members, 2);
+    }
+  });
+
+  it('is deterministic for a given input', () => {
+    const members = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    const collab = { a: ['e', 'f'], b: ['g'], c: ['a'] };
+    const first = computeAssignments(members, 2, collab);
+    for (let i = 0; i < 5; i++) {
+      expect(computeAssignments(members, 2, collab)).toEqual(first);
+    }
   });
 });
 
@@ -616,6 +742,33 @@ describe('tick — filesystem integration against a temp profile', () => {
     tick({ profileDir, logger, nowMs: JUNE_20 });
     expect(readIpc('tasks').filter((t) => t.type === 'dm_user')).toHaveLength(3);
     expect(readIpc('messages')).toHaveLength(1);
+  });
+
+  it('uses collaborators from config.md when computing assignments', () => {
+    fs.writeFileSync(
+      path.join(ctxDir(), 'peer-reviews', 'config.md'),
+      [
+        '---',
+        'members: [alice, bob, carol, dave]',
+        'channel_jid: dc:999',
+        'collaborators:',
+        '  alice: [carol]',
+        '---',
+      ].join('\n'),
+    );
+    tick({ profileDir, logger, nowMs: JUNE_20 });
+    const state = JSON.parse(
+      fs.readFileSync(
+        path.join(ctxDir(), 'peer-reviews', 'state', '2026-Q2.json'),
+        'utf-8',
+      ),
+    );
+    expect(state.assignments).toEqual(
+      computeAssignments(['alice', 'bob', 'carol', 'dave'], 2, {
+        alice: ['carol'],
+      }),
+    );
+    expect(state.assignments.alice).toContain('carol');
   });
 
   it('a filed self-eval + reviews drop those items from the next nudge', () => {
