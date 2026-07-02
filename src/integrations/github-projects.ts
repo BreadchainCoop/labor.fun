@@ -86,6 +86,14 @@ export interface OrgSyncResult {
   org: string;
   projects: NormalizedProject[];
   items: NormalizedProjectItem[];
+  /**
+   * True when the pull captured EVERYTHING in the org — no project or item
+   * connection reported another page beyond the fetched window. A truncated
+   * pull still yields useful additive writes, but the caller must NOT run a
+   * delete-reconcile pass against it (#112): items beyond the window weren't
+   * touched this run and would look stale.
+   */
+  complete: boolean;
 }
 
 interface GraphQLError {
@@ -132,6 +140,7 @@ const buildProjectsQuery = (includeEdges: boolean): string => `
 query OrgProjects($org: String!) {
   organization(login: $org) {
     projectsV2(first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage }
       nodes {
         id
         number
@@ -141,6 +150,7 @@ query OrgProjects($org: String!) {
         readme
         updatedAt
         items(first: 100) {
+          pageInfo { hasNextPage }
           nodes {
             id
             type
@@ -257,6 +267,10 @@ interface RawItem {
   fieldValues: { nodes: RawFieldValue[] };
 }
 
+interface RawPageInfo {
+  hasNextPage?: boolean;
+}
+
 interface RawProject {
   id: string;
   number: number;
@@ -265,15 +279,18 @@ interface RawProject {
   closed: boolean;
   readme: string | null;
   updatedAt: string;
-  items: { nodes: RawItem[] };
+  items: { pageInfo?: RawPageInfo; nodes: RawItem[] };
 }
 
 interface RawData {
-  organization: { projectsV2: { nodes: RawProject[] } } | null;
+  organization: {
+    projectsV2: { pageInfo?: RawPageInfo; nodes: RawProject[] };
+  } | null;
 }
 
-/** Slug a string into something safe for an ID/filename. */
-function slug(s: string): string {
+/** Slug a string into something safe for an ID/filename. Exported so the
+ * sync engine can build per-org filename prefixes that match the IDs. */
+export function slug(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
@@ -592,15 +609,26 @@ export async function fetchOrgProjects(
       fetchImpl,
     );
   }
-  const raw = data?.organization?.projectsV2.nodes ?? [];
+  const conn = data?.organization?.projectsV2;
+  const raw = conn?.nodes ?? [];
   const projects: NormalizedProject[] = [];
   const items: NormalizedProjectItem[] = [];
+  // Absent pageInfo (older mocks / degraded responses) is treated as
+  // complete — that matches the pre-#112 behavior of trusting the window.
+  let complete = !conn?.pageInfo?.hasNextPage;
   for (const rp of raw) {
     projects.push(normalizeProject(org, rp));
+    if (rp.items.pageInfo?.hasNextPage) {
+      complete = false;
+      logger.warn(
+        { org, project: rp.title, number: rp.number },
+        'GH sync: project has more items than the fetched window — pull marked incomplete',
+      );
+    }
     for (const ri of rp.items.nodes) {
       const norm = normalizeItem(org, rp, ri);
       if (norm) items.push(norm);
     }
   }
-  return { org, projects, items };
+  return { org, projects, items, complete };
 }
