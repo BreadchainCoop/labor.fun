@@ -116,6 +116,14 @@ export interface ContainerInput {
    * model without changing global config. Unset = current global behavior.
    */
   modelOverride?: string;
+  /**
+   * The caller will stop this container itself (docker kill/stop by name) once
+   * the result marker has streamed — the Smithers bridge does this because the
+   * agent-runner lingers after its one-shot result. A non-zero exit after
+   * streamed output is then expected teardown, logged at info instead of the
+   * usual 'Container exited with error'. Unset = current behavior.
+   */
+  expectExternalStop?: boolean;
 }
 
 export interface ContainerOutput {
@@ -897,17 +905,26 @@ export async function runContainerAgent(
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
       if (code !== 0) {
-        logger.error(
-          {
-            group: group.name,
-            code,
-            duration,
-            stderr,
-            stdout,
-            logFile,
-          },
-          'Container exited with error',
-        );
+        // A caller that stops its own container (Smithers bridge) makes a
+        // non-zero exit after streamed output expected teardown, not a fault.
+        if (input.expectExternalStop && hadStreamingOutput) {
+          logger.info(
+            { group: group.name, code, duration },
+            'Container stopped externally after output (expected)',
+          );
+        } else {
+          logger.error(
+            {
+              group: group.name,
+              code,
+              duration,
+              stderr,
+              stdout,
+              logFile,
+            },
+            'Container exited with error',
+          );
+        }
 
         resolve({
           status: 'error',

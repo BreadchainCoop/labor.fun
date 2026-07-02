@@ -36,6 +36,28 @@
 import type { ModelSpec } from '../model-router';
 
 /**
+ * ── DIAGNOSTIC: deterministic escalation test (#123) ────────────────────────
+ * With LABOR_FORCE_CHEAP_SCHEMA_FAIL=1 set on the sidecar process, every
+ * cheap-tier agent returns this deliberately unparseable text INSTEAD of
+ * running a container. The engine's JSON.parse of `result.text` then fails
+ * (which fails the step's Zod schema by definition, whatever the schema), so
+ * the `agent={[cheap, strong]}` chain deterministically advances to the strong
+ * tier. Inert in production: flag unset ⇒ zero behavior change.
+ *
+ * Not valid JSON on purpose — do not wrap in braces/quotes.
+ */
+export const FORCED_SCHEMA_FAIL_TEXT =
+  'FORCED SCHEMA FAILURE (LABOR_FORCE_CHEAP_SCHEMA_FAIL=1): deliberately ' +
+  'schema-invalid output from the cheap tier to exercise cheap->strong ' +
+  'escalation. This text is intentionally not JSON.';
+
+/** Read at call time (not module load) so tests/operators can toggle it. */
+function forceCheapSchemaFail(): boolean {
+  const v = process.env.LABOR_FORCE_CHEAP_SCHEMA_FAIL;
+  return v === '1' || v === 'true';
+}
+
+/**
  * Port for the host-side container runner. We inject it rather than importing
  * src/container-runner directly so this package stays decoupled from the
  * framework's build layout (same principle as the out-of-tree plugin API).
@@ -102,6 +124,20 @@ export class ContainerAgent {
   async generate(
     args?: GenerateArgs,
   ): Promise<{ text: string; response: { modelId: string } }> {
+    // Deterministic escalation test (#123): short-circuit the cheap tier with
+    // unparseable output — no container run, no model cost — and let the
+    // engine's schema validation advance the fallback chain to strong.
+    if (this.spec.label === 'cheap' && forceCheapSchemaFail()) {
+      console.error(
+        `[escalation-test] ${this.id}: LABOR_FORCE_CHEAP_SCHEMA_FAIL is set — ` +
+          `returning schema-invalid output; expect the engine to advance to the next tier`,
+      );
+      return {
+        text: FORCED_SCHEMA_FAIL_TEXT,
+        response: { modelId: `${this.spec.model} (forced-schema-fail)` },
+      };
+    }
+
     const prompt =
       args?.prompt ??
       (Array.isArray(args?.messages)

@@ -92,6 +92,29 @@ The "smithers skill" (installed by `bunx smithers-orchestrator init`) is what
 lets the **agent itself** author/launch/resume these workflows from chat ("smithers,
 process this transcript") rather than us hand-running the CLI.
 
+### Deterministic escalation test (#123)
+
+Escalation was first observed organically; to demonstrate it **on demand**, set
+`LABOR_FORCE_CHEAP_SCHEMA_FAIL=1` on the sidecar process. Every cheap-tier
+`ContainerAgent` then returns deliberately unparseable text *without running a
+container* (zero model cost), the engine's JSON-parse/Zod validation fails, and
+the `agent={[cheap, strong]}` chain advances to strong — which runs normally
+and completes the step. Flag unset ⇒ zero behavior change.
+
+```bash
+# on the host running the sidecar (bridge enabled on the orchestrator):
+cd orchestration
+LABOR_FORCE_CHEAP_SCHEMA_FAIL=1 bun run transcript   # or: bunx smithers-orchestrator up workflows/transcript.tsx
+```
+
+Expected in the run log: an `[escalation-test] container:<group>:cheap` line
+per cheap step (parse, render), followed by the step succeeding at
+`container:<group>:strong` — confirm via `bunx smithers-orchestrator ps` /
+inspect (the forced attempt reports `modelId: … (forced-schema-fail)`). The
+agent-side flag behavior is unit-tested locally
+(`orchestration/agents/container-agent.test.ts`); the engine's chain-advance
+runs in the remote sidecar.
+
 ## Plugging in local inference
 
 This is the design's payoff. To route bulk steps at a local model, edit **one**

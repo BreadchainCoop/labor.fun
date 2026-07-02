@@ -958,6 +958,9 @@ async function main(): Promise<void> {
               isScheduledTask: true,
               modelOverride,
               allowedTools,
+              // We stop the container ourselves below — keep the runner from
+              // logging the resulting non-zero exit as an error.
+              expectExternalStop: true,
             },
             (_p, name) => {
               containerName = name;
