@@ -180,12 +180,18 @@ function readSyncedAt(filePath: string): string | null {
   }
 }
 
-function reconcile(dir: string, prefixes: string[], syncStart: string): number {
+function reconcile(
+  dir: string,
+  prefixes: string[],
+  syncStart: string,
+  excludePrefixes: string[] = [],
+): number {
   if (!fs.existsSync(dir)) return 0;
   let deleted = 0;
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith('.md')) continue;
     if (!prefixes.some((p) => f.startsWith(p))) continue;
+    if (excludePrefixes.some((p) => f.startsWith(p))) continue;
     const full = path.join(dir, f);
     const synced = readSyncedAt(full);
     if (synced && synced < syncStart) {
@@ -355,19 +361,27 @@ export async function runGitHubProjectSync(
       'GH sync: incomplete pulls — reconciling only fully-pulled orgs',
     );
     // Per-org checkpoint: files are namespaced GH-<org>-/GHD-<org>-/GHP-<org>-
-    // (ids embed slug(org)), so a scoped prefix sweep is safe per org.
+    // (ids embed slug(org)), so a scoped prefix sweep is safe per org — EXCEPT
+    // when a sibling org's slug extends this one's (orgs "foo" and "foo-bar"
+    // both match the "GH-foo-" prefix), so those longer sibling prefixes are
+    // excluded from the sweep.
     for (const stat of stats) {
       if (!complete(stat)) continue;
       const orgSlug = slug(stat.org);
+      const siblingSlugs = stats
+        .map((s) => slug(s.org))
+        .filter((s) => s !== orgSlug && s.startsWith(`${orgSlug}-`));
       stat.itemsDeleted = reconcile(
         dirs.tasksDir,
         ITEM_ID_PREFIXES.map((p) => `${p}${orgSlug}-`),
         syncStart,
+        siblingSlugs.flatMap((s) => ITEM_ID_PREFIXES.map((p) => `${p}${s}-`)),
       );
       stat.projectsDeleted = reconcile(
         dirs.projectsDir,
         [`${PROJECT_ID_PREFIX}${orgSlug}-`],
         syncStart,
+        siblingSlugs.map((s) => `${PROJECT_ID_PREFIX}${s}-`),
       );
     }
   }

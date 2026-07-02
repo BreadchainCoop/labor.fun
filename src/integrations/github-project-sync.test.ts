@@ -783,4 +783,63 @@ describe('runGitHubProjectSync reconcile', () => {
     expect(fs.existsSync(staleBroken)).toBe(true);
     expect(fs.existsSync(staleBrokenProj)).toBe(true);
   });
+
+  it('a complete org never sweeps a hyphen-extending sibling org scope', async () => {
+    // "Org" completes while "Org-Sub" fails. GH-Org-Sub-* files start with the
+    // GH-Org- prefix, so without the sibling guard the complete Org sweep
+    // would false-delete the failed sibling's stale files.
+    configMock.GITHUB_PROJECT_SYNC_ORGS = ['Org', 'Org-Sub'];
+    const staleOk = path.join(tasksDir, 'GH-Org-repo-99.md');
+    fs.writeFileSync(
+      staleOk,
+      `---\nid: GH-Org-repo-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+    const staleSibling = path.join(tasksDir, 'GH-Org-Sub-repo-99.md');
+    fs.writeFileSync(
+      staleSibling,
+      `---\nid: GH-Org-Sub-repo-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+    const staleSiblingProj = path.join(projectsDir, 'GHP-Org-Sub-99.md');
+    fs.writeFileSync(
+      staleSiblingProj,
+      `---\nid: GHP-Org-Sub-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+
+    const fakeFetch = vi.fn(async (_url: unknown, init: unknown) => {
+      const body = JSON.parse((init as { body: string }).body);
+      if (body.variables.org === 'Org-Sub') {
+        return { ok: false, status: 500, text: async () => 'mid-pull crash' };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            organization: {
+              projectsV2: {
+                pageInfo: { hasNextPage: false },
+                nodes: [
+                  {
+                    ...makeRawProject(),
+                    items: {
+                      pageInfo: { hasNextPage: false },
+                      nodes: [makeIssueItem()],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      };
+    });
+
+    await runGitHubProjectSync(fakeFetch as unknown as typeof fetch);
+
+    // Org's own stale file went…
+    expect(fs.existsSync(staleOk)).toBe(false);
+    // …but the failed sibling's files survived despite the shared prefix.
+    expect(fs.existsSync(staleSibling)).toBe(true);
+    expect(fs.existsSync(staleSiblingProj)).toBe(true);
+  });
 });
