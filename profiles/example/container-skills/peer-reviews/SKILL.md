@@ -84,15 +84,25 @@ operation, then:
 
 1. **Stop if already done** — if `peer-reviews/<QUARTER>/meetings/<a>--<b>.md`
    exists, do nothing (avoids double-booking).
-2. Read both availability files; intersect the windows to find a slot that
-   works for both (default **30 minutes**). One meeting covers both review
-   directions if the pair reviews each other.
-3. **Create the calendar event** with both as attendees (emails from their
+2. **Read both people files** (`people/<slug>.md`) for each member's email and
+   `timezone` frontmatter. A missing timezone is never guessed — ask that
+   person in DM and use the org timezone for the draft in the meantime.
+3. Read both availability files (self-reported windows), then **check both
+   members' real Google Calendar free/busy** for the coming week via the gws
+   calendar tools — self-reported windows are coarse; the calendar is truth.
+4. **Pick the best slot, timezone-aware** (default **30 minutes**): it must be
+   free on BOTH calendars, inside both self-reported windows where given, and
+   within working hours (~09:00–18:00) in **each member's own timezone**. For
+   split-timezone pairs, prefer the overlap fairest to both (e.g. late-morning
+   for one / late-afternoon for the other), not just the first free gap. One
+   meeting covers both review directions if the pair reviews each other.
+5. **Create the calendar event** with both as attendees (emails from their
    people files; if one is missing, ask that person in DM and pause), title
    `Peer review: <a> ↔ <b> (<QUARTER>)`, short description. Let Google send the
    invites.
-4. DM both the booked time.
-5. **Record it**: write `peer-reviews/<QUARTER>/meetings/<a>--<b>.md` (the same
+6. DM both the booked time — **expressed in each recipient's own local
+   timezone** (e.g. "Wed 15:00 CET / 09:00 ET").
+7. **Record it**: write `peer-reviews/<QUARTER>/meetings/<a>--<b>.md` (the same
    `<a>--<b>` sorted-slug key from the task) via `modify_kb_file` with the
    booked time. **If you can't find an overlap or can't book**, DM both asking
    them to coordinate directly — and **still write that file** noting "manual

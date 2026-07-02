@@ -499,12 +499,19 @@ export function matchTaskIpc({ label, pair, channelJid, nowMs }) {
     `Schedule the peer-review meeting between ${a} and ${b} for ${label}. ` +
     `Use the peer-reviews skill (Booking a review meeting).\n\n` +
     `1. If ${base}/meetings/${key}.md already exists, STOP — it's handled.\n` +
-    `2. Read both availabilities: ${base}/availability/${a}.md and ${base}/availability/${b}.md.\n` +
-    `3. Find a 30-minute slot this week that works for both.\n` +
-    `4. Create a Google Calendar event (gws) titled "Peer review: ${a} ↔ ${b} (${label})" ` +
-    `with both as attendees (emails from their people files; if one is missing, ask them in DM).\n` +
-    `5. DM both the booked time.\n` +
-    `6. Record it at peer-reviews/${label}/meetings/${key}.md via modify_kb_file. ` +
+    `2. Read both people files (people/${a}.md, people/${b}.md) for each member's email AND ` +
+    `\`timezone\` frontmatter. If a timezone is missing, infer nothing — ask that person in DM ` +
+    `and fall back to the org timezone for the draft.\n` +
+    `3. Read both self-reported availabilities: ${base}/availability/${a}.md and ${base}/availability/${b}.md.\n` +
+    `4. Check both members' REAL Google Calendar free/busy (gws calendar tools) for the coming week.\n` +
+    `5. Pick the best 30-minute slot that is (a) free on BOTH calendars, (b) inside both ` +
+    `self-reported windows where given, and (c) within working hours (~09:00-18:00) in EACH ` +
+    `member's own timezone — for split timezones prefer the overlap fairest to both, not just ` +
+    `the first free gap.\n` +
+    `6. Create a Google Calendar event (gws) titled "Peer review: ${a} ↔ ${b} (${label})" ` +
+    `with both as attendees (if an email is missing, ask them in DM).\n` +
+    `7. DM both the booked time, expressed in EACH recipient's own local timezone.\n` +
+    `8. Record it at peer-reviews/${label}/meetings/${key}.md via modify_kb_file. ` +
     `If you can't find an overlap or can't book, DM both to coordinate directly and STILL ` +
     `write that file (note "manual coordination") so I don't keep retrying.`;
   return {

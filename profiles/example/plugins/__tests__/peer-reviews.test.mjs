@@ -614,6 +614,25 @@ describe('matchTaskIpc', () => {
     expect(t.prompt).toContain('meetings/alice--bob.md');
     expect(t.schedule_value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
   });
+
+  it('booking prompt is calendar- and timezone-aware', async () => {
+    const { matchTaskIpc } = await import('../peer-reviews.mjs');
+    const t = matchTaskIpc({
+      label: '2026-Q2',
+      pair: { a: 'alice', b: 'bob', key: 'alice--bob' },
+      channelJid: 'dc:9',
+      nowMs: Date.parse('2026-06-20T12:00:00Z'),
+    });
+    // Real availability comes from Google Calendar free/busy, not just the
+    // self-reported windows…
+    expect(t.prompt).toMatch(/free\/busy/i);
+    // …and the slot + the DM'd time must respect each member's own timezone.
+    expect(t.prompt).toMatch(/EACH member's own timezone/);
+    expect(t.prompt).toMatch(/EACH recipient's own local timezone/);
+    // People files are the source for email + timezone.
+    expect(t.prompt).toContain('people/alice.md');
+    expect(t.prompt).toContain('people/bob.md');
+  });
 });
 
 describe('resolveDirectory', () => {
