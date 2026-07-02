@@ -4,8 +4,9 @@
 // heads." This automates the tracking + nudging half:
 //
 //   * ~N weeks before quarter end (default 6 — reviews take time), announce the
-//     cycle in the channel, assign each member two peers to review (round-robin
-//     unless config overrides), and DM each member their assignment: write your
+//     cycle in the channel, assign each member two peers to review (seeded from
+//     the optional `collaborators` map, round-robin to fill gaps, unless config
+//     overrides with explicit `assignments`), and DM each member: write your
 //     self-evaluation, and review the two peers you've been given.
 //   * Each tick, DM anyone with outstanding items (self-eval not filed, or an
 //     assigned review not filed), listing exactly what's left. Re-nudge every
@@ -92,9 +93,21 @@ export function parseConfig(mdText) {
     fm.assignments && typeof fm.assignments === 'object'
       ? fm.assignments
       : null;
+  // Optional collaboration signal: { slug: [slugs they work with, ...] }
+  // (issue #135). Edges are treated as symmetric — listing one direction is
+  // enough. When present (and `assignments` isn't), computeAssignments seeds
+  // pairs from these edges and only falls back to round-robin to fill gaps.
+  // Absent → pure round-robin, exactly as before.
+  const collaborators =
+    fm.collaborators &&
+    typeof fm.collaborators === 'object' &&
+    !Array.isArray(fm.collaborators)
+      ? fm.collaborators
+      : null;
   return {
     members,
     assignments,
+    collaborators,
     channelJid: typeof fm.channel_jid === 'string' ? fm.channel_jid : '',
     windowWeeksBefore: Number(fm.window_weeks_before) || 3,
     windowWeeksAfter: Number(fm.window_weeks_after) || 2,
@@ -114,20 +127,96 @@ export function parseConfig(mdText) {
 }
 
 /**
- * Round-robin reviewer assignment: in listed order, member i reviews the next
- * `count` members (wrapping). For N members this gives everyone exactly `count`
- * reviewers too. Degrades for small N (you can't get 2 distinct reviewers with
- * fewer than 3 people). Returns { reviewer: [reviewee, ...] }.
+ * Reviewer assignment (issue #135): collaboration-seeded, round-robin-filled.
+ *
+ * Runs `min(count, N-1)` rounds; each round is a perfect matching (everyone
+ * reviews exactly one person, everyone is reviewed exactly once), so after all
+ * rounds every member reviews and is reviewed exactly `min(count, N-1)` times —
+ * the same balance guarantees as the old positional round-robin. Within a
+ * round, a maximum matching over `collaborators` edges (symmetric; unknown
+ * slugs ignored) is seeded first, then round-robin fill completes the round to
+ * a perfect matching — displacing a collab seed only when a member can't be
+ * covered any other way. Everything is roster-order driven → deterministic.
+ * With no `collaborators` the output is EXACTLY the old round-robin (member i
+ * reviews the next `count` members, wrapping). Never self, never the same pair
+ * twice. Degrades for small N (you can't get 2 distinct reviewers with fewer
+ * than 3 people). Returns { reviewer: [reviewee, ...] }.
  */
-export function computeAssignments(members, count = 2) {
+export function computeAssignments(members, count = 2, collaborators = null) {
   const n = members.length;
-  const out = {};
-  for (let i = 0; i < n; i++) {
-    const reviewees = [];
-    for (let k = 1; k <= count && k < n; k++) {
-      reviewees.push(members[(i + k) % n]);
+  const idx = new Map(members.map((m, i) => [m, i]));
+
+  // Symmetric collaboration adjacency, restricted to roster members.
+  const collab = members.map(() => new Set());
+  if (collaborators && typeof collaborators === 'object') {
+    for (const [a, list] of Object.entries(collaborators)) {
+      const ia = idx.get(a);
+      if (ia === undefined || !Array.isArray(list)) continue;
+      for (const b of list) {
+        const ib = idx.get(b);
+        if (ib === undefined || ib === ia) continue;
+        collab[ia].add(ib);
+        collab[ib].add(ia);
+      }
     }
-    out[members[i]] = reviewees;
+  }
+
+  const used = members.map(() => new Set()); // reviewer i → reviewee indices
+  const out = Object.fromEntries(members.map((m) => [m, []]));
+  const rounds = Math.min(count, n - 1);
+
+  for (let r = 0; r < rounds; r++) {
+    // Per-reviewer candidates in preference order: collaborators first, then
+    // the rest — both walked in round-robin order from i+1 so the no-collab
+    // case reproduces the old assignment and ties break deterministically.
+    const collabCands = [];
+    const allCands = [];
+    for (let i = 0; i < n; i++) {
+      const cc = [];
+      const rest = [];
+      for (let k = 1; k < n; k++) {
+        const j = (i + k) % n;
+        if (used[i].has(j)) continue;
+        (collab[i].has(j) ? cc : rest).push(j);
+      }
+      collabCands.push(cc);
+      allCands.push(cc.concat(rest));
+    }
+    const matchedTo = new Array(n).fill(-1); // reviewee j → reviewer i
+    // Kuhn's augmenting-path matching; `locked` reviewees can't be rerouted.
+    const tryMatch = (i, cands, locked, visited) => {
+      for (const j of cands[i]) {
+        if (visited.has(j) || locked.has(j)) continue;
+        visited.add(j);
+        if (matchedTo[j] === -1 || tryMatch(matchedTo[j], cands, locked, visited)) {
+          matchedTo[j] = i;
+          return true;
+        }
+      }
+      return false;
+    };
+    const none = new Set();
+    // Seed: maximum matching over collaboration edges only.
+    for (let i = 0; i < n; i++) tryMatch(i, collabCands, none, new Set());
+    const locked = new Set(
+      matchedTo.flatMap((i, j) => (i === -1 ? [] : [j])),
+    );
+    // Fill: complete to a perfect matching (guaranteed to exist — the
+    // available pair graph is (n-1-r)-regular). Collab seeds stay locked;
+    // unlock only when a reviewer can't be placed any other way, so
+    // round-robin fills coverage gaps without dismantling collab pairs.
+    for (let i = 0; i < n; i++) {
+      if (matchedTo.includes(i)) continue; // already reviewing someone
+      if (!tryMatch(i, allCands, locked, new Set())) {
+        tryMatch(i, allCands, none, new Set());
+      }
+    }
+    for (let j = 0; j < n; j++) {
+      const i = matchedTo[j];
+      if (i === -1) continue;
+      used[i].add(j);
+      out[members[i]].push(members[j]);
+    }
   }
   return out;
 }
@@ -410,12 +499,19 @@ export function matchTaskIpc({ label, pair, channelJid, nowMs }) {
     `Schedule the peer-review meeting between ${a} and ${b} for ${label}. ` +
     `Use the peer-reviews skill (Booking a review meeting).\n\n` +
     `1. If ${base}/meetings/${key}.md already exists, STOP — it's handled.\n` +
-    `2. Read both availabilities: ${base}/availability/${a}.md and ${base}/availability/${b}.md.\n` +
-    `3. Find a 30-minute slot this week that works for both.\n` +
-    `4. Create a Google Calendar event (gws) titled "Peer review: ${a} ↔ ${b} (${label})" ` +
-    `with both as attendees (emails from their people files; if one is missing, ask them in DM).\n` +
-    `5. DM both the booked time.\n` +
-    `6. Record it at peer-reviews/${label}/meetings/${key}.md via modify_kb_file. ` +
+    `2. Read both people files (people/${a}.md, people/${b}.md) for each member's email AND ` +
+    `\`timezone\` frontmatter. If a timezone is missing, infer nothing — ask that person in DM ` +
+    `and fall back to the org timezone for the draft.\n` +
+    `3. Read both self-reported availabilities: ${base}/availability/${a}.md and ${base}/availability/${b}.md.\n` +
+    `4. Check both members' REAL Google Calendar free/busy (gws calendar tools) for the coming week.\n` +
+    `5. Pick the best 30-minute slot that is (a) free on BOTH calendars, (b) inside both ` +
+    `self-reported windows where given, and (c) within working hours (~09:00-18:00) in EACH ` +
+    `member's own timezone — for split timezones prefer the overlap fairest to both, not just ` +
+    `the first free gap.\n` +
+    `6. Create a Google Calendar event (gws) titled "Peer review: ${a} ↔ ${b} (${label})" ` +
+    `with both as attendees (if an email is missing, ask them in DM).\n` +
+    `7. DM both the booked time, expressed in EACH recipient's own local timezone.\n` +
+    `8. Record it at peer-reviews/${label}/meetings/${key}.md via modify_kb_file. ` +
     `If you can't find an overlap or can't book, DM both to coordinate directly and STILL ` +
     `write that file (note "manual coordination") so I don't keep retrying.`;
   return {
@@ -500,9 +596,10 @@ export function tick({ profileDir, logger, nowMs }) {
     /* fresh quarter */
   }
 
-  // Config pairing wins (ops owns the policy); else round-robin.
+  // Config pairing wins (ops owns the policy); else collab-seeded round-robin.
   const assignments =
-    cfg.assignments ?? computeAssignments(cfg.members, cfg.reviewsRequired);
+    cfg.assignments ??
+    computeAssignments(cfg.members, cfg.reviewsRequired, cfg.collaborators);
   const dir = resolveDirectory(ctxDir, cfg.members);
 
   const plan = planActions({
