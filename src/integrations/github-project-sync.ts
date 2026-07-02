@@ -10,7 +10,9 @@
  * On each run, every written file is tagged with the current `gh_synced_at`
  * timestamp. After all configured orgs are pulled, files prefixed `GH-`,
  * `GHD-`, or `GHP-` whose `gh_synced_at` is older than the run start are
- * deleted — that's how we reconcile items removed from a project.
+ * deleted — that's how we reconcile items removed from a project. The delete
+ * pass is checkpointed per org (#112): it only covers orgs whose pull this
+ * run was complete (no fetch error, no truncated page window).
  *
  * Hand-authored `TASK-NNN.md` / `PROJECT-*.md` files are never touched.
  */
@@ -32,6 +34,7 @@ import {
   NormalizedProject,
   NormalizedProjectItem,
   OrgSyncResult,
+  slug,
 } from './github-projects.js';
 
 const ITEM_ID_PREFIXES = ['GH-', 'GHD-'];
@@ -57,6 +60,8 @@ export interface SyncStats {
   itemsDeleted: number;
   projectsDeleted: number;
   error?: string;
+  /** Pull succeeded but was truncated (more pages upstream than fetched). */
+  incomplete?: boolean;
 }
 
 /**
@@ -292,10 +297,18 @@ export async function runGitHubProjectSync(
     };
     try {
       const result = await fetchOrgProjects(org, token, fetchImpl);
+      // Additive writes always land — completeness only gates deletion below.
       const { projectsWritten, itemsWritten, projectsHidden, itemsHidden } =
         applySyncResult(result, syncStart, dirs);
       orgStat.projectsWritten = projectsWritten;
       orgStat.itemsWritten = itemsWritten;
+      if (!result.complete) {
+        orgStat.incomplete = true;
+        logger.warn(
+          { org },
+          'GH sync: pull truncated — skipping reconcile for this org to avoid false deletes',
+        );
+      }
       logger.info(
         {
           org,
@@ -314,11 +327,18 @@ export async function runGitHubProjectSync(
     stats.push(orgStat);
   }
 
-  // Reconcile: anything we wrote in a prior run but didn't touch this run
-  // is gone from the source — delete it. Per-prefix so a per-org failure
-  // above doesn't nuke its KB.
-  const successfulOrgs = stats.filter((s) => !s.error).map((s) => s.org);
-  if (successfulOrgs.length === GITHUB_PROJECT_SYNC_ORGS.length) {
+  // Reconcile, checkpointed per org (#112): the delete pass for a scope only
+  // runs when that org's pull this run was COMPLETE — fetch succeeded and no
+  // page was left unfetched. Deleting after a partial pull would wrongly
+  // remove items that still exist upstream but weren't touched this run.
+  // Completeness is an in-run flag, not persisted state: reconcile only ever
+  // compares files against THIS run's syncStart, so a mid-run crash simply
+  // means no delete pass happens (additive writes from earlier in the run are
+  // still correct) — a cross-run checkpoint would add nothing.
+  const complete = (s: SyncStats) => !s.error && !s.incomplete;
+  if (stats.every(complete)) {
+    // Every configured org pulled fully — sweep all GH-prefixed files, which
+    // also cleans up files from orgs that were removed from the config.
     const itemsDeleted = reconcile(dirs.tasksDir, ITEM_ID_PREFIXES, syncStart);
     const projectsDeleted = reconcile(
       dirs.projectsDir,
@@ -331,9 +351,25 @@ export async function runGitHubProjectSync(
     }
   } else {
     logger.warn(
-      { failed: stats.filter((s) => s.error).map((s) => s.org) },
-      'GH sync: at least one org failed — skipping reconcile to avoid false deletes',
+      { skipped: stats.filter((s) => !complete(s)).map((s) => s.org) },
+      'GH sync: incomplete pulls — reconciling only fully-pulled orgs',
     );
+    // Per-org checkpoint: files are namespaced GH-<org>-/GHD-<org>-/GHP-<org>-
+    // (ids embed slug(org)), so a scoped prefix sweep is safe per org.
+    for (const stat of stats) {
+      if (!complete(stat)) continue;
+      const orgSlug = slug(stat.org);
+      stat.itemsDeleted = reconcile(
+        dirs.tasksDir,
+        ITEM_ID_PREFIXES.map((p) => `${p}${orgSlug}-`),
+        syncStart,
+      );
+      stat.projectsDeleted = reconcile(
+        dirs.projectsDir,
+        [`${PROJECT_ID_PREFIX}${orgSlug}-`],
+        syncStart,
+      );
+    }
   }
 
   return stats;

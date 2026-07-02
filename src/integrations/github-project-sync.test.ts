@@ -375,6 +375,7 @@ describe('applySyncResult', () => {
       org: 'Org',
       projects: [normalizeProject('Org', proj)],
       items: [normalizeItem('Org', proj, item)!],
+      complete: true,
     };
     const stats = applySyncResult(result, '2026-05-20T10:00:00Z', {
       tasksDir,
@@ -474,6 +475,7 @@ describe('applySyncResult hide + body link', () => {
         normalizeProject('Org', hideRaw),
       ],
       items: [keepItem, hiddenItem],
+      complete: true,
     };
     const stats = applySyncResult(result, '2026-05-20T10:00:00Z', {
       tasksDir,
@@ -493,6 +495,7 @@ describe('applySyncResult hide + body link', () => {
       org: 'Org',
       projects: [],
       items: [normalizeItem('Org', makeRawProject(), makeIssueItem())!],
+      complete: true,
     };
     applySyncResult(result, '2026-05-20T10:00:00Z', { tasksDir, projectsDir });
     const body = fs.readFileSync(
@@ -592,5 +595,192 @@ describe('runGitHubProjectSync reconcile', () => {
     expect(stats[0].error).toBeTruthy();
     // Stale file is preserved because the org failed.
     expect(fs.existsSync(stalePath)).toBe(true);
+  });
+
+  it('still reconciles a complete pull when pageInfo reports no further pages', async () => {
+    const stalePath = path.join(tasksDir, 'GH-Org-repo-99.md');
+    fs.writeFileSync(
+      stalePath,
+      `---\nid: GH-Org-repo-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          organization: {
+            projectsV2: {
+              pageInfo: { hasNextPage: false },
+              nodes: [
+                {
+                  ...makeRawProject(),
+                  items: {
+                    pageInfo: { hasNextPage: false },
+                    nodes: [makeIssueItem()],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    });
+
+    const stats = await runGitHubProjectSync(
+      fakeFetch as unknown as typeof fetch,
+    );
+
+    expect(stats[0].incomplete).toBeUndefined();
+    expect(stats[0].itemsDeleted).toBe(1);
+    expect(fs.existsSync(stalePath)).toBe(false);
+    expect(fs.existsSync(path.join(tasksDir, 'GH-Org-repo-42.md'))).toBe(true);
+  });
+
+  it('a truncated pull (hasNextPage) applies writes but never deletes (#112)', async () => {
+    const stalePath = path.join(tasksDir, 'GH-Org-repo-99.md');
+    fs.writeFileSync(
+      stalePath,
+      `---\nid: GH-Org-repo-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+    const staleProjPath = path.join(projectsDir, 'GHP-Org-99.md');
+    fs.writeFileSync(
+      staleProjPath,
+      `---\nid: GHP-Org-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+
+    // Simulate a mid-pull failure/truncation: the item connection reports a
+    // page we never fetched, so GH-Org-repo-99 may still exist upstream.
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          organization: {
+            projectsV2: {
+              pageInfo: { hasNextPage: false },
+              nodes: [
+                {
+                  ...makeRawProject(),
+                  items: {
+                    pageInfo: { hasNextPage: true },
+                    nodes: [makeIssueItem()],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    });
+
+    const stats = await runGitHubProjectSync(
+      fakeFetch as unknown as typeof fetch,
+    );
+
+    expect(stats[0].incomplete).toBe(true);
+    expect(stats[0].itemsDeleted).toBe(0);
+    expect(stats[0].projectsDeleted).toBe(0);
+    // Additive write from the partial pull still landed.
+    expect(stats[0].itemsWritten).toBe(1);
+    expect(fs.existsSync(path.join(tasksDir, 'GH-Org-repo-42.md'))).toBe(true);
+    // But nothing was deleted for the incomplete scope.
+    expect(fs.existsSync(stalePath)).toBe(true);
+    expect(fs.existsSync(staleProjPath)).toBe(true);
+  });
+
+  it('a truncated projects page also blocks the delete pass', async () => {
+    const stalePath = path.join(projectsDir, 'GHP-Org-99.md');
+    fs.writeFileSync(
+      stalePath,
+      `---\nid: GHP-Org-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          organization: {
+            projectsV2: {
+              pageInfo: { hasNextPage: true },
+              nodes: [
+                { ...makeRawProject(), items: { nodes: [makeIssueItem()] } },
+              ],
+            },
+          },
+        },
+      }),
+    });
+
+    const stats = await runGitHubProjectSync(
+      fakeFetch as unknown as typeof fetch,
+    );
+
+    expect(stats[0].incomplete).toBe(true);
+    expect(fs.existsSync(stalePath)).toBe(true);
+  });
+
+  it('checkpoints per org: a failed org keeps its files while a complete org reconciles', async () => {
+    configMock.GITHUB_PROJECT_SYNC_ORGS = ['Org', 'BrokenOrg'];
+    const staleOk = path.join(tasksDir, 'GH-Org-repo-99.md');
+    fs.writeFileSync(
+      staleOk,
+      `---\nid: GH-Org-repo-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+    const staleBroken = path.join(tasksDir, 'GH-BrokenOrg-repo-99.md');
+    fs.writeFileSync(
+      staleBroken,
+      `---\nid: GH-BrokenOrg-repo-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+    const staleBrokenProj = path.join(projectsDir, 'GHP-BrokenOrg-99.md');
+    fs.writeFileSync(
+      staleBrokenProj,
+      `---\nid: GHP-BrokenOrg-99\ngh_synced_at: 2024-01-01T00:00:00Z\n---\nold\n`,
+    );
+
+    const fakeFetch = vi.fn(async (_url: unknown, init: unknown) => {
+      const body = JSON.parse((init as { body: string }).body);
+      if (body.variables.org === 'BrokenOrg') {
+        return { ok: false, status: 500, text: async () => 'mid-pull crash' };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            organization: {
+              projectsV2: {
+                pageInfo: { hasNextPage: false },
+                nodes: [
+                  {
+                    ...makeRawProject(),
+                    items: {
+                      pageInfo: { hasNextPage: false },
+                      nodes: [makeIssueItem()],
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      };
+    });
+
+    const stats = await runGitHubProjectSync(
+      fakeFetch as unknown as typeof fetch,
+    );
+
+    const okStat = stats.find((s) => s.org === 'Org')!;
+    const brokenStat = stats.find((s) => s.org === 'BrokenOrg')!;
+    expect(brokenStat.error).toBeTruthy();
+    // The complete org's scope reconciled…
+    expect(okStat.itemsDeleted).toBe(1);
+    expect(fs.existsSync(staleOk)).toBe(false);
+    expect(fs.existsSync(path.join(tasksDir, 'GH-Org-repo-42.md'))).toBe(true);
+    // …the failed org's scope was untouched.
+    expect(fs.existsSync(staleBroken)).toBe(true);
+    expect(fs.existsSync(staleBrokenProj)).toBe(true);
   });
 });
