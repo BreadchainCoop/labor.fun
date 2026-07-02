@@ -35,8 +35,14 @@ auto_schedule: true                  # optional — also collect availability an
 nudge_every_days: 4                  # optional — re-nudge cadence per member
 max_nudges: 4                        # optional — then escalate once in the channel
 summary_days_before_end: 7           # optional — post a status summary this many days before quarter end
-# Optional explicit pairing instead of round-robin (ops owns the "valid peer /
-# anonymity" policy). Omit to auto-assign each member the next two in the list.
+# Optional collaboration signal: who actually works with whom. Edges are
+# symmetric (listing one direction is enough) and unknown slugs are ignored.
+# When set, auto-assignment pairs collaborators first and only falls back to
+# round-robin to fill coverage gaps. Omit for pure round-robin.
+# collaborators:
+#   jane-doe: [sam-roe]
+# Optional explicit pairing instead of auto-assignment (ops owns the "valid
+# peer / anonymity" policy). Omit to auto-assign.
 # assignments:
 #   jane-doe: [john-doe, sam-roe]
 #   john-doe: [sam-roe, jane-doe]
@@ -56,12 +62,18 @@ on the first tick so nudges stay consistent; to re-roll a quarter, delete that
 state file. Reset/disable by editing or removing
 `config.md`.
 
-## Round-robin assignment
+## Auto-assignment (collaboration-seeded round-robin)
 
-With no `assignments` block, member *i* (in listed order) reviews the next
-`reviews_required` members, wrapping — so everyone gives and receives exactly
-that many. Needs at least `reviews_required + 1` members to give everyone
-distinct reviewers; with fewer it assigns as many as possible.
+With no `assignments` block, pairing runs `reviews_required` rounds; each round
+everyone reviews exactly one person and is reviewed exactly once, so everyone
+gives and receives exactly `reviews_required` reviews — never themselves, never
+the same pair twice, deterministic for a given config. Within a round,
+`collaborators` pairs are matched first; round-robin over the roster fills the
+gaps (a collab pair is only broken when someone can't be covered otherwise).
+With no `collaborators` this is exactly the classic round-robin: member *i* (in
+listed order) reviews the next `reviews_required` members, wrapping. Needs at
+least `reviews_required + 1` members to give everyone distinct reviewers; with
+fewer it assigns as many as possible.
 
 ## Auto-scheduling (`auto_schedule: true`)
 
