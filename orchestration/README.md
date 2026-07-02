@@ -81,3 +81,16 @@ The verify-on-install items are resolved and pinned to `smithers-orchestrator@0.
 Enable on a host via `orchestration/deploy/README.md` (Bun + `bun install`,
 `SMITHERS_BRIDGE_ENABLED`, restart). Still off by default; the orchestrator is
 unaffected until the bridge is enabled.
+
+## Deterministic escalation test
+
+Set `LABOR_FORCE_CHEAP_SCHEMA_FAIL=1` on the sidecar process to force every
+cheap-tier step to return schema-invalid output (no container run, no model
+cost) and watch the `agent={[cheap, strong]}` chain advance to strong:
+
+```bash
+LABOR_FORCE_CHEAP_SCHEMA_FAIL=1 bun run transcript
+```
+
+Inert when unset. See `docs/SMITHERS-ORCHESTRATION.md` § "Deterministic
+escalation test" and `agents/container-agent.test.ts`.
