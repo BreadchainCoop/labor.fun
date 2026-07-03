@@ -593,7 +593,10 @@ function buildContainerArgs(
   //               intentionally skips both (see credential-proxy.ts).
   const authMode = detectAuthMode();
   if (authMode === 'api-key') {
-    args.push('-e', `ANTHROPIC_API_KEY=${composeAuthPlaceholder(containerName)}`);
+    args.push(
+      '-e',
+      `ANTHROPIC_API_KEY=${composeAuthPlaceholder(containerName)}`,
+    );
   } else {
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
