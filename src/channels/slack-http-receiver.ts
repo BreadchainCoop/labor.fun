@@ -26,6 +26,10 @@ import { logger as defaultLogger } from '../logger.js';
 // replay of captured signatures.
 const MAX_TIMESTAMP_SKEW_SECONDS = 300;
 
+// Cap the buffered request body to bound a pre-auth memory-exhaustion DoS.
+// Slack event payloads are small; 1 MiB is generous headroom.
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB
+
 type Logger = Pick<typeof defaultLogger, 'info' | 'warn' | 'error' | 'debug'>;
 
 export interface SlackHttpReceiverOptions {
@@ -164,9 +168,40 @@ export class SlackHttpReceiver implements Receiver {
       return;
     }
 
+    // Content-Length fast path: if a caller advertises an over-cap body, reject
+    // before attaching data listeners so we never buffer a byte of it. Parse
+    // defensively — a malformed/absent header falls through to the running
+    // counter below.
+    const contentLength = Number(req.headers['content-length']);
+    if (!Number.isNaN(contentLength) && contentLength > MAX_BODY_BYTES) {
+      res.writeHead(413);
+      res.end('Payload Too Large');
+      return;
+    }
+
     const chunks: Buffer[] = [];
-    req.on('data', (c) => chunks.push(c));
+    let received = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      received += c.length;
+      // Running-counter enforcement: defends against chunked / missing
+      // Content-Length or a lying Content-Length. Stop buffering the moment we
+      // cross the cap, respond 413 (once), and tear down the socket.
+      if (received > MAX_BODY_BYTES) {
+        aborted = true;
+        if (!res.headersSent) {
+          res.writeHead(413);
+          res.end('Payload Too Large');
+        }
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
+      // If we aborted mid-stream, the request is already answered/torn down.
+      if (aborted) return;
       // Raw body first: signature verification runs on the raw bytes, BEFORE
       // any JSON parsing.
       const rawBody = Buffer.concat(chunks).toString('utf-8');

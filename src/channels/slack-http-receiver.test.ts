@@ -513,4 +513,89 @@ describe('SlackHttpReceiver', () => {
       expect(res.statusCode).toBe(400);
     });
   });
+
+  describe('request body size cap (pre-auth DoS guard)', () => {
+    // MAX_BODY_BYTES is 1 MiB (1024*1024). Build a body comfortably over it.
+    const OVERSIZE = 'x'.repeat(1024 * 1024 + 1024);
+
+    it('rejects an oversize body with 413 and never dispatches', async () => {
+      const { port, messageHandler } = await startApp({
+        ingressSecret: INGRESS_SECRET,
+      });
+
+      // A real >1 MiB body: Node sets Content-Length itself, so this
+      // exercises the Content-Length fast path (and, for good measure, the
+      // body still flows through 'data' events). The size check fires before
+      // signature verification / JSON parsing, so no valid signature needed.
+      const res = await post(port, '/slack/events', OVERSIZE);
+
+      expect(res.statusCode).toBe(413);
+      // Give any async dispatch a chance to (not) fire.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(messageHandler).not.toHaveBeenCalled();
+    }, 10_000);
+
+    it('rejects an oversize chunked (no Content-Length) body without hanging', async () => {
+      const { port, messageHandler } = await startApp({
+        ingressSecret: INGRESS_SECRET,
+      });
+
+      // Force chunked transfer encoding (no Content-Length) so the
+      // Content-Length fast path can't fire — this drives the running-counter
+      // enforcement in the 'data' handler and the req.destroy() teardown.
+      const outcome = await new Promise<'413' | 'closed'>((resolve, reject) => {
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port,
+          path: '/slack/events',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'transfer-encoding': 'chunked',
+          },
+        });
+        let settled = false;
+        const settle = (v: '413' | 'closed') => {
+          if (settled) return;
+          settled = true;
+          resolve(v);
+        };
+        req.on('response', (res) => {
+          res.resume();
+          if (res.statusCode === 413) settle('413');
+          else res.on('end', () => settle('closed'));
+        });
+        // Server tears down the socket after the cap is crossed: the client
+        // sees ECONNRESET / EPIPE. That's the destroy() path — treat it as a
+        // valid, non-hanging outcome. Swallow the errors so the async write
+        // failure never surfaces as an unhandled exception.
+        req.on('error', () => settle('closed'));
+        req.on('close', () => settle('closed'));
+        req.on('socket', (socket) => socket.on('error', () => {}));
+        // Write in chunks so the running counter trips mid-stream.
+        const chunk = 'x'.repeat(256 * 1024);
+        let writes = 0;
+        const pump = () => {
+          if (settled || req.destroyed) return;
+          if (writes >= 8) {
+            req.end(() => {});
+            return;
+          }
+          writes += 1;
+          // Ignore write errors once the socket is gone.
+          req.write(chunk, () => {});
+          setImmediate(pump);
+        };
+        pump();
+        // Safety net so the test can never hang.
+        setTimeout(() => reject(new Error('request hung')), 5_000);
+      });
+
+      // Either an explicit 413 or a socket teardown is acceptable; both prove
+      // the cap engaged and the request did not hang.
+      expect(['413', 'closed']).toContain(outcome);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(messageHandler).not.toHaveBeenCalled();
+    }, 10_000);
+  });
 });
