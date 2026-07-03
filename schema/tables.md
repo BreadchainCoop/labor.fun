@@ -69,7 +69,7 @@ Key-value state persistence for the message router.
 | **key** | TEXT PK | State key          |
 | value   | TEXT    | JSON-encoded value |
 
-Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group), and `control_plane_usage_cursor` (control-plane usage report cursor — see `api_usage`).
+Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group), and `control_plane_usage_cursor` (last `api_usage.id` already reported to the hosted control plane — see `api_usage`).
 
 ### scheduled_tasks
 
@@ -286,22 +286,20 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 
 ### api_usage
 
-Per-request API usage metering (`src/credential-proxy.ts` records one row per Anthropic Messages API call it observes; token counts parsed from the response). Powers the month-to-date budget guard (`src/usage-budget.ts`) and the hosted control-plane usage report (`src/integrations/control-plane-sync.ts`). Append-only; the auto-increment `id` doubles as the control-plane report cursor.
+API cost tracking & budgets: one row per completed `/v1/messages` call observed by the credential proxy (`src/credential-proxy.ts`). Powers usage reporting (`scripts/usage-report.ts`), budget enforcement (`src/usage-budget.ts`), and hosted control-plane usage push (`src/integrations/control-plane-sync.ts` — drains rows by `id` in batches, cursor persisted in `router_state` under `control_plane_usage_cursor`). `run_tag` is the spawning container's name (see `container-runner.ts`), which encodes the group folder, so usage can be grouped per-group by prefix. `est_cost_usd` is computed at insert time from `src/model-pricing.ts`, so historical rows keep the price in effect when the call was made even if pricing is later overridden.
 
-| Column               | Type       | Notes                                                        |
-| -------------------- | ---------- | ------------------------------------------------------------ |
-| **id**               | INTEGER PK | AUTOINCREMENT; monotonic; used as the report cursor          |
-| run_tag              | TEXT       | Optional group/run attribution (`x-nanoclaw-run-tag` header) |
-| model                | TEXT       | Model id from the response                                   |
-| input_tokens         | INTEGER    | Prompt (non-cached) input tokens                             |
-| output_tokens        | INTEGER    | Generated output tokens                                      |
-| cache_read_tokens    | INTEGER    | Cache-read input tokens                                      |
-| cache_write_tokens   | INTEGER    | Cache-creation input tokens                                  |
-| est_cost_usd         | REAL       | Estimated USD cost (`src/model-pricing.ts`; not billing-grade) |
-| status_code          | INTEGER    | Upstream HTTP status                                         |
-| created_at           | TEXT       | ISO timestamp (indexed)                                      |
-
-`router_state` also stores the key `control_plane_usage_cursor` (JSON int) — the last `api_usage.id` already reported upstream, so a restart never re-sends drained rows.
+| Column             | Type       | Notes                                              |
+| ------------------ | ---------- | --------------------------------------------------- |
+| **id**             | INTEGER PK | Autoincrement                                      |
+| run_tag            | TEXT       | Container name the request was attributed to (nullable — unattributed when the container sent no placeholder run tag) |
+| model              | TEXT       | Model id reported by the API response              |
+| input_tokens       | INTEGER    | Prompt tokens (excludes cache)                     |
+| output_tokens      | INTEGER    | Completion tokens                                  |
+| cache_read_tokens  | INTEGER    | Tokens served from the prompt cache                |
+| cache_write_tokens | INTEGER    | Tokens written to the prompt cache                 |
+| est_cost_usd       | REAL       | Estimated USD cost at time of the call             |
+| status_code        | INTEGER    | HTTP status of the upstream response               |
+| created_at         | TEXT       | ISO timestamp (indexed)                            |
 
 ## Indices
 
@@ -318,4 +316,6 @@ Per-request API usage metering (`src/credential-proxy.ts` records one row per An
 | idx_expenses_status            | expenses(status)                       | Approval-queue lookup                        |
 | idx_expenses_requester         | expenses(requester_user_id)            | Per-person expense history                   |
 | idx_expenses_event             | expenses(event_id)                     | Expense grouping by event_id                 |
-| idx_api_usage_created          | api_usage(created_at)                  | Month-to-date usage sum for the budget guard |
+| idx_api_usage_created          | api_usage(created_at)                  | Time-range usage queries                     |
+| idx_api_usage_run_tag          | api_usage(run_tag)                     | Per-run/group usage lookup                   |
+| idx_api_usage_model            | api_usage(model)                       | Per-model usage breakdown                    |

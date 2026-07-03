@@ -25,7 +25,7 @@ import {
   getApiUsageSince,
   getUsageReportCursor,
   setUsageReportCursor,
-  type ApiUsageEvent,
+  type ApiUsageRow,
 } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
@@ -137,19 +137,19 @@ export async function syncEntitlement(
   }
 }
 
-/** Map a DB usage row to the pinned wire shape for the control plane. */
-function toWireEvent(e: ApiUsageEvent): Record<string, unknown> {
+/** Map a DB usage row (snake_case columns) to the pinned camelCase wire shape. */
+function toWireEvent(r: ApiUsageRow): Record<string, unknown> {
   return {
-    id: e.id,
-    runTag: e.runTag,
-    model: e.model,
-    inputTokens: e.inputTokens,
-    outputTokens: e.outputTokens,
-    cacheReadTokens: e.cacheReadTokens,
-    cacheWriteTokens: e.cacheWriteTokens,
-    estCostUsd: e.estCostUsd,
-    statusCode: e.statusCode,
-    createdAt: e.createdAt,
+    id: r.id,
+    runTag: r.run_tag,
+    model: r.model,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheReadTokens: r.cache_read_tokens,
+    cacheWriteTokens: r.cache_write_tokens,
+    estCostUsd: r.est_cost_usd,
+    statusCode: r.status_code,
+    createdAt: r.created_at,
   };
 }
 

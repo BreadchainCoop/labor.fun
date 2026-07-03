@@ -134,15 +134,15 @@ afterEach(async () => {
 function seedRows(n: number): void {
   dbState.rows = Array.from({ length: n }, (_, i) => ({
     id: i + 1,
-    runTag: null,
-    model: 'claude-opus-4-8',
-    inputTokens: 10,
-    outputTokens: 5,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    estCostUsd: 0.001,
-    statusCode: 200,
-    createdAt: '2026-07-01T00:00:00.000Z',
+    run_tag: null,
+    model: 'claude-opus-4-6',
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    est_cost_usd: 0.001,
+    status_code: 200,
+    created_at: '2026-07-01T00:00:00.000Z',
   }));
 }
 

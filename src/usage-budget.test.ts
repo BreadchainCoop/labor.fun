@@ -1,71 +1,172 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-vi.mock('./logger.js', () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+const mockSummary = {
+  requests: 0,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_tokens: 0,
+  cache_write_tokens: 0,
+  est_cost_usd: 0,
+  by_model: [] as unknown[],
+};
+
+vi.mock('./db.js', () => ({
+  getUsageSummary: vi.fn(() => mockSummary),
 }));
 
+vi.mock('./logger.js', () => ({
+  logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
+}));
+
+// Point DATA_DIR (where entitlement.json lives) at a per-test temp dir so the
+// entitlement layer is exercised hermetically.
 const configMock = vi.hoisted(() => ({ DATA_DIR: '' }));
 vi.mock('./config.js', () => configMock);
 
-// Keep env resolution hermetic — never read a real .env from disk.
-vi.mock('./env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
-
-// getUsageTotalsSince is the only db surface usage-budget touches.
-const totals = vi.hoisted(() => ({ totalTokens: 0, totalCostUsd: 0 }));
-vi.mock('./db.js', () => ({
-  getUsageTotalsSince: vi.fn(() => totals),
-}));
-
 import {
-  _resetEntitlementCache,
-  _resetTotalsCache,
   checkQuota,
+  onUsageRecorded,
+  _resetUsageBudgetCache,
+  _resetEntitlementCache,
   entitlementFilePath,
   loadEntitlement,
   resolveBudgets,
   type Entitlement,
 } from './usage-budget.js';
+import { getUsageSummary } from './db.js';
 
 let tmpDir: string;
-
-function writeEntitlement(e: Partial<Entitlement> & { state: string }): void {
-  fs.writeFileSync(entitlementFilePath(), JSON.stringify(e));
-  _resetEntitlementCache();
-}
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-budget-test-'));
   configMock.DATA_DIR = tmpDir;
-  totals.totalTokens = 0;
-  totals.totalCostUsd = 0;
   _resetEntitlementCache();
-  _resetTotalsCache();
-  delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
-  delete process.env.USAGE_MONTHLY_COST_BUDGET_USD;
 });
 
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('budget precedence: entitlement file over env', () => {
+function writeEntitlement(e: Partial<Entitlement> & { state: string }): void {
+  fs.writeFileSync(entitlementFilePath(), JSON.stringify(e));
+  _resetEntitlementCache();
+}
+
+describe('usage-budget', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetUsageBudgetCache();
+    vi.clearAllMocks();
+    mockSummary.input_tokens = 0;
+    mockSummary.output_tokens = 0;
+    mockSummary.cache_read_tokens = 0;
+    mockSummary.cache_write_tokens = 0;
+    mockSummary.est_cost_usd = 0;
+    delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
+    delete process.env.USAGE_MONTHLY_COST_BUDGET_USD;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('is unlimited when no budget env vars are set', () => {
+    const result = checkQuota();
+    expect(result.ok).toBe(true);
+    // Should not even query the DB when both budgets are absent.
+    expect(getUsageSummary).not.toHaveBeenCalled();
+  });
+
+  it('allows requests under the token budget', () => {
+    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
+    mockSummary.input_tokens = 100;
+    mockSummary.output_tokens = 100;
+    const result = checkQuota();
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects requests at/over the token budget', () => {
+    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
+    mockSummary.input_tokens = 600;
+    mockSummary.output_tokens = 500;
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/token budget/i);
+  });
+
+  it('rejects requests at/over the cost budget', () => {
+    process.env.USAGE_MONTHLY_COST_BUDGET_USD = '3.00';
+    mockSummary.est_cost_usd = 3.5;
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/cost budget/i);
+  });
+
+  it('caches month-to-date and does not re-query the DB immediately', () => {
+    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
+    checkQuota();
+    checkQuota();
+    expect(getUsageSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('onUsageRecorded increments the cache without re-querying the DB', () => {
+    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
+    mockSummary.input_tokens = 900;
+    // Prime the cache.
+    expect(checkQuota().ok).toBe(true);
+    expect(getUsageSummary).toHaveBeenCalledTimes(1);
+
+    // Increment past the budget without the mock DB summary changing.
+    onUsageRecorded({ totalTokens: 200, costUsd: 0.01 });
+
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    // Still only the one initial DB query — cache increment avoided a re-query.
+    expect(getUsageSummary).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- Control-plane entitlement layer (hosted mode) ---
+
+describe('entitlement precedence: file over env', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetUsageBudgetCache();
+    vi.clearAllMocks();
+    mockSummary.input_tokens = 0;
+    mockSummary.output_tokens = 0;
+    mockSummary.cache_read_tokens = 0;
+    mockSummary.cache_write_tokens = 0;
+    mockSummary.est_cost_usd = 0;
+    delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
+    delete process.env.USAGE_MONTHLY_COST_BUDGET_USD;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
   it('uses env budgets when no entitlement file is present', () => {
     process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
     process.env.USAGE_MONTHLY_COST_BUDGET_USD = '5';
     const b = resolveBudgets();
     expect(b.source).toBe('env');
-    expect(b.monthlyTokenBudget).toBe(1000);
-    expect(b.monthlyCostBudgetUsd).toBe(5);
+    expect(b.tokenBudget).toBe(1000);
+    expect(b.costBudget).toBe(5);
   });
 
   it('is unlimited when neither file nor env is present', () => {
     const b = resolveBudgets();
     expect(b.source).toBe('unlimited');
-    expect(b.monthlyTokenBudget).toBeNull();
-    expect(b.monthlyCostBudgetUsd).toBeNull();
+    expect(b.tokenBudget).toBeUndefined();
+    expect(b.costBudget).toBeUndefined();
   });
 
   it('entitlement file wins over env vars', () => {
@@ -78,8 +179,8 @@ describe('budget precedence: entitlement file over env', () => {
     } as Entitlement);
     const b = resolveBudgets();
     expect(b.source).toBe('entitlement');
-    expect(b.monthlyTokenBudget).toBe(25000);
-    expect(b.monthlyCostBudgetUsd).toBe(12);
+    expect(b.tokenBudget).toBe(25000);
+    expect(b.costBudget).toBe(12);
   });
 
   it('null budget in the entitlement means unlimited (does NOT fall through to env)', () => {
@@ -92,12 +193,45 @@ describe('budget precedence: entitlement file over env', () => {
     } as Entitlement);
     const b = resolveBudgets();
     expect(b.source).toBe('entitlement');
-    expect(b.monthlyTokenBudget).toBeNull();
-    expect(b.monthlyCostBudgetUsd).toBeNull();
+    expect(b.tokenBudget).toBeUndefined();
+    expect(b.costBudget).toBeUndefined();
+
+    // And checkQuota allows even with month-to-date usage way past the env cap.
+    mockSummary.input_tokens = 999_999_999;
+    expect(checkQuota().ok).toBe(true);
+  });
+
+  it('entitlement budgets are enforced against month-to-date usage', () => {
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+    } as Entitlement);
+    mockSummary.input_tokens = 1000;
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/token budget/i);
   });
 });
 
-describe('state hard-block (suspended / canceled)', () => {
+describe('entitlement state hard-block (suspended / canceled)', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetUsageBudgetCache();
+    vi.clearAllMocks();
+    mockSummary.input_tokens = 0;
+    mockSummary.est_cost_usd = 0;
+    delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
+    delete process.env.USAGE_MONTHLY_COST_BUDGET_USD;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
   it('suspended blocks regardless of budgets', () => {
     writeEntitlement({
       state: 'suspended',
@@ -105,23 +239,25 @@ describe('state hard-block (suspended / canceled)', () => {
       monthlyTokenBudget: 1_000_000_000,
       monthlyCostBudgetUsd: 1_000_000,
     } as Entitlement);
-    const r = checkQuota();
-    expect(r.ok).toBe(false);
-    expect(r.state).toBe('suspended');
-    expect(r.reason).toMatch(/suspended/i);
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/suspended/i);
+    // Hard-block short-circuits before any usage query.
+    expect(getUsageSummary).not.toHaveBeenCalled();
   });
 
-  it('canceled blocks regardless of budgets', () => {
+  it('canceled blocks regardless of budgets (even unlimited ones)', () => {
     writeEntitlement({
       state: 'canceled',
       plan: 'starter',
       monthlyTokenBudget: null,
       monthlyCostBudgetUsd: null,
     } as Entitlement);
-    const r = checkQuota();
-    expect(r.ok).toBe(false);
-    expect(r.state).toBe('canceled');
-    expect(r.reason).toMatch(/cancel/i);
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/cancel/i);
   });
 
   it.each(['trialing', 'active', 'grace', 'over_quota'])(
@@ -133,49 +269,27 @@ describe('state hard-block (suspended / canceled)', () => {
         monthlyTokenBudget: 1000,
         monthlyCostBudgetUsd: null,
       } as Entitlement);
-      totals.totalTokens = 500;
-      _resetTotalsCache();
-      const r = checkQuota();
-      expect(r.ok).toBe(true);
-      expect(r.state).toBe(state);
+      mockSummary.input_tokens = 500;
+      expect(checkQuota().ok).toBe(true);
     },
   );
 });
 
-describe('budget enforcement', () => {
-  it('blocks when the token budget is reached', () => {
-    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
-    totals.totalTokens = 1000;
-    _resetTotalsCache();
-    const r = checkQuota();
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/token budget/i);
+describe('entitlement fail-open on corrupt / missing file', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    _resetUsageBudgetCache();
+    vi.clearAllMocks();
+    mockSummary.input_tokens = 0;
+    delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
+    delete process.env.USAGE_MONTHLY_COST_BUDGET_USD;
   });
 
-  it('blocks when the cost budget is reached', () => {
-    process.env.USAGE_MONTHLY_COST_BUDGET_USD = '5';
-    totals.totalCostUsd = 5.01;
-    _resetTotalsCache();
-    const r = checkQuota();
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/cost budget/i);
+  afterEach(() => {
+    process.env = { ...originalEnv };
   });
 
-  it('allows when under budget', () => {
-    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
-    totals.totalTokens = 999;
-    _resetTotalsCache();
-    expect(checkQuota().ok).toBe(true);
-  });
-
-  it('allows unlimited (no budgets configured)', () => {
-    totals.totalTokens = 999_999_999;
-    _resetTotalsCache();
-    expect(checkQuota().ok).toBe(true);
-  });
-});
-
-describe('fail-open on corrupt / missing file', () => {
   it('falls back to env budgets when the file is corrupt JSON', () => {
     process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
     fs.writeFileSync(entitlementFilePath(), '{ not valid json');
@@ -183,7 +297,7 @@ describe('fail-open on corrupt / missing file', () => {
     expect(loadEntitlement()).toBeNull();
     const b = resolveBudgets();
     expect(b.source).toBe('env');
-    expect(b.monthlyTokenBudget).toBe(1000);
+    expect(b.tokenBudget).toBe(1000);
   });
 
   it('falls back to env when the file is structurally invalid (bad state)', () => {
@@ -209,7 +323,12 @@ describe('fail-open on corrupt / missing file', () => {
   });
 });
 
-describe('mtime-based cache invalidation', () => {
+describe('entitlement mtime-based cache invalidation', () => {
+  beforeEach(() => {
+    _resetUsageBudgetCache();
+    vi.clearAllMocks();
+  });
+
   it('re-reads the file only when mtime/size changes', () => {
     writeEntitlement({
       state: 'active',
@@ -219,9 +338,8 @@ describe('mtime-based cache invalidation', () => {
     } as Entitlement);
     expect(loadEntitlement()?.monthlyTokenBudget).toBe(100);
 
-    // Rewrite content WITHOUT resetting the in-memory cache. Bump mtime so the
-    // guard notices the change (writeFileSync alone may keep the same mtimeMs
-    // within one tick, but the size changes here too).
+    // Rewrite content WITHOUT resetting the in-memory cache; bump mtime so
+    // the invalidation guard is unambiguous.
     fs.writeFileSync(
       entitlementFilePath(),
       JSON.stringify({
@@ -231,7 +349,6 @@ describe('mtime-based cache invalidation', () => {
         monthlyCostBudgetUsd: null,
       }),
     );
-    // Force a distinct mtime so the invalidation is unambiguous.
     const future = new Date(Date.now() + 10_000);
     fs.utimesSync(entitlementFilePath(), future, future);
 
@@ -246,19 +363,18 @@ describe('mtime-based cache invalidation', () => {
       monthlyCostBudgetUsd: null,
     } as Entitlement);
     const first = loadEntitlement();
-    // Delete the file; the cache guard should still return the cached value
-    // because it stats first and, finding it gone, returns null. To prove the
-    // cache path, instead corrupt the file in place but restore mtime+size.
     const stat = fs.statSync(entitlementFilePath());
-    const replacement = JSON.stringify({
-      state: 'active',
-      plan: 'starter',
-      monthlyTokenBudget: 100, // same length payload not required; we restore stat
-      monthlyCostBudgetUsd: null,
-    });
-    fs.writeFileSync(entitlementFilePath(), replacement);
+    fs.writeFileSync(
+      entitlementFilePath(),
+      JSON.stringify({
+        state: 'active',
+        plan: 'starter',
+        monthlyTokenBudget: 100,
+        monthlyCostBudgetUsd: null,
+      }),
+    );
+    // Restore stat so the cache guard sees no change.
     fs.utimesSync(entitlementFilePath(), stat.atime, stat.mtime);
-    // If size differs, the guard re-reads; assert on the stable field either way.
     const second = loadEntitlement();
     expect(second?.state).toBe(first?.state);
   });

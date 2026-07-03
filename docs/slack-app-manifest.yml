@@ -1,0 +1,79 @@
+# Slack App Manifest — labor.fun hosted onboarding
+#
+# Purpose: spin up a working Slack app for a new hosted customer in ~2 minutes.
+#
+# How to use:
+#   1. Go to https://api.slack.com/apps -> "Create New App" -> "From an app manifest"
+#   2. Pick the customer's workspace
+#   3. Paste this file's contents (edit the placeholders marked below first)
+#   4. Review scopes -> Create
+#   5. Install the app to the workspace (OAuth & Permissions -> Install to Workspace)
+#
+# Tokens you need afterward (see src/channels/slack.ts + .env):
+#   - SLACK_BOT_TOKEN  -> OAuth & Permissions page -> "Bot User OAuth Token" (starts xoxb-)
+#   - SLACK_APP_TOKEN  -> Basic Information -> App-Level Tokens -> generate one with
+#                         the `connections:write` scope (starts xapp-)
+#
+# Both go in .env (see docs/HOSTED.md) and must be synced to data/env/env for the
+# container to see them.
+
+display_information:
+  # TODO: replace with the customer's chosen assistant name (profile.config.json
+  # assistantName). This is just the Slack app's display name/description —
+  # cosmetic, doesn't affect trigger matching.
+  name: "<ASSISTANT_NAME>"
+  description: "<ASSISTANT_NAME> — AI assistant"
+  background_color: "#4A154B"
+
+features:
+  bot_user:
+    # This becomes the @mention name in Slack. Keep it aligned with
+    # profile.config.json's assistantName so TRIGGER_PATTERN (@<assistantName>)
+    # matches what users actually type/mention.
+    display_name: "<ASSISTANT_NAME>"
+    always_online: true
+
+oauth_config:
+  scopes:
+    # Bot token scopes required by src/channels/slack.ts. Matches the list
+    # documented in .claude/skills/add-slack/SKILL.md, plus reactions (the
+    # code calls reactions.add/reactions.remove for emoji-reaction support).
+    bot:
+      - chat:write          # send messages (chat.postMessage, chat.update, chat.delete)
+      - channels:history    # read messages in public channels the bot is in
+      - groups:history      # read messages in private channels the bot is in
+      - im:history          # read direct messages to the bot
+      - channels:read       # list/resolve public channel metadata (conversations.list)
+      - groups:read         # list/resolve private channel metadata
+      - users:read          # resolve user IDs to display names (users.info)
+      - reactions:write     # add/remove emoji reactions (addReaction/removeReaction)
+
+settings:
+  # Socket Mode — no public URL/webhook needed. Required: src/channels/slack.ts
+  # constructs the Bolt App with `socketMode: true` and connects via the
+  # App-Level Token (SLACK_APP_TOKEN), not HTTP event subscriptions.
+  socket_mode_enabled: true
+
+  # Event Subscriptions — required so Bolt's socket-mode connection receives
+  # message events at all. src/channels/slack.ts listens on `message` events
+  # (all subtypes: regular messages, bot_message, message_changed) rather than
+  # narrower message.* subscriptions, so subscribe to the three surfaces below.
+  event_subscriptions:
+    bot_events:
+      - message.channels   # messages in public channels
+      - message.groups     # messages in private channels
+      - message.im         # direct messages to the bot
+
+  org_deploy_enabled: false
+  token_rotation_enabled: false
+
+# After creation:
+#   - Install the app to the workspace (generates the Bot Token).
+#   - Generate an App-Level Token under Basic Information -> App-Level Tokens
+#     with the `connections:write` scope (required for Socket Mode) — this is
+#     NOT listed under oauth_config.scopes because it's a token-level scope,
+#     not a bot OAuth scope.
+#   - Invite the bot to whichever channel will be the customer's main channel:
+#     `/invite @<ASSISTANT_NAME>` in that channel.
+#   - The channel ID (from the channel URL, e.g. C0123456789) becomes the JID
+#     `slack:C0123456789` used at registration time — see docs/HOSTED.md.

@@ -1,34 +1,113 @@
 /**
- * Monthly usage budget guard.
+ * Budget/entitlement check for API usage (OSS "API cost tracking & budgets").
  *
- * Enforces a per-month token and/or cost ceiling on API usage, plus the hosted
- * control-plane entitlement STATE (suspended/canceled hard-block). Budgets come
- * from, in precedence order:
+ * Kept as a single small module so a hosted control plane can swap the
+ * entitlement source without touching the credential proxy or db wiring in
+ * src/index.ts. Budgets come from, in precedence order:
  *
- *   1. entitlement.json  — the control-plane cache (when present and parseable)
- *   2. env vars          — USAGE_MONTHLY_TOKEN_BUDGET / USAGE_MONTHLY_COST_BUDGET_USD
- *   3. unlimited         — no budget configured
+ *   1. entitlement.json — <DATA_DIR>/entitlement.json, synced from the hosted
+ *      control plane (src/integrations/control-plane-sync.ts), when present
+ *      and parseable
+ *   2. env vars        — USAGE_MONTHLY_TOKEN_BUDGET / USAGE_MONTHLY_COST_BUDGET_USD
+ *   3. unlimited       — nothing configured (self-hosted OSS default)
  *
- * A `null` budget in either source means that dimension is unlimited. The
- * entitlement file also carries a `state`: `suspended` / `canceled` hard-block
- * regardless of budgets; every other state (`trialing` / `active` / `grace` /
- * `over_quota`) enforces the budgets normally.
+ * A `null` budget in the entitlement means that dimension is unlimited (it
+ * does NOT fall through to env). The entitlement also carries a plan `state`:
+ * `suspended` / `canceled` hard-block every request regardless of budgets;
+ * all other states (`trialing`/`active`/`grace`/`over_quota`) enforce budgets
+ * normally.
  *
  * FAIL-OPEN: a missing, unreadable, or corrupt entitlement.json falls back to
- * env budgets — it never crashes and never blocks. Self-hosted installs that
- * set no env vars and have no entitlement file run unlimited.
+ * env budgets — it never crashes and never blocks by itself. The parsed file
+ * is cached and re-read only when its mtime/size changes, keeping the hot
+ * path cheap (checkQuota runs on every /v1/messages request).
  *
- * The parsed entitlement file is cached and re-read only when its mtime changes,
- * so this stays cheap on the hot path (checked once per API request).
+ * Month-to-date totals are cached in memory and refreshed at most once per
+ * REFRESH_INTERVAL_MS. onUsageRecorded() lets the caller increment the
+ * cache immediately after each insert, so enforcement reacts within the same
+ * request burst instead of waiting for the next refresh.
  */
-
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from './config.js';
-import { getUsageTotalsSince } from './db.js';
-import { readEnvFile } from './env.js';
+import { getUsageSummary } from './db.js';
 import { logger } from './logger.js';
+
+export type QuotaResult = { ok: true } | { ok: false; reason: string };
+
+const REFRESH_INTERVAL_MS = 60_000;
+
+interface MonthToDateCache {
+  monthKey: string; // YYYY-MM, so a month rollover forces a fresh sum
+  tokens: number;
+  costUsd: number;
+  lastRefreshedAt: number;
+}
+
+let cache: MonthToDateCache | null = null;
+
+function currentMonthKey(d = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function monthStartIso(d = new Date()): string {
+  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString();
+}
+
+function refreshCache(): MonthToDateCache {
+  const monthKey = currentMonthKey();
+  const summary = getUsageSummary(monthStartIso());
+  const tokens =
+    summary.input_tokens +
+    summary.output_tokens +
+    summary.cache_read_tokens +
+    summary.cache_write_tokens;
+  cache = {
+    monthKey,
+    tokens,
+    costUsd: summary.est_cost_usd,
+    lastRefreshedAt: Date.now(),
+  };
+  return cache;
+}
+
+function getMonthToDate(): MonthToDateCache {
+  const monthKey = currentMonthKey();
+  if (
+    !cache ||
+    cache.monthKey !== monthKey ||
+    Date.now() - cache.lastRefreshedAt > REFRESH_INTERVAL_MS
+  ) {
+    return refreshCache();
+  }
+  return cache;
+}
+
+/**
+ * Call right after inserting a usage row so the in-memory cache reflects it
+ * immediately, ahead of the next scheduled refresh. Keeps budget enforcement
+ * timely even under a burst of requests within one refresh window.
+ */
+export function onUsageRecorded(usage: {
+  totalTokens: number;
+  costUsd: number;
+}): void {
+  const monthKey = currentMonthKey();
+  if (!cache || cache.monthKey !== monthKey) {
+    refreshCache();
+    return;
+  }
+  cache.tokens += usage.totalTokens;
+  cache.costUsd += usage.costUsd;
+}
+
+/** @internal - for tests only. Resets the in-memory month-to-date cache. */
+export function _resetUsageBudgetCache(): void {
+  cache = null;
+}
+
+// --- Control-plane entitlement (hosted mode) ---
 
 /** Control-plane entitlement states. Mirrors the pinned control-plane contract. */
 export type EntitlementState =
@@ -57,8 +136,6 @@ export function entitlementFilePath(): string {
   return path.join(DATA_DIR, 'entitlement.json');
 }
 
-// --- mtime-invalidated parse cache -----------------------------------------
-
 interface CachedEntitlement {
   mtimeMs: number;
   size: number;
@@ -67,35 +144,29 @@ interface CachedEntitlement {
 
 let entitlementCache: CachedEntitlement | undefined;
 
-/** Reset the in-memory cache. Test-only. */
+/** @internal - for tests only. Resets the in-memory entitlement-file cache. */
 export function _resetEntitlementCache(): void {
   entitlementCache = undefined;
 }
+
+const VALID_STATES: ReadonlySet<string> = new Set([
+  'trialing',
+  'active',
+  'grace',
+  'over_quota',
+  'suspended',
+  'canceled',
+]);
 
 /** Structurally validate a parsed entitlement object. Returns null if invalid. */
 function coerceEntitlement(raw: unknown): Entitlement | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
-  const validStates: EntitlementState[] = [
-    'trialing',
-    'active',
-    'grace',
-    'over_quota',
-    'suspended',
-    'canceled',
-  ];
-  if (
-    typeof o.state !== 'string' ||
-    !validStates.includes(o.state as EntitlementState)
-  ) {
+  if (typeof o.state !== 'string' || !VALID_STATES.has(o.state)) {
     return null;
   }
   const numOrNull = (v: unknown): number | null =>
-    v === null || v === undefined
-      ? null
-      : typeof v === 'number' && Number.isFinite(v)
-        ? v
-        : null;
+    typeof v === 'number' && Number.isFinite(v) ? v : null;
   return {
     state: o.state as EntitlementState,
     plan: typeof o.plan === 'string' ? o.plan : 'unknown',
@@ -154,24 +225,29 @@ export function loadEntitlement(): Entitlement | null {
   return value;
 }
 
-// --- budget resolution -----------------------------------------------------
+// --- Budget resolution ---
 
-function parseEnvNumber(raw: string | undefined): number | null {
-  if (raw === undefined) return null;
-  const trimmed = raw.trim();
-  if (trimmed === '') return null;
-  const n = Number(trimmed);
-  return Number.isFinite(n) && n > 0 ? n : null;
+function readIntEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function readFloatEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 export interface ResolvedBudgets {
-  /** null = unlimited. */
-  monthlyTokenBudget: number | null;
-  /** null = unlimited. */
-  monthlyCostBudgetUsd: number | null;
+  /** undefined = that dimension unlimited (never checked). */
+  tokenBudget: number | undefined;
+  costBudget: number | undefined;
   /** Where the budgets came from (for logging/telemetry). */
   source: 'entitlement' | 'env' | 'unlimited';
-  /** The entitlement state, if an entitlement file drove the resolution. */
+  /** The entitlement state, when an entitlement file drove the resolution. */
   state: EntitlementState | null;
 }
 
@@ -184,139 +260,80 @@ export function resolveBudgets(): ResolvedBudgets {
   const ent = loadEntitlement();
   if (ent) {
     return {
-      monthlyTokenBudget: ent.monthlyTokenBudget,
-      monthlyCostBudgetUsd: ent.monthlyCostBudgetUsd,
+      tokenBudget: ent.monthlyTokenBudget ?? undefined,
+      costBudget: ent.monthlyCostBudgetUsd ?? undefined,
       source: 'entitlement',
       state: ent.state,
     };
   }
-  // Prefer process.env; fall back to the install's .env (systemd doesn't load
-  // .env globally), matching how the rest of the framework reads operator vars.
-  const envFile = readEnvFile([
-    'USAGE_MONTHLY_TOKEN_BUDGET',
-    'USAGE_MONTHLY_COST_BUDGET_USD',
-  ]);
-  const envTokens = parseEnvNumber(
-    process.env.USAGE_MONTHLY_TOKEN_BUDGET ??
-      envFile.USAGE_MONTHLY_TOKEN_BUDGET,
-  );
-  const envCost = parseEnvNumber(
-    process.env.USAGE_MONTHLY_COST_BUDGET_USD ??
-      envFile.USAGE_MONTHLY_COST_BUDGET_USD,
-  );
-  if (envTokens !== null || envCost !== null) {
-    return {
-      monthlyTokenBudget: envTokens,
-      monthlyCostBudgetUsd: envCost,
-      source: 'env',
-      state: null,
-    };
+  const tokenBudget = readIntEnv('USAGE_MONTHLY_TOKEN_BUDGET');
+  const costBudget = readFloatEnv('USAGE_MONTHLY_COST_BUDGET_USD');
+  if (tokenBudget !== undefined || costBudget !== undefined) {
+    return { tokenBudget, costBudget, source: 'env', state: null };
   }
   return {
-    monthlyTokenBudget: null,
-    monthlyCostBudgetUsd: null,
+    tokenBudget: undefined,
+    costBudget: undefined,
     source: 'unlimited',
     state: null,
   };
 }
 
-// --- quota check -----------------------------------------------------------
-
-export interface QuotaResult {
-  ok: boolean;
-  /** Human-readable reason when blocked. */
-  reason?: string;
-  /** The state that produced the decision, if entitlement-driven. */
-  state?: EntitlementState | null;
-}
-
-/** First day of the current UTC month, as an ISO string. */
-function monthStartIso(now = new Date()): string {
-  return new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0),
-  ).toISOString();
-}
-
-// The month-to-date totals are cached briefly so we don't re-sum the whole
-// api_usage table on every single API request. The credential proxy calls
-// checkQuota per request; a few seconds of staleness is fine for a monthly cap.
-const TOTALS_TTL_MS = 5_000;
-let totalsCache:
-  | { at: number; totalTokens: number; totalCostUsd: number }
-  | undefined;
-
-/** Test-only: clear the month-to-date totals cache. */
-export function _resetTotalsCache(): void {
-  totalsCache = undefined;
-}
-
-function monthToDateTotals(): { totalTokens: number; totalCostUsd: number } {
-  const now = Date.now();
-  if (totalsCache && now - totalsCache.at < TOTALS_TTL_MS) {
-    return totalsCache;
-  }
-  const totals = getUsageTotalsSince(monthStartIso());
-  totalsCache = { at: now, ...totals };
-  return totals;
-}
-
 /**
- * Decide whether a new API request is allowed under the current entitlement +
- * budgets. Called by the credential proxy before forwarding a request.
- *
- * - suspended / canceled  → always blocked, regardless of budgets.
- * - otherwise             → blocked only if a configured budget is exceeded.
- * - no budgets configured → always allowed.
- *
- * Never throws: any unexpected error resolves to `{ ok: true }` (fail-open) so
- * a metering bug can't take the whole assistant offline.
+ * Check the current entitlement state and month-to-date usage against the
+ * resolved budgets (entitlement.json → env vars → unlimited). A `suspended`
+ * or `canceled` entitlement blocks unconditionally; otherwise an absent
+ * budget = unlimited (that dimension is never checked).
  */
 export function checkQuota(): QuotaResult {
-  try {
-    const budgets = resolveBudgets();
+  const budgets = resolveBudgets();
 
-    if (budgets.state === 'suspended') {
-      return {
-        ok: false,
-        state: 'suspended',
-        reason:
-          'This workspace is suspended. API access is paused until the account is reactivated in the control plane.',
-      };
-    }
-    if (budgets.state === 'canceled') {
-      return {
-        ok: false,
-        state: 'canceled',
-        reason:
-          'This workspace subscription is canceled. API access is disabled.',
-      };
-    }
+  if (budgets.state === 'suspended') {
+    logger.warn('Entitlement state is suspended — rejecting request');
+    return {
+      ok: false,
+      reason:
+        'This workspace is suspended. API access is paused until the account is reactivated in the control plane.',
+    };
+  }
+  if (budgets.state === 'canceled') {
+    logger.warn('Entitlement state is canceled — rejecting request');
+    return {
+      ok: false,
+      reason:
+        'This workspace subscription is canceled. API access is disabled.',
+    };
+  }
 
-    const { monthlyTokenBudget, monthlyCostBudgetUsd } = budgets;
-    if (monthlyTokenBudget === null && monthlyCostBudgetUsd === null) {
-      return { ok: true, state: budgets.state };
-    }
+  const { tokenBudget, costBudget } = budgets;
 
-    const { totalTokens, totalCostUsd } = monthToDateTotals();
-
-    if (monthlyTokenBudget !== null && totalTokens >= monthlyTokenBudget) {
-      return {
-        ok: false,
-        state: budgets.state,
-        reason: `Monthly token budget reached (${totalTokens.toLocaleString()} / ${monthlyTokenBudget.toLocaleString()} tokens).`,
-      };
-    }
-    if (monthlyCostBudgetUsd !== null && totalCostUsd >= monthlyCostBudgetUsd) {
-      return {
-        ok: false,
-        state: budgets.state,
-        reason: `Monthly cost budget reached ($${totalCostUsd.toFixed(2)} / $${monthlyCostBudgetUsd.toFixed(2)}).`,
-      };
-    }
-
-    return { ok: true, state: budgets.state };
-  } catch (err) {
-    logger.warn({ err }, 'checkQuota failed — allowing request (fail-open)');
+  if (tokenBudget === undefined && costBudget === undefined) {
     return { ok: true };
   }
+
+  const monthToDate = getMonthToDate();
+
+  if (tokenBudget !== undefined && monthToDate.tokens >= tokenBudget) {
+    logger.warn(
+      { tokens: monthToDate.tokens, tokenBudget },
+      'Monthly token budget exceeded — rejecting request',
+    );
+    return {
+      ok: false,
+      reason: `Monthly token budget exceeded (${monthToDate.tokens}/${tokenBudget} tokens used this month).`,
+    };
+  }
+
+  if (costBudget !== undefined && monthToDate.costUsd >= costBudget) {
+    logger.warn(
+      { costUsd: monthToDate.costUsd, costBudget },
+      'Monthly cost budget exceeded — rejecting request',
+    );
+    return {
+      ok: false,
+      reason: `Monthly cost budget exceeded ($${monthToDate.costUsd.toFixed(2)}/$${costBudget.toFixed(2)} used this month).`,
+    };
+  }
+
+  return { ok: true };
 }

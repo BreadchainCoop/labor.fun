@@ -1,0 +1,41 @@
+# ServiceAccount + namespaced Role (NOT ClusterRole — a tenant orchestrator
+# must never touch another tenant's namespace) granting exactly what the
+# Kubernetes container-runtime backend needs: create/list/watch/delete pods,
+# attach to them (kubectl run --rm -i attaches under the hood), and read logs
+# for debugging. No `exec` permission — the backend never execs into a
+# running pod. See docs/KUBERNETES.md "RBAC".
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nanoclaw-orchestrator
+  namespace: nanoclaw-tenant-example
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nanoclaw-agent-runner
+  namespace: nanoclaw-tenant-example
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/attach"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanoclaw-agent-runner-binding
+  namespace: nanoclaw-tenant-example
+subjects:
+  - kind: ServiceAccount
+    name: nanoclaw-orchestrator
+    namespace: nanoclaw-tenant-example
+roleRef:
+  kind: Role
+  name: nanoclaw-agent-runner
+  apiGroup: rbac.authorization.k8s.io

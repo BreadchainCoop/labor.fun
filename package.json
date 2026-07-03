@@ -18,6 +18,7 @@
     "sync-discord-members": "tsx scripts/sync-discord-members.ts",
     "sync-slack-members": "tsx scripts/sync-slack-members.ts",
     "pm-preview": "tsx scripts/pm-preview.ts",
+    "usage-report": "tsx scripts/usage-report.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",

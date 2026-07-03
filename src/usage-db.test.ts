@@ -4,8 +4,7 @@ import {
   _initTestDatabase,
   getApiUsageSince,
   getUsageReportCursor,
-  getUsageTotalsSince,
-  recordApiUsage,
+  insertApiUsage,
   setUsageReportCursor,
 } from './db.js';
 
@@ -13,84 +12,61 @@ beforeEach(() => {
   _initTestDatabase();
 });
 
-function seed(overrides: Parameters<typeof recordApiUsage>[0] = {}): number {
-  return recordApiUsage({
-    model: 'claude-opus-4-8',
+function seed(runTag: string | null = null): void {
+  insertApiUsage({
+    runTag,
+    model: 'claude-opus-4-6',
     inputTokens: 100,
     outputTokens: 50,
     cacheReadTokens: 10,
     cacheWriteTokens: 5,
     estCostUsd: 0.01,
     statusCode: 200,
-    createdAt: '2026-07-01T00:00:00.000Z',
-    ...overrides,
   });
 }
 
-describe('recordApiUsage / getApiUsageSince', () => {
-  it('assigns monotonic ids and reads rows with id > cursor, oldest first', () => {
-    const id1 = seed({ runTag: 'a' });
-    const id2 = seed({ runTag: 'b' });
-    const id3 = seed({ runTag: 'c' });
-    expect(id1).toBeLessThan(id2);
-    expect(id2).toBeLessThan(id3);
+describe('getApiUsageSince (control-plane report drain)', () => {
+  it('returns rows with id > cursor, oldest first, with monotonic ids', () => {
+    seed('a');
+    seed('b');
+    seed('c');
 
     const all = getApiUsageSince(0, 500);
-    expect(all.map((e) => e.id)).toEqual([id1, id2, id3]);
-    expect(all[0].runTag).toBe('a');
+    expect(all).toHaveLength(3);
+    expect(all[0].run_tag).toBe('a');
+    expect(all[1].id).toBeGreaterThan(all[0].id);
+    expect(all[2].id).toBeGreaterThan(all[1].id);
 
-    const afterFirst = getApiUsageSince(id1, 500);
-    expect(afterFirst.map((e) => e.id)).toEqual([id2, id3]);
+    const afterFirst = getApiUsageSince(all[0].id, 500);
+    expect(afterFirst.map((r) => r.run_tag)).toEqual(['b', 'c']);
   });
 
   it('honors the batch limit for draining', () => {
     for (let i = 0; i < 5; i++) seed();
-    const batch = getApiUsageSince(0, 2);
-    expect(batch).toHaveLength(2);
+    expect(getApiUsageSince(0, 2)).toHaveLength(2);
   });
 
-  it('maps snake_case columns to camelCase event fields', () => {
-    seed({
-      runTag: 'run-1',
-      model: 'claude-sonnet-5',
-      inputTokens: 7,
-      outputTokens: 3,
-      cacheReadTokens: 2,
-      cacheWriteTokens: 1,
-      estCostUsd: 0.5,
-      statusCode: 429,
+  it('returns full row fields for the wire mapping', () => {
+    seed('run-1');
+    const [row] = getApiUsageSince(0, 1);
+    expect(row).toMatchObject({
+      run_tag: 'run-1',
+      model: 'claude-opus-4-6',
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_tokens: 10,
+      cache_write_tokens: 5,
+      est_cost_usd: 0.01,
+      status_code: 200,
     });
-    const [e] = getApiUsageSince(0, 500);
-    expect(e).toMatchObject({
-      runTag: 'run-1',
-      model: 'claude-sonnet-5',
-      inputTokens: 7,
-      outputTokens: 3,
-      cacheReadTokens: 2,
-      cacheWriteTokens: 1,
-      estCostUsd: 0.5,
-      statusCode: 429,
-    });
-  });
-});
-
-describe('getUsageTotalsSince', () => {
-  it('sums all token dimensions and cost from a cutoff', () => {
-    seed({ createdAt: '2026-06-30T23:59:59.000Z' }); // before cutoff
-    seed({ createdAt: '2026-07-01T12:00:00.000Z' });
-    seed({ createdAt: '2026-07-02T12:00:00.000Z' });
-
-    const totals = getUsageTotalsSince('2026-07-01T00:00:00.000Z');
-    // Two in-window rows: (100+50+10+5) tokens each = 165 * 2 = 330
-    expect(totals.totalTokens).toBe(330);
-    expect(totals.totalCostUsd).toBeCloseTo(0.02, 6);
+    expect(typeof row.id).toBe('number');
+    expect(typeof row.created_at).toBe('string');
   });
 
-  it('returns zeros with no rows', () => {
-    expect(getUsageTotalsSince('2026-01-01T00:00:00.000Z')).toEqual({
-      totalTokens: 0,
-      totalCostUsd: 0,
-    });
+  it('returns empty when nothing is newer than the cursor', () => {
+    seed();
+    const [row] = getApiUsageSince(0, 10);
+    expect(getApiUsageSince(row.id, 10)).toEqual([]);
   });
 });
 

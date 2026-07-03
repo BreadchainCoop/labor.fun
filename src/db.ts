@@ -236,6 +236,31 @@ function createSchema(database: Database.Database): void {
       ON safe_payouts(safe_tx_hash) WHERE safe_tx_hash IS NOT NULL;
   `);
 
+  // --- API usage / cost tracking (usage metering foundation) ---
+  // One row per completed /v1/messages call observed by the credential proxy
+  // (src/credential-proxy.ts). run_tag is the container name (see
+  // container-runner.ts), letting usage be grouped by group/run via prefix.
+  // est_cost_usd is computed at insert time from src/model-pricing.ts so
+  // historical rows keep the price that was in effect when the call was made,
+  // even if pricing is later overridden via MODEL_PRICING_JSON.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_tag TEXT,
+      model TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      est_cost_usd REAL NOT NULL DEFAULT 0,
+      status_code INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_run_tag ON api_usage(run_tag);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_model ON api_usage(model);
+  `);
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -439,31 +464,6 @@ function createSchema(database: Database.Database): void {
       PRIMARY KEY (period)
     )
   `);
-
-  // --- API usage metering ---
-
-  // One row per upstream Anthropic API call the credential proxy observes,
-  // with the per-request token counts parsed from the response. Powers the
-  // usage-budget quota check (month-to-date sum) and the hosted control-plane
-  // usage reporting (rows are pushed up by id, cursor tracked in router_state).
-  // Append-only; `id` is a monotonic AUTOINCREMENT used as the report cursor.
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS api_usage (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      run_tag TEXT,
-      model TEXT,
-      input_tokens INTEGER NOT NULL DEFAULT 0,
-      output_tokens INTEGER NOT NULL DEFAULT 0,
-      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-      est_cost_usd REAL NOT NULL DEFAULT 0,
-      status_code INTEGER,
-      created_at TEXT NOT NULL
-    )
-  `);
-  database.exec(
-    `CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at)`,
-  );
 
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
@@ -1099,142 +1099,6 @@ export function setRouterState(key: string, value: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run(key, value);
-}
-
-// --- API usage metering + reporting accessors ---
-
-export interface ApiUsageEvent {
-  id: number;
-  runTag: string | null;
-  model: string | null;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  estCostUsd: number;
-  statusCode: number | null;
-  createdAt: string;
-}
-
-/**
- * Record one observed upstream API call. Append-only; the auto-increment `id`
- * doubles as the control-plane report cursor. Returns the inserted row id.
- */
-export function recordApiUsage(usage: {
-  runTag?: string | null;
-  model?: string | null;
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  estCostUsd?: number;
-  statusCode?: number | null;
-  createdAt?: string;
-}): number {
-  const result = db
-    .prepare(
-      `INSERT INTO api_usage
-        (run_tag, model, input_tokens, output_tokens, cache_read_tokens,
-         cache_write_tokens, est_cost_usd, status_code, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      usage.runTag ?? null,
-      usage.model ?? null,
-      usage.inputTokens ?? 0,
-      usage.outputTokens ?? 0,
-      usage.cacheReadTokens ?? 0,
-      usage.cacheWriteTokens ?? 0,
-      usage.estCostUsd ?? 0,
-      usage.statusCode ?? null,
-      usage.createdAt ?? new Date().toISOString(),
-    );
-  return Number(result.lastInsertRowid);
-}
-
-/**
- * Sum tokens (all dimensions) and estimated cost for rows created on/after
- * `sinceIso`. Used by the usage-budget month-to-date quota check.
- */
-export function getUsageTotalsSince(sinceIso: string): {
-  totalTokens: number;
-  totalCostUsd: number;
-} {
-  const row = db
-    .prepare(
-      `SELECT
-         COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
-         COALESCE(SUM(est_cost_usd), 0) AS cost
-       FROM api_usage
-       WHERE created_at >= ?`,
-    )
-    .get(sinceIso) as { tokens: number; cost: number };
-  return { totalTokens: row.tokens, totalCostUsd: row.cost };
-}
-
-/**
- * Fetch up to `limit` usage rows with id greater than `cursor`, oldest first.
- * Used by the control-plane sync to drain usage deltas in batches.
- */
-export function getApiUsageSince(
-  cursor: number,
-  limit: number,
-): ApiUsageEvent[] {
-  const rows = db
-    .prepare(
-      `SELECT id, run_tag, model, input_tokens, output_tokens,
-              cache_read_tokens, cache_write_tokens, est_cost_usd,
-              status_code, created_at
-       FROM api_usage
-       WHERE id > ?
-       ORDER BY id ASC
-       LIMIT ?`,
-    )
-    .all(cursor, limit) as Array<{
-    id: number;
-    run_tag: string | null;
-    model: string | null;
-    input_tokens: number;
-    output_tokens: number;
-    cache_read_tokens: number;
-    cache_write_tokens: number;
-    est_cost_usd: number;
-    status_code: number | null;
-    created_at: string;
-  }>;
-  return rows.map((r) => ({
-    id: r.id,
-    runTag: r.run_tag,
-    model: r.model,
-    inputTokens: r.input_tokens,
-    outputTokens: r.output_tokens,
-    cacheReadTokens: r.cache_read_tokens,
-    cacheWriteTokens: r.cache_write_tokens,
-    estCostUsd: r.est_cost_usd,
-    statusCode: r.status_code,
-    createdAt: r.created_at,
-  }));
-}
-
-/**
- * Control-plane usage-report cursor: the last api_usage.id already reported
- * upstream. Persisted in router_state so it survives restarts and never
- * re-sends drained rows. Defaults to 0 (report from the beginning).
- */
-const USAGE_REPORT_CURSOR_KEY = 'control_plane_usage_cursor';
-
-export function getUsageReportCursor(): number {
-  const raw = getRouterState(USAGE_REPORT_CURSOR_KEY);
-  if (raw === undefined) return 0;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-export function setUsageReportCursor(cursor: number): void {
-  setRouterState(
-    USAGE_REPORT_CURSOR_KEY,
-    String(Math.max(0, Math.trunc(cursor))),
-  );
 }
 
 // --- Session accessors ---
@@ -2105,6 +1969,210 @@ export function decideProposalApproval(
     new Date().toISOString(),
     notes ?? null,
     approvalId,
+  );
+}
+
+// --- API usage / cost tracking accessors ---
+
+export interface ApiUsageInput {
+  runTag: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estCostUsd: number;
+  statusCode: number | null;
+}
+
+export function insertApiUsage(usage: ApiUsageInput): void {
+  db.prepare(
+    `INSERT INTO api_usage
+       (run_tag, model, input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, est_cost_usd, status_code, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    usage.runTag,
+    usage.model,
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cacheReadTokens,
+    usage.cacheWriteTokens,
+    usage.estCostUsd,
+    usage.statusCode,
+    new Date().toISOString(),
+  );
+}
+
+export interface ApiUsageModelBreakdown {
+  model: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}
+
+export interface ApiUsageSummary {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+  by_model: ApiUsageModelBreakdown[];
+}
+
+/** Total usage (+ per-model breakdown) recorded since `sinceIso`. */
+export function getUsageSummary(sinceIso: string): ApiUsageSummary {
+  const totals = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?`,
+    )
+    .get(sinceIso) as Omit<ApiUsageSummary, 'by_model'>;
+
+  const byModel = db
+    .prepare(
+      `SELECT
+         model,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?
+       GROUP BY model
+       ORDER BY est_cost_usd DESC`,
+    )
+    .all(sinceIso) as ApiUsageModelBreakdown[];
+
+  return { ...totals, by_model: byModel };
+}
+
+export interface MonthlyUsageRollup {
+  month: string; // YYYY-MM
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}
+
+/** Per-calendar-month usage rollup, most recent month first. */
+export function getMonthlyUsageRollup(): MonthlyUsageRollup[] {
+  return db
+    .prepare(
+      `SELECT
+         strftime('%Y-%m', created_at) AS month,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage
+       GROUP BY month
+       ORDER BY month DESC`,
+    )
+    .all() as MonthlyUsageRollup[];
+}
+
+/** Per-run_tag usage totals since `sinceIso` (used by scripts/usage-report.ts to group by container/group). */
+export function getUsageByRunTag(sinceIso: string): Array<{
+  run_tag: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}> {
+  return db
+    .prepare(
+      `SELECT
+         run_tag,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?
+       GROUP BY run_tag
+       ORDER BY est_cost_usd DESC`,
+    )
+    .all(sinceIso) as Array<{
+    run_tag: string | null;
+    requests: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    est_cost_usd: number;
+  }>;
+}
+
+export interface ApiUsageRow {
+  id: number;
+  run_tag: string | null;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+  status_code: number | null;
+  created_at: string;
+}
+
+/**
+ * Raw usage rows with id greater than `cursor`, oldest first, capped at
+ * `limit`. Used by the hosted control-plane sync
+ * (src/integrations/control-plane-sync.ts) to drain usage deltas in batches;
+ * the autoincrement `id` doubles as the report cursor.
+ */
+export function getApiUsageSince(cursor: number, limit: number): ApiUsageRow[] {
+  return db
+    .prepare(
+      `SELECT id, run_tag, model, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens, est_cost_usd,
+              status_code, created_at
+       FROM api_usage
+       WHERE id > ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .all(cursor, limit) as ApiUsageRow[];
+}
+
+/**
+ * Control-plane usage-report cursor: the last api_usage.id already reported
+ * upstream. Persisted in router_state so it survives restarts and never
+ * re-sends drained rows. Defaults to 0 (report from the beginning).
+ */
+const USAGE_REPORT_CURSOR_KEY = 'control_plane_usage_cursor';
+
+export function getUsageReportCursor(): number {
+  const raw = getRouterState(USAGE_REPORT_CURSOR_KEY);
+  if (raw === undefined) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+export function setUsageReportCursor(cursor: number): void {
+  setRouterState(
+    USAGE_REPORT_CURSOR_KEY,
+    String(Math.max(0, Math.trunc(cursor))),
   );
 }
 

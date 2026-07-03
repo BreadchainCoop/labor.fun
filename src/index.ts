@@ -32,7 +32,12 @@ import {
   SMITHERS_BRIDGE_TOKEN,
   TIMEZONE,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
+import { startCredentialProxy, UsageEvent } from './credential-proxy.js';
+import { estimateCostUsd } from './model-pricing.js';
+import {
+  checkQuota as checkUsageQuota,
+  onUsageRecorded,
+} from './usage-budget.js';
 import { startSmithersBridge } from './smithers-bridge.js';
 import './channels/index.js';
 import {
@@ -77,6 +82,7 @@ import {
   startAgentRun,
   completeAgentRun,
   recordPmDm,
+  insertApiUsage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -937,10 +943,49 @@ async function main(): Promise<void> {
   loadState();
   restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
+  // Start credential proxy (containers route API calls through this).
+  // Usage-metering hooks (OSS "API cost tracking & budgets" foundation):
+  // onUsage persists every observed /v1/messages call to api_usage with an
+  // estimated cost; checkQuota gates new requests against env-configured
+  // monthly budgets (src/usage-budget.ts). Both are no-ops unless the
+  // relevant env vars are set, so default behavior is unchanged.
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
+    {
+      onUsage: (usage: UsageEvent) => {
+        const estCostUsd = estimateCostUsd({
+          model: usage.model || '',
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheWriteTokens: usage.cacheWriteTokens,
+        });
+        try {
+          insertApiUsage({
+            runTag: usage.runTag,
+            model: usage.model,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            estCostUsd,
+            statusCode: usage.statusCode,
+          });
+          onUsageRecorded({
+            totalTokens:
+              usage.inputTokens +
+              usage.outputTokens +
+              usage.cacheReadTokens +
+              usage.cacheWriteTokens,
+            costUsd: estCostUsd,
+          });
+        } catch (err) {
+          logger.error({ err, usage }, 'Failed to record API usage');
+        }
+      },
+      checkQuota: () => checkUsageQuota(),
+    },
   );
 
   // Optionally start the Smithers durable-workflow bridge (orchestration/).

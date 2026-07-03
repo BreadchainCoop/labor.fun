@@ -58,6 +58,17 @@ const envConfig = readEnvFile([
   'SMITHERS_BRIDGE_ENABLED',
   'SMITHERS_BRIDGE_PORT',
   'SMITHERS_BRIDGE_TOKEN',
+  // Container runtime backend selection + Kubernetes-specific config.
+  // See docs/KUBERNETES.md. Inert unless CONTAINER_RUNTIME=kubernetes.
+  'CONTAINER_RUNTIME',
+  'K8S_NAMESPACE',
+  'K8S_VOLUME_MODE',
+  'K8S_NODE_NAME',
+  'K8S_DATA_PVC_NAME',
+  'K8S_POD_IP',
+  'AGENT_CONTAINER_MEMORY',
+  'AGENT_CONTAINER_CPUS',
+  'AGENT_CONTAINER_PIDS_LIMIT',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -135,6 +146,45 @@ export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,
 );
+
+// --- Container runtime backend ---
+// 'docker' (default, self-hosters) or 'kubernetes' (hosted SaaS — one
+// namespace per tenant, orchestrator as a Deployment, agent runs as Pods in
+// the same namespace). See docs/KUBERNETES.md and src/container-runtime-k8s.ts.
+export type ContainerRuntimeKind = 'docker' | 'kubernetes';
+export const CONTAINER_RUNTIME: ContainerRuntimeKind =
+  envVal('CONTAINER_RUNTIME') === 'kubernetes' ? 'kubernetes' : 'docker';
+
+// Namespace kubectl targets. Empty = use the current kubeconfig context's
+// default namespace (kubectl's own behavior when --namespace is omitted).
+export const K8S_NAMESPACE = envVal('K8S_NAMESPACE') || '';
+
+// How agent pods get the same filesystem view as the orchestrator:
+// 'hostPath' (default) pins agent pods to the orchestrator's node via
+// K8S_NODE_NAME and bind-mounts host paths directly, matching Docker's
+// single-host trust model. 'pvc' mounts a shared RWX PersistentVolumeClaim
+// (K8S_DATA_PVC_NAME) with subPaths mirroring the profile's relative layout,
+// for real multi-node clusters. See docs/KUBERNETES.md "Volumes".
+export type K8sVolumeMode = 'hostPath' | 'pvc';
+export const K8S_VOLUME_MODE: K8sVolumeMode =
+  envVal('K8S_VOLUME_MODE') === 'pvc' ? 'pvc' : 'hostPath';
+
+// Downward-API env vars the orchestrator Deployment must inject (see
+// deploy/k8s/tenant-example/deployment.yaml). Read here, not computed, so a
+// missing value fails loudly (undefined) rather than guessing.
+export const K8S_NODE_NAME = envVal('K8S_NODE_NAME') || '';
+export const K8S_POD_IP = envVal('K8S_POD_IP') || '';
+
+// PVC claim name shared by the orchestrator Deployment and every agent Pod
+// when K8S_VOLUME_MODE=pvc. Required in that mode; unused in hostPath mode.
+export const K8S_DATA_PVC_NAME = envVal('K8S_DATA_PVC_NAME') || '';
+
+// Agent container resource limits — shared between the docker and kubernetes
+// backends. Empty = no limit applied (current behavior, unchanged default).
+export const AGENT_CONTAINER_MEMORY = envVal('AGENT_CONTAINER_MEMORY') || '';
+export const AGENT_CONTAINER_CPUS = envVal('AGENT_CONTAINER_CPUS') || '';
+export const AGENT_CONTAINER_PIDS_LIMIT =
+  envVal('AGENT_CONTAINER_PIDS_LIMIT') || '';
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
