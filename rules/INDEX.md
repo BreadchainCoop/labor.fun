@@ -13,6 +13,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
 - **Needs deploy/operator access or a human decision**: [Escalation](escalation.md)
 - **Shipping / "is it live?" / deploy questions**: [Deployment](deployment.md)
+- **Multi-step work / cloning repos / where files persist**: [Runtime Environment](runtime-environment.md)
 - **GitHub operations**: [GitHub Integration](integrations/github.md)
 - **Linear operations**: [Linear Integration](integrations/linear.md)
 - **Reading Discord channel history**: [Discord Integration](integrations/discord.md)
@@ -36,6 +37,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
 | [Escalation](escalation.md) | `rules/escalation.md` | A request needs deploy/operator access or a human decision the assistant can't make |
 | [Deployment](deployment.md) | `rules/deployment.md` | Shipping changes, "is it live?", how auto-deploy works (merge -> auto-deploy, no manual step) |
+| [Runtime Environment](runtime-environment.md) | `rules/runtime-environment.md` | Multi-step/multi-turn work — `/tmp` is ephemeral per turn; clone repos under `/workspace/group/.work` |
 | [Identity & Allowlist](identity/README.md) | `rules/identity/` | Resolving who is asking; allowlisted vs unknown |
 | [Voice & Register](identity/voice.md) | `rules/identity/voice.md` | Every message — peer/co-op tone, shared-mirror not scoreboard |
 | [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
