@@ -17,6 +17,10 @@ export default defineConfig({
       // are unit-tested beside them. The test files import only the helpers,
       // never server.mjs (which starts a server on import).
       'kb-ui/**/*.test.mjs',
+      // agenda-web page renderers are plain .mjs (no build step); their tests
+      // live beside them and import only the pure render fns, never serve.mjs
+      // (which starts an HTTPS server on import).
+      'tools/agenda-page/*.test.mjs',
     ],
   },
 });
