@@ -11,6 +11,7 @@ import {
   IDLE_TIMEOUT,
   isPrivilegedGroup,
   MAX_MESSAGES_PER_PROMPT,
+  FRESH_SESSION_BACKFILL_MESSAGES,
   OPS_REPORT_AUDIENCE,
   OPS_REPORT_INTERVAL_MS,
   OPS_REPORT_OVERLOAD_RATIO,
@@ -62,6 +63,7 @@ import {
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessagesSince,
+  getRecentMessages,
   getNewMessages,
   getRouterState,
   initDatabase,
@@ -87,6 +89,7 @@ import {
   formatOutbound,
   stripInternalTags,
 } from './router.js';
+import { selectPromptMessages } from './context-window.js';
 import './chat-flows/index.js';
 import {
   findChatFlow,
@@ -448,7 +451,36 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     for (const c of run.fresh) recordPmDm(c.person, c.taskId, c.reason);
     logger.info({ group: group.name }, 'PM orchestration triggered from chat');
   } else {
-    prompt = formatMessages(missedMessages, TIMEZONE);
+    // Continuity: a resumed session already holds the prior conversation in its
+    // transcript, so only the new (since-cursor) messages are needed. A FRESH
+    // session has no memory — the since-cursor slice can be a single message —
+    // so backfill the recent thread so the agent can resolve references like
+    // "this" without the user replying to a specific message. Trigger/cursor
+    // logic above still keys off `missedMessages`; only the prompt gets richer.
+    const hasSession = Boolean(sessions[group.folder]);
+    const recentHistory = hasSession
+      ? []
+      : getRecentMessages(
+          chatJid,
+          ASSISTANT_NAME,
+          FRESH_SESSION_BACKFILL_MESSAGES,
+        );
+    const promptMessages = selectPromptMessages(
+      hasSession,
+      missedMessages,
+      recentHistory,
+    );
+    if (!hasSession && promptMessages.length > missedMessages.length) {
+      logger.info(
+        {
+          group: group.name,
+          backfilled: promptMessages.length,
+          sinceCursor: missedMessages.length,
+        },
+        'Fresh session — backfilled recent history for continuity',
+      );
+    }
+    prompt = formatMessages(promptMessages, TIMEZONE);
   }
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch

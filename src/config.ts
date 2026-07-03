@@ -147,6 +147,15 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
+// When an agent session is FRESH (no prior transcript — first run, or the
+// session was cleared/expired), the per-turn "messages since cursor" prompt can
+// be as little as one message, leaving the agent with no idea what the user is
+// referring to ("this", "that one"). On a fresh session we instead backfill the
+// last N messages of the chat for continuity. Resumed sessions are unaffected.
+export const FRESH_SESSION_BACKFILL_MESSAGES = Math.max(
+  1,
+  parseInt(process.env.FRESH_SESSION_BACKFILL_MESSAGES || '40', 10) || 40,
+);
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
