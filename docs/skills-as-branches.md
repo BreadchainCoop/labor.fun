@@ -274,7 +274,7 @@ Users make custom changes directly on their main branch. This is the standard fo
 ```bash
 # Make changes
 vim src/config.ts
-git commit -am "change trigger word to @Bob"
+git commit -am "change trigger word to @MyBot"
 git push origin main
 ```
 
@@ -374,9 +374,9 @@ Anyone can maintain their own fork with skill branches and their own marketplace
 
 A community contributor:
 
-1. Maintains a fork of Breadbrich Engels (e.g., `alice/breadbrich`)
+1. Maintains a fork of Breadbrich Engels (e.g., `yourorg/breadbrich`)
 2. Creates `skill/*` branches on their fork with their custom skills
-3. Creates a marketplace repo (e.g., `alice/breadbrich-skills`) with a `.claude-plugin/marketplace.json` and plugin structure
+3. Creates a marketplace repo (e.g., `yourorg/breadbrich-skills`) with a `.claude-plugin/marketplace.json` and plugin structure
 
 ### Adding a community marketplace
 
@@ -391,10 +391,10 @@ If the community contributor is trusted, they can open a PR to add their marketp
         "repo": "qwibitai/salem-skills"
       }
     },
-    "alice-breadbrich-skills": {
+    "yourorg-breadbrich-skills": {
       "source": {
         "source": "github",
-        "repo": "alice/breadbrich-skills"
+        "repo": "yourorg/breadbrich-skills"
       }
     }
   }
@@ -408,7 +408,7 @@ Once merged, all Breadbrich Engels users automatically discover the community ma
 `/setup` and `/customize` ask users whether they want to enable community skills. If yes, Claude installs community marketplace plugins via `claude plugin install`:
 
 ```bash
-claude plugin install alice-skills@alice-breadbrich-skills --scope project
+claude plugin install yourorg-skills@yourorg-breadbrich-skills --scope project
 ```
 
 Community skills are hot-loaded and immediately available — no restart needed. Dependent skills are only offered after their prerequisites are met (e.g., community Telegram add-ons only after Telegram is installed).
@@ -421,11 +421,11 @@ Users can also browse and install community plugins manually via `/plugin`.
 - **Multiple marketplaces coexist.** Users see skills from all trusted marketplaces in `/plugin`.
 - **Community skills use the same merge pattern.** The SKILL.md just points to a different remote:
   ```bash
-  git remote add alice https://github.com/alice/breadbrich.git
-  git fetch alice skill/my-cool-feature
-  git merge alice/skill/my-cool-feature
+  git remote add yourorg https://github.com/yourorg/breadbrich.git
+  git fetch yourorg skill/my-cool-feature
+  git merge yourorg/skill/my-cool-feature
   ```
-- **Users can also add marketplaces manually.** Even without being listed in settings.json, users can run `/plugin marketplace add alice/breadbrich-skills` to discover skills from any source.
+- **Users can also add marketplaces manually.** Even without being listed in settings.json, users can run `/plugin marketplace add yourorg/breadbrich-skills` to discover skills from any source.
 - **CI is per-fork.** Each community maintainer runs their own CI to keep their skill branches merged-forward. They can use the same GitHub Action as the upstream repo.
 
 ## Flavors
@@ -445,13 +445,13 @@ During `/setup`, users are offered a choice of flavors before any configuration 
 
 AskUserQuestion: "Start with a flavor or default Breadbrich Engels?"
 - Default Breadbrich Engels
-- Breadbrich Engels for Sales — Gmail + Slack + CRM (maintained by alice)
-- Breadbrich Engels Minimal — Telegram-only, lightweight (maintained by bob)
+- Breadbrich Engels for Sales — Gmail + Slack + CRM (maintained by yourorg)
+- Breadbrich Engels Minimal — Telegram-only, lightweight (maintained by otherorg)
 
 If a flavor is chosen:
 
 ```bash
-git remote add <flavor-name> https://github.com/alice/breadbrich.git
+git remote add <flavor-name> https://github.com/yourorg/breadbrich.git
 git fetch <flavor-name> main
 git merge <flavor-name>/main
 ```
@@ -481,14 +481,14 @@ The flavor maintainer keeps their fork updated (merging upstream, updating skill
 ```yaml
 flavors:
   - name: Breadbrich Engels for Sales
-    repo: alice/breadbrich
+    repo: yourorg/breadbrich
     description: Gmail + Slack + CRM integration, daily pipeline summaries
-    maintainer: alice
+    maintainer: yourorg
 
   - name: Breadbrich Engels Minimal
-    repo: bob/breadbrich
+    repo: otherorg/breadbrich
     description: Telegram-only, no container overhead
-    maintainer: bob
+    maintainer: otherorg
 ```
 
 Anyone can PR to add their flavor. The file is available locally when `/setup` runs since it's part of the cloned repo.

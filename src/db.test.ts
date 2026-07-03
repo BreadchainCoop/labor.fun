@@ -13,6 +13,7 @@ import {
   getMeetingSummaryById,
   getMessagesSince,
   getMonthlyUsageRollup,
+  getRecentMessages,
   getNewMessages,
   getTaskById,
   getUsageByRunTag,
@@ -940,5 +941,69 @@ describe('api_usage accessors', () => {
     const rollup = getMonthlyUsageRollup();
     expect(rollup.length).toBeGreaterThanOrEqual(1);
     expect(rollup[0].requests).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// --- getRecentMessages (fresh-session backfill) ---
+
+describe('getRecentMessages', () => {
+  beforeEach(() => {
+    storeChatMetadata('dm@g.us', '2024-01-01T00:00:00.000Z');
+    store({
+      id: 'r1',
+      chat_jid: 'dm@g.us',
+      sender: 'U@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'first',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+    store({
+      id: 'r2',
+      chat_jid: 'dm@g.us',
+      sender: 'U@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'second',
+      timestamp: '2024-01-01T00:00:02.000Z',
+    });
+    storeMessage({
+      id: 'r3',
+      chat_jid: 'dm@g.us',
+      sender: 'Bot@s.whatsapp.net',
+      sender_name: 'Bot',
+      content: 'bot reply',
+      timestamp: '2024-01-01T00:00:03.000Z',
+      is_bot_message: true,
+    });
+    store({
+      id: 'r4',
+      chat_jid: 'dm@g.us',
+      sender: 'U@s.whatsapp.net',
+      sender_name: 'User',
+      content: 'third',
+      timestamp: '2024-01-01T00:00:04.000Z',
+    });
+  });
+
+  it('returns recent messages chronologically, regardless of any cursor', () => {
+    const msgs = getRecentMessages('dm@g.us', 'Breadbrich Engels', 40);
+    // 3 user messages (bot reply excluded), oldest -> newest
+    expect(msgs.map((m) => m.content)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('excludes bot messages', () => {
+    const msgs = getRecentMessages('dm@g.us', 'Breadbrich Engels', 40);
+    expect(msgs.some((m) => m.content === 'bot reply')).toBe(false);
+  });
+
+  it('respects the limit, keeping the most recent', () => {
+    const msgs = getRecentMessages('dm@g.us', 'Breadbrich Engels', 2);
+    // last 2 user messages, still chronological
+    expect(msgs.map((m) => m.content)).toEqual(['second', 'third']);
+  });
+
+  it('returns [] for a chat with no messages', () => {
+    expect(getRecentMessages('nobody@g.us', 'Breadbrich Engels', 40)).toEqual(
+      [],
+    );
   });
 });

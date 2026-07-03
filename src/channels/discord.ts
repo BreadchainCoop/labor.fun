@@ -400,22 +400,33 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle reply context — annotate at the END so any @-mention trigger
-      // at the start of the user's message is still detected by the
-      // anchored trigger regex (`^@Breadbrich Engels`). Prepending here
-      // would silently block any reply that also @-mentions the bot.
+      // Handle reply context. In addition to the human-readable annotation
+      // (appended at the END so an @-mention trigger at the start of the
+      // user's message is still matched by the anchored trigger regex —
+      // prepending would silently block a reply that also @-mentions the
+      // bot), capture the STRUCTURED reply fields so the agent's context
+      // renders the quoted message. Without these, a reply only showed up as
+      // "[In reply to X]" with no idea WHICH message or its content (#95-adjacent).
+      let replyToMessageId: string | undefined;
+      let replyToContent: string | undefined;
+      let replyToSenderName: string | undefined;
+      let isReplyToBot = false;
       if (message.reference?.messageId) {
+        replyToMessageId = message.reference.messageId;
         try {
           const repliedTo = await message.channel.messages.fetch(
             message.reference.messageId,
           );
-          const replyAuthor =
+          replyToSenderName =
             repliedTo.member?.displayName ||
             repliedTo.author.displayName ||
             repliedTo.author.username;
-          content = `${content}\n[In reply to ${replyAuthor}]`;
+          replyToContent = repliedTo.content || undefined;
+          isReplyToBot = repliedTo.author.id === this.client?.user?.id;
+          content = `${content}\n[In reply to ${replyToSenderName}]`;
         } catch {
-          // Referenced message may have been deleted
+          // Referenced message may have been deleted / is uncached. Keep the
+          // id we have so the reply linkage isn't lost entirely.
         }
       }
 
@@ -501,6 +512,10 @@ export class DiscordChannel implements Channel {
         content,
         timestamp,
         is_from_me: false,
+        reply_to_message_id: replyToMessageId,
+        reply_to_message_content: replyToContent,
+        reply_to_sender_name: replyToSenderName,
+        is_reply_to_bot: isReplyToBot,
       });
 
       logger.info(

@@ -35,6 +35,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { renderAgendaPage } from './render.mjs';
+import { renderOpsReport } from './render-ops.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.AGENDA_WEB_PORT) || 8091;
@@ -48,10 +49,19 @@ const STATICRYPT_BIN =
 
 const log = (...a) => console.log(new Date().toISOString(), '[agenda-web]', ...a);
 
+// Page-data files are dispatched to a renderer by filename. A weekly agenda is
+// <YYYY-MM-DD>.json → renderAgendaPage; an operational report (#34) is
+// ops-<id>.json (e.g. ops-2026-W26.json) → renderOpsReport. The output basename
+// always mirrors the source basename (staticrypt keeps it), so <key>.html.
+function rendererFor(key) {
+  if (key.startsWith('ops-')) return renderOpsReport;
+  return renderAgendaPage;
+}
+
 /** A published file is stale if its JSON source is newer (or it doesn't exist). */
-function needsPublish(week) {
-  const out = path.join(SERVE_DIR, `${week}.html`);
-  const src = path.join(PAGEDATA_DIR, `${week}.json`);
+function needsPublish(key) {
+  const out = path.join(SERVE_DIR, `${key}.html`);
+  const src = path.join(PAGEDATA_DIR, `${key}.json`);
   if (!fs.existsSync(out)) return true;
   try {
     return fs.statSync(src).mtimeMs > fs.statSync(out).mtimeMs;
@@ -60,31 +70,31 @@ function needsPublish(week) {
   }
 }
 
-/** Render <week>.json → plaintext HTML → staticrypt-encrypted <serveDir>/<week>.html. */
-function publish(week) {
+/** Render <key>.json → plaintext HTML → staticrypt-encrypted <serveDir>/<key>.html. */
+function publish(key) {
   if (!PASSWORD) {
-    log('skip', week, '— AGENDA_WEB_PASSWORD not set');
+    log('skip', key, '— AGENDA_WEB_PASSWORD not set');
     return;
   }
   let data;
   try {
-    data = JSON.parse(fs.readFileSync(path.join(PAGEDATA_DIR, `${week}.json`), 'utf-8'));
+    data = JSON.parse(fs.readFileSync(path.join(PAGEDATA_DIR, `${key}.json`), 'utf-8'));
   } catch (err) {
-    log('skip', week, '— bad/missing JSON:', err.message);
+    log('skip', key, '— bad/missing JSON:', err.message);
     return;
   }
   fs.mkdirSync(SERVE_DIR, { recursive: true });
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agenda-'));
-  const plain = path.join(tmp, `${week}.html`);
-  fs.writeFileSync(plain, renderAgendaPage(data));
+  const plain = path.join(tmp, `${key}.html`);
+  fs.writeFileSync(plain, rendererFor(key)(data));
   try {
-    // staticrypt keeps the basename, writing <SERVE_DIR>/<week>.html (encrypted).
+    // staticrypt keeps the basename, writing <SERVE_DIR>/<key>.html (encrypted).
     execFileSync(STATICRYPT_BIN, [plain, '-p', PASSWORD, '--short', '-d', SERVE_DIR], {
       stdio: 'pipe',
     });
-    log('published', week);
+    log('published', key);
   } catch (err) {
-    log('encrypt failed for', week, '—', err.message);
+    log('encrypt failed for', key, '—', err.message);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -93,7 +103,8 @@ function publish(week) {
 function publishSweep() {
   if (!fs.existsSync(PAGEDATA_DIR)) return;
   for (const f of fs.readdirSync(PAGEDATA_DIR)) {
-    const m = f.match(/^(\d{4}-\d{2}-\d{2})\.json$/);
+    // Weekly agenda: <YYYY-MM-DD>.json ; ops report: ops-<id>.json.
+    const m = f.match(/^((?:\d{4}-\d{2}-\d{2})|(?:ops-[A-Za-z0-9._-]+))\.json$/);
     if (m && needsPublish(m[1])) publish(m[1]);
   }
 }

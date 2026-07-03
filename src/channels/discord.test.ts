@@ -812,6 +812,117 @@ describe('DiscordChannel', () => {
         }),
       );
     });
+
+    it('populates structured reply_to_* fields from the referenced message', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const msg = createMessage({
+        content: 'yes, fix it',
+        reference: { messageId: 'orig_123' },
+        guildName: 'Server',
+      });
+      // The bot (client user id '999888777') authored the replied-to message.
+      msg.channel.messages.fetch = vi.fn().mockResolvedValue({
+        author: {
+          id: '999888777',
+          username: 'breadrich',
+          displayName: 'Breadrich Engels',
+        },
+        member: { displayName: 'Breadrich Engels' },
+        content: 'here is my earlier message',
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          reply_to_message_id: 'orig_123',
+          reply_to_message_content: 'here is my earlier message',
+          reply_to_sender_name: 'Breadrich Engels',
+          is_reply_to_bot: true,
+        }),
+      );
+    });
+
+    it('marks is_reply_to_bot false when replying to a non-bot user', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const msg = createMessage({
+        content: 'seconded',
+        reference: { messageId: 'orig_456' },
+        guildName: 'Server',
+      });
+      msg.channel.messages.fetch = vi.fn().mockResolvedValue({
+        author: { id: '55599999', username: 'carla', displayName: 'Carla' },
+        member: { displayName: 'Carla' },
+        content: 'original human message',
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          reply_to_message_id: 'orig_456',
+          reply_to_message_content: 'original human message',
+          reply_to_sender_name: 'Carla',
+          is_reply_to_bot: false,
+        }),
+      );
+    });
+
+    it('keeps reply_to_message_id even when the referenced message cannot be fetched', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const msg = createMessage({
+        content: 'replying to a deleted message',
+        reference: { messageId: 'deleted_789' },
+        guildName: 'Server',
+      });
+      msg.channel.messages.fetch = vi
+        .fn()
+        .mockRejectedValue(new Error('Unknown Message'));
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          reply_to_message_id: 'deleted_789',
+          reply_to_message_content: undefined,
+          reply_to_sender_name: undefined,
+          is_reply_to_bot: false,
+          // No "[In reply to …]" annotation — it depends on the fetch.
+          content: 'replying to a deleted message',
+        }),
+      );
+    });
+
+    it('leaves reply_to_* undefined for a non-reply message', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const msg = createMessage({
+        content: 'just a message',
+        guildName: 'Server',
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          reply_to_message_id: undefined,
+          reply_to_message_content: undefined,
+          reply_to_sender_name: undefined,
+          is_reply_to_bot: false,
+        }),
+      );
+    });
   });
 
   // --- sendMessage ---
