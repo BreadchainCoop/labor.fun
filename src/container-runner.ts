@@ -529,8 +529,8 @@ function buildContainerArgs(
   const authMode = detectAuthMode();
   if (authMode === 'api-key') {
     const proxyAuthToken =
-      readEnvFile(['CREDENTIAL_PROXY_AUTH_TOKEN']).CREDENTIAL_PROXY_AUTH_TOKEN ||
-      process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+      readEnvFile(['CREDENTIAL_PROXY_AUTH_TOKEN'])
+        .CREDENTIAL_PROXY_AUTH_TOKEN || process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
     const placeholder = proxyAuthToken
       ? `placeholder.${proxyAuthToken}.${containerName}`
       : `placeholder-${containerName}`;

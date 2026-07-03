@@ -2060,9 +2060,7 @@ export function getMonthlyUsageRollup(): MonthlyUsageRollup[] {
 }
 
 /** Per-run_tag usage totals since `sinceIso` (used by scripts/usage-report.ts to group by container/group). */
-export function getUsageByRunTag(
-  sinceIso: string,
-): Array<{
+export function getUsageByRunTag(sinceIso: string): Array<{
   run_tag: string | null;
   requests: number;
   input_tokens: number;

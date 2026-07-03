@@ -64,9 +64,10 @@ export interface ProxyHooks {
 const PLACEHOLDER_PREFIX = 'placeholder';
 
 /** Parse the inbound placeholder x-api-key into its auth token (if any) and runTag. */
-function parsePlaceholderApiKey(
-  value: string | undefined,
-): { authToken: string | null; runTag: string | null } {
+function parsePlaceholderApiKey(value: string | undefined): {
+  authToken: string | null;
+  runTag: string | null;
+} {
   if (!value || !value.startsWith(PLACEHOLDER_PREFIX)) {
     return { authToken: null, runTag: null };
   }

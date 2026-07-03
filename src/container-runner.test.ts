@@ -394,7 +394,9 @@ describe('container-runner placeholder API key composition', () => {
     const apiKeyArg = args.find((a) => a.startsWith('ANTHROPIC_API_KEY='));
     expect(apiKeyArg).toBeDefined();
     const value = apiKeyArg!.slice('ANTHROPIC_API_KEY='.length);
-    expect(value).toMatch(/^placeholder\.shared-secret\.nanoclaw-test-group-\d+$/);
+    expect(value).toMatch(
+      /^placeholder\.shared-secret\.nanoclaw-test-group-\d+$/,
+    );
   });
 });
 

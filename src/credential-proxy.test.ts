@@ -410,7 +410,10 @@ describe('credential-proxy usage metering', () => {
   });
 
   it('returns a 429 with Anthropic-shaped body when checkQuota rejects', async () => {
-    const checkQuota = vi.fn(() => ({ ok: false as const, reason: 'over budget' }));
+    const checkQuota = vi.fn(() => ({
+      ok: false as const,
+      reason: 'over budget',
+    }));
     proxyPort = await startProxy(
       { ANTHROPIC_API_KEY: 'sk-ant-real-key' },
       { checkQuota },
