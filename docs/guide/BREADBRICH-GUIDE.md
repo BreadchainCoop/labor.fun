@@ -198,7 +198,7 @@ Located at `groups/<name>/context/<category>/<doc>.md`. Categories include `peop
 ```markdown
 ---
 visibility: open
-created_by: bob
+created_by: jane-doe
 tags: [engineering, breadbrich]
 ---
 
@@ -404,7 +404,7 @@ The rule order matters: the classifier picks the first matching rule. The fall-t
 Worked example. For `@Breadbrich Engels delete TASK-005 it's a duplicate`:
 
 1. Classifier: `request_type=task_management, action=delete, confidence=0.9`.
-2. Matching rule (`task_delete`): `auth: [admin, owner]`. The sender is `bob` (admin), so the request is allowed.
+2. Matching rule (`task_delete`): `auth: [admin, owner]`. The sender is `jane-doe` (admin), so the request is allowed.
 3. Route: `big_breadbrich`. The agent receives the request with the classification, calls the delete IPC tool.
 4. `share_back: [deleted_task_id, prior_state]`. The agent confirms the deletion and includes the recovered prior state in the reply for safety.
 5. `post_hooks: [update_memory_pointer_index, notify_owner_if_assigned]`. The KB pointer is refreshed; the previous owner is DM'd.

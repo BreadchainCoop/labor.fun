@@ -208,4 +208,4 @@ v3.0.0 tagged when:
 | Observer hallucination polluting KB | Writes through `modify_kb_file` RBAC; nothing auto-merges to canonical KB without human review queue |
 | Thin-forwarder IPC hop adds latency | Measured in Phase 2.d; acceptable if <500ms; typing indicator covers user perception |
 | Routing rules YAML grows unruly | Keep <20 rules in v1; HTML viz for audit; require PR review for changes |
-| Dave's Cloudflare tunnel changes during migration | Coordinated — Dave owns `cloudflared.service`; we don't touch it |
+| The infra owner's Cloudflare tunnel changes during migration | Coordinated — the infra owner owns `cloudflared.service`; we don't touch it |

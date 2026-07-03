@@ -63,7 +63,7 @@ If any check fails, STOP. Do not proceed.
 ### 0.3 — breadbrich-tunnel deprecated ✅ DONE 2026-04-21
 - Unit file moved to `/etc/systemd/system/breadbrich-tunnel.service.deprecated-2026-04-21`
 - Masked via `/dev/null` symlink
-- Live tunnel is `cloudflared.service` (Dave's setup, unrelated)
+- Live tunnel is `cloudflared.service` (the infra owner's setup, unrelated)
 
 ### 0.4 — Pre-migration master backup ✅ DONE 2026-04-21
 - `/opt/breadbrich-backups/pre-migration/breadbrich-premig-20260421-040545.tar.gz` (31M)
@@ -335,7 +335,7 @@ Each step only after verify window expires and no issues observed.
 
 - If a phase fails health check: auto-rollback via safe-deploy
 - If rollback fails: restore from pre-migration master tarball (R-13 procedure)
-- If recovery takes >1h: notify Dave (tunnel), Bob (coordinator)
+- If recovery takes >1h: notify the infra/tunnel owner and the on-call coordinator
 - Post-incident: write incident note in `groups/slack_main/context/artifacts/incidents/YYYY-MM-DD-*.md`
 
 ## Known gotchas (from memory + research)

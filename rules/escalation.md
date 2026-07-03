@@ -9,14 +9,23 @@ target rather than any hardcoded name or role tier.
 Escalate when an allowlisted user asks for something that requires host/operator
 access or a human decision the assistant can't make itself:
 
-- Deploying code or infrastructure changes
-- Modifying the assistant's own behavior, configuration, or deployment
-- Framework feature requests / bug reports for the assistant or dashboard
+- Host/infra access a merge can't provide (secrets, DNS, server changes,
+  rotating credentials)
+- Modifying the assistant's own runtime configuration or the host environment
+- A code change that needs a human to review/merge the PR before it can ship
 - Cross-system coordination the assistant can't complete end-to-end
 - Anything that fails because it's outside the container's reach
 
 Routine work the assistant **can** do (KB writes, tasks, scheduling, messages,
-GitHub issues/PRs, web research) is **not** an escalation — just do it.
+GitHub issues/PRs including opening and merging them, web research) is **not** an
+escalation — just do it.
+
+**Shipping code is not, by itself, an escalation.** A merged PR **auto-deploys**
+— see [Deployment](deployment.md). Never tell a user that a merged change needs a
+human to "run the deploy," and never name a person to run it — the deploy is
+automatic. Escalate only the parts a merge genuinely can't do (e.g. host/secret
+access), and only ever to the profile's **configured** `escalationContact` —
+never a name you inferred or remember.
 
 ## How to escalate
 
