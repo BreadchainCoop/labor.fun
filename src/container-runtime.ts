@@ -57,6 +57,30 @@ export function readonlyMountArgs(
   return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
+/**
+ * Env-gated `docker run` resource-limit flags: --memory (+ matching
+ * --memory-swap so swap isn't unbounded), --cpus, --pids-limit. Each flag is
+ * only added when its env var is set, so the default behavior (no limits) is
+ * unchanged for existing installs. Values are passed through verbatim to
+ * docker, which validates its own flag syntax (e.g. "512m", "1.5").
+ */
+export function resourceLimitArgs(): string[] {
+  const args: string[] = [];
+  const memory = process.env.AGENT_CONTAINER_MEMORY;
+  if (memory) {
+    args.push('--memory', memory, '--memory-swap', memory);
+  }
+  const cpus = process.env.AGENT_CONTAINER_CPUS;
+  if (cpus) {
+    args.push('--cpus', cpus);
+  }
+  const pidsLimit = process.env.AGENT_CONTAINER_PIDS_LIMIT;
+  if (pidsLimit) {
+    args.push('--pids-limit', pidsLimit);
+  }
+  return args;
+}
+
 /** Stop a container by name. Uses execFileSync to avoid shell injection. */
 export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {

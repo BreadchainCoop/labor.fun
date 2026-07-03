@@ -29,6 +29,7 @@ import {
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
   readonlyMountArgs,
+  resourceLimitArgs,
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
@@ -510,12 +511,30 @@ function buildContainerArgs(
   );
 
   // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
+  // API key mode: SDK sends x-api-key, proxy replaces with real key. The
+  //               placeholder encodes the container name (runTag) so the
+  //               proxy can attribute usage to this run — and, when
+  //               CREDENTIAL_PROXY_AUTH_TOKEN is set, a shared secret the
+  //               proxy checks before forwarding (multi-tenant hardening).
+  //               Format: placeholder-<runTag>, or with an auth token:
+  //               placeholder.<authToken>.<runTag>. See parsePlaceholderApiKey
+  //               in credential-proxy.ts for the matching decode logic and why
+  //               '.' is a safe separator (never appears in a container name).
   // OAuth mode:   SDK exchanges placeholder token for temp API key,
   //               proxy injects real OAuth token on that exchange request.
+  //               The exchange request carries the placeholder via
+  //               `authorization`, not `x-api-key`, so there's no placeholder
+  //               value to attach run attribution/auth-token to — OAuth mode
+  //               intentionally skips both (see credential-proxy.ts).
   const authMode = detectAuthMode();
   if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    const proxyAuthToken =
+      readEnvFile(['CREDENTIAL_PROXY_AUTH_TOKEN']).CREDENTIAL_PROXY_AUTH_TOKEN ||
+      process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+    const placeholder = proxyAuthToken
+      ? `placeholder.${proxyAuthToken}.${containerName}`
+      : `placeholder-${containerName}`;
+    args.push('-e', `ANTHROPIC_API_KEY=${placeholder}`);
   } else {
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
@@ -568,6 +587,10 @@ function buildContainerArgs(
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // Optional resource limits (AGENT_CONTAINER_MEMORY / _CPUS / _PIDS_LIMIT).
+  // Unset by default — no behavior change for existing installs.
+  args.push(...resourceLimitArgs());
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),

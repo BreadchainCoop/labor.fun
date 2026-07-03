@@ -66,6 +66,7 @@ vi.mock('./container-runtime.js', () => ({
   CONTAINER_HOST_GATEWAY: 'host.docker.internal',
   hostGatewayArgs: () => [],
   readonlyMountArgs: (h: string, c: string) => ['-v', `${h}:${c}:ro`],
+  resourceLimitArgs: vi.fn(() => []),
   stopContainer: vi.fn(),
 }));
 
@@ -118,6 +119,7 @@ vi.mock('child_process', async () => {
 import { spawn } from 'child_process';
 import fs from 'fs';
 import { logger } from './logger.js';
+import { resourceLimitArgs } from './container-runtime.js';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -333,6 +335,128 @@ describe('container-runner GitHub PAT injection', () => {
     expect(args).not.toContain('GITHUB_PERSONAL_ACCESS_TOKEN');
     // No env override is applied at all when the token is absent
     expect(opts.env).toBeUndefined();
+  });
+});
+
+describe('container-runner placeholder API key composition', () => {
+  let savedAuthToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    savedAuthToken = process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+    delete process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedAuthToken === undefined) {
+      delete process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+    } else {
+      process.env.CREDENTIAL_PROXY_AUTH_TOKEN = savedAuthToken;
+    }
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnArgs(): string[] {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1][1] as unknown as string[];
+  }
+
+  it('encodes placeholder-<containerName> with no auth token configured', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const args = lastSpawnArgs();
+    const apiKeyArg = args.find((a) => a.startsWith('ANTHROPIC_API_KEY='));
+    expect(apiKeyArg).toBeDefined();
+    const value = apiKeyArg!.slice('ANTHROPIC_API_KEY='.length);
+    expect(value).toMatch(/^placeholder-nanoclaw-test-group-\d+$/);
+  });
+
+  it('encodes placeholder.<authToken>.<containerName> when CREDENTIAL_PROXY_AUTH_TOKEN is set', async () => {
+    process.env.CREDENTIAL_PROXY_AUTH_TOKEN = 'shared-secret';
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const args = lastSpawnArgs();
+    const apiKeyArg = args.find((a) => a.startsWith('ANTHROPIC_API_KEY='));
+    expect(apiKeyArg).toBeDefined();
+    const value = apiKeyArg!.slice('ANTHROPIC_API_KEY='.length);
+    expect(value).toMatch(/^placeholder\.shared-secret\.nanoclaw-test-group-\d+$/);
+  });
+});
+
+describe('container-runner resource limit args', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(resourceLimitArgs).mockReturnValue([]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(resourceLimitArgs).mockReturnValue([]);
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnArgs(): string[] {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1][1] as unknown as string[];
+  }
+
+  it('includes no resource-limit flags by default', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+    const args = lastSpawnArgs();
+    expect(args).not.toContain('--memory');
+    expect(args).not.toContain('--cpus');
+    expect(args).not.toContain('--pids-limit');
+  });
+
+  it('forwards resourceLimitArgs() output into the docker run args', async () => {
+    vi.mocked(resourceLimitArgs).mockReturnValue([
+      '--memory',
+      '512m',
+      '--memory-swap',
+      '512m',
+      '--cpus',
+      '1.5',
+      '--pids-limit',
+      '256',
+    ]);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const args = lastSpawnArgs();
+    expect(args).toContain('--memory');
+    expect(args).toContain('512m');
+    expect(args).toContain('--cpus');
+    expect(args).toContain('1.5');
+    expect(args).toContain('--pids-limit');
+    expect(args).toContain('256');
   });
 });
 

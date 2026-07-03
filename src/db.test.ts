@@ -12,8 +12,12 @@ import {
   getMeetingSummariesByGroup,
   getMeetingSummaryById,
   getMessagesSince,
+  getMonthlyUsageRollup,
   getNewMessages,
   getTaskById,
+  getUsageByRunTag,
+  getUsageSummary,
+  insertApiUsage,
   markOrphanedRunsAsInterrupted,
   setRegisteredGroup,
   startAgentRun,
@@ -814,5 +818,127 @@ describe('markOrphanedRunsAsInterrupted', () => {
     const id = startRun();
     completeAgentRun(id, 'success', 10, 50);
     expect(markOrphanedRunsAsInterrupted()).toBe(0);
+  });
+});
+
+// --- api_usage accessors ---
+
+describe('api_usage accessors', () => {
+  it('insertApiUsage + getUsageSummary totals across models', () => {
+    insertApiUsage({
+      runTag: 'nanoclaw-main-1',
+      model: 'claude-sonnet-5',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 10,
+      estCostUsd: 0.001,
+      statusCode: 200,
+    });
+    insertApiUsage({
+      runTag: 'nanoclaw-main-2',
+      model: 'claude-opus-4',
+      inputTokens: 200,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.01,
+      statusCode: 200,
+    });
+
+    const summary = getUsageSummary('2000-01-01T00:00:00.000Z');
+    expect(summary.requests).toBe(2);
+    expect(summary.input_tokens).toBe(300);
+    expect(summary.output_tokens).toBe(150);
+    expect(summary.cache_read_tokens).toBe(5);
+    expect(summary.cache_write_tokens).toBe(10);
+    expect(summary.est_cost_usd).toBeCloseTo(0.011, 6);
+    expect(summary.by_model).toHaveLength(2);
+  });
+
+  it('getUsageSummary excludes rows before sinceIso', () => {
+    insertApiUsage({
+      runTag: 'nanoclaw-main-1',
+      model: 'claude-sonnet-5',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.001,
+      statusCode: 200,
+    });
+
+    const summary = getUsageSummary('2999-01-01T00:00:00.000Z');
+    expect(summary.requests).toBe(0);
+  });
+
+  it('getUsageByRunTag groups per run_tag', () => {
+    insertApiUsage({
+      runTag: 'nanoclaw-main-1',
+      model: 'claude-sonnet-5',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.001,
+      statusCode: 200,
+    });
+    insertApiUsage({
+      runTag: 'nanoclaw-main-1',
+      model: 'claude-sonnet-5',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.001,
+      statusCode: 200,
+    });
+    insertApiUsage({
+      runTag: 'nanoclaw-worker-2',
+      model: 'claude-opus-4',
+      inputTokens: 200,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.01,
+      statusCode: 200,
+    });
+
+    const rows = getUsageByRunTag('2000-01-01T00:00:00.000Z');
+    expect(rows).toHaveLength(2);
+    const mainRow = rows.find((r) => r.run_tag === 'nanoclaw-main-1');
+    expect(mainRow?.requests).toBe(2);
+    expect(mainRow?.input_tokens).toBe(200);
+  });
+
+  it('insertApiUsage handles a null runTag (unattributed usage)', () => {
+    insertApiUsage({
+      runTag: null,
+      model: 'claude-sonnet-5',
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.0001,
+      statusCode: 200,
+    });
+    const rows = getUsageByRunTag('2000-01-01T00:00:00.000Z');
+    expect(rows.find((r) => r.run_tag === null)).toBeDefined();
+  });
+
+  it('getMonthlyUsageRollup buckets by calendar month', () => {
+    insertApiUsage({
+      runTag: 'nanoclaw-main-1',
+      model: 'claude-sonnet-5',
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estCostUsd: 0.001,
+      statusCode: 200,
+    });
+    const rollup = getMonthlyUsageRollup();
+    expect(rollup.length).toBeGreaterThanOrEqual(1);
+    expect(rollup[0].requests).toBeGreaterThanOrEqual(1);
   });
 });

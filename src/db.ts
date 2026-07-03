@@ -236,6 +236,31 @@ function createSchema(database: Database.Database): void {
       ON safe_payouts(safe_tx_hash) WHERE safe_tx_hash IS NOT NULL;
   `);
 
+  // --- API usage / cost tracking (usage metering foundation) ---
+  // One row per completed /v1/messages call observed by the credential proxy
+  // (src/credential-proxy.ts). run_tag is the container name (see
+  // container-runner.ts), letting usage be grouped by group/run via prefix.
+  // est_cost_usd is computed at insert time from src/model-pricing.ts so
+  // historical rows keep the price that was in effect when the call was made,
+  // even if pricing is later overridden via MODEL_PRICING_JSON.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_tag TEXT,
+      model TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      est_cost_usd REAL NOT NULL DEFAULT 0,
+      status_code INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_run_tag ON api_usage(run_tag);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_model ON api_usage(model);
+  `);
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -1917,6 +1942,158 @@ export function decideProposalApproval(
     notes ?? null,
     approvalId,
   );
+}
+
+// --- API usage / cost tracking accessors ---
+
+export interface ApiUsageInput {
+  runTag: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estCostUsd: number;
+  statusCode: number | null;
+}
+
+export function insertApiUsage(usage: ApiUsageInput): void {
+  db.prepare(
+    `INSERT INTO api_usage
+       (run_tag, model, input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, est_cost_usd, status_code, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    usage.runTag,
+    usage.model,
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cacheReadTokens,
+    usage.cacheWriteTokens,
+    usage.estCostUsd,
+    usage.statusCode,
+    new Date().toISOString(),
+  );
+}
+
+export interface ApiUsageModelBreakdown {
+  model: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}
+
+export interface ApiUsageSummary {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+  by_model: ApiUsageModelBreakdown[];
+}
+
+/** Total usage (+ per-model breakdown) recorded since `sinceIso`. */
+export function getUsageSummary(sinceIso: string): ApiUsageSummary {
+  const totals = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?`,
+    )
+    .get(sinceIso) as Omit<ApiUsageSummary, 'by_model'>;
+
+  const byModel = db
+    .prepare(
+      `SELECT
+         model,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?
+       GROUP BY model
+       ORDER BY est_cost_usd DESC`,
+    )
+    .all(sinceIso) as ApiUsageModelBreakdown[];
+
+  return { ...totals, by_model: byModel };
+}
+
+export interface MonthlyUsageRollup {
+  month: string; // YYYY-MM
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}
+
+/** Per-calendar-month usage rollup, most recent month first. */
+export function getMonthlyUsageRollup(): MonthlyUsageRollup[] {
+  return db
+    .prepare(
+      `SELECT
+         strftime('%Y-%m', created_at) AS month,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage
+       GROUP BY month
+       ORDER BY month DESC`,
+    )
+    .all() as MonthlyUsageRollup[];
+}
+
+/** Per-run_tag usage totals since `sinceIso` (used by scripts/usage-report.ts to group by container/group). */
+export function getUsageByRunTag(
+  sinceIso: string,
+): Array<{
+  run_tag: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}> {
+  return db
+    .prepare(
+      `SELECT
+         run_tag,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?
+       GROUP BY run_tag
+       ORDER BY est_cost_usd DESC`,
+    )
+    .all(sinceIso) as Array<{
+    run_tag: string | null;
+    requests: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    est_cost_usd: number;
+  }>;
 }
 
 // --- JSON migration ---

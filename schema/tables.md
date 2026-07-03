@@ -284,6 +284,23 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | **period** | TEXT PK | Period key — ISO week (`2026-W24`) or month (`2026-06`) |
 | sent_at    | TEXT    | ISO timestamp the report was delivered                  |
 
+### api_usage
+
+API cost tracking & budgets: one row per completed `/v1/messages` call observed by the credential proxy (`src/credential-proxy.ts`). Powers usage reporting (`scripts/usage-report.ts`) and budget enforcement (`src/usage-budget.ts`). `run_tag` is the spawning container's name (see `container-runner.ts`), which encodes the group folder, so usage can be grouped per-group by prefix. `est_cost_usd` is computed at insert time from `src/model-pricing.ts`, so historical rows keep the price in effect when the call was made even if pricing is later overridden.
+
+| Column             | Type       | Notes                                              |
+| ------------------ | ---------- | --------------------------------------------------- |
+| **id**             | INTEGER PK | Autoincrement                                      |
+| run_tag            | TEXT       | Container name the request was attributed to (nullable — unattributed when the container sent no placeholder run tag) |
+| model              | TEXT       | Model id reported by the API response              |
+| input_tokens       | INTEGER    | Prompt tokens (excludes cache)                     |
+| output_tokens      | INTEGER    | Completion tokens                                  |
+| cache_read_tokens  | INTEGER    | Tokens served from the prompt cache                |
+| cache_write_tokens | INTEGER    | Tokens written to the prompt cache                 |
+| est_cost_usd       | REAL       | Estimated USD cost at time of the call             |
+| status_code        | INTEGER    | HTTP status of the upstream response               |
+| created_at         | TEXT       | ISO timestamp (indexed)                            |
+
 ## Indices
 
 | Index                          | Columns                                | Purpose                                      |
@@ -299,3 +316,6 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | idx_expenses_status            | expenses(status)                       | Approval-queue lookup                        |
 | idx_expenses_requester         | expenses(requester_user_id)            | Per-person expense history                   |
 | idx_expenses_event             | expenses(event_id)                     | Expense grouping by event_id                 |
+| idx_api_usage_created          | api_usage(created_at)                  | Time-range usage queries                     |
+| idx_api_usage_run_tag          | api_usage(run_tag)                     | Per-run/group usage lookup                   |
+| idx_api_usage_model            | api_usage(model)                       | Per-model usage breakdown                    |
