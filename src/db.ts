@@ -852,6 +852,34 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
+/**
+ * Fetch the most recent `limit` messages for a chat, regardless of any cursor.
+ * Used to backfill conversational context when starting a FRESH agent session
+ * (which has no prior transcript) so the assistant remembers the recent thread
+ * without the user having to reply to a specific message. Same bot-message
+ * filter and chronological ordering as `getMessagesSince`.
+ */
+export function getRecentMessages(
+  chatJid: string,
+  botPrefix: string,
+  limit: number = 40,
+): NewMessage[] {
+  const sql = `
+    SELECT * FROM (
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name,
+             is_reply_to_bot
+      FROM messages
+      WHERE chat_jid = ?
+        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `;
+  return db.prepare(sql).all(chatJid, `${botPrefix}:%`, limit) as NewMessage[];
+}
+
 export function getLastBotMessageTimestamp(
   chatJid: string,
   botPrefix: string,
