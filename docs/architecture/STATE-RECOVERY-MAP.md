@@ -118,7 +118,7 @@ Coordinate with the Cloudflare account owner.
 
 ```bash
 # If just rotating the existing tunnel token (not recreating the tunnel)
-# Dave rotates in Cloudflare dashboard → gets new --token value
+# The infra owner rotates in Cloudflare dashboard → gets new --token value
 # On droplet:
 systemctl stop cloudflared
 # Edit /etc/systemd/system/cloudflared.service — replace --token <new_value>
@@ -195,7 +195,7 @@ curl http://localhost:8080/  # KB UI
 | KB file deleted | R-03 (git checkout or tarball) | 1-5min | None if committed |
 | .env tokens compromised | Rotate at platform → R-02 (update both .env) → restart | 15min | None |
 | Bot token rotation | BotFather/Slack/Anthropic console → R-02 | 15min | None |
-| Cloudflare tunnel fails | Escalate to Dave → R-10 | 30min + DNS TTL | None |
+| Cloudflare tunnel fails | Escalate to the infra owner → R-10 | 30min + DNS TTL | None |
 | SSH keys compromised | R-06 (rotate keys, update GitHub) | 10min | None |
 | Droplet wiped | R-13 | ~2h | Last backup interval (≤24h daily, ≤pre-deploy for recent) |
 | Local memory files lost | Re-derive from `~/.claude/workflows/session-log.md` | Hours | Some context |
