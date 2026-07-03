@@ -52,6 +52,8 @@ const envConfig = readEnvFile([
   'OPS_REPORT_PERIOD',
   'OPS_REPORT_DUE_SOON_DAYS',
   'OPS_REPORT_OVERLOAD_RATIO',
+  'OPS_REPORT_WEB_BASE_URL',
+  'OPS_REPORT_PAGEDATA_DIR',
   // Smithers durable-workflow bridge (orchestration/). Inert unless enabled.
   'SMITHERS_BRIDGE_ENABLED',
   'SMITHERS_BRIDGE_PORT',
@@ -298,6 +300,21 @@ export const OPS_REPORT_OVERLOAD_RATIO = (() => {
   const v = parseFloat(envVal('OPS_REPORT_OVERLOAD_RATIO') || '1');
   return Number.isFinite(v) && v > 0 ? v : 1;
 })();
+// Web delivery (#34): when set, the report is published as a StatiCrypt-encrypted
+// HTML page (reusing the agenda-web service, serve.mjs) and the leader is DM'd a
+// LINK instead of raw markdown. Empty → falls back to the markdown DM.
+//   OPS_REPORT_WEB_BASE_URL  — public base URL (no trailing slash), e.g.
+//                              https://host:8091. The page is <base>/ops-<id>.html.
+//   OPS_REPORT_PAGEDATA_DIR  — directory to write ops-<id>.json into; the running
+//                              agenda-web service must be pointed at (watch) this
+//                              dir so it renders + encrypts the page. The StatiCrypt
+//                              password is the existing AGENDA_WEB_PASSWORD (reused).
+export const OPS_REPORT_WEB_BASE_URL = (envVal('OPS_REPORT_WEB_BASE_URL') || '')
+  .trim()
+  .replace(/\/$/, '');
+export const OPS_REPORT_PAGEDATA_DIR = (
+  envVal('OPS_REPORT_PAGEDATA_DIR') || ''
+).trim();
 
 // Source group whose `context/` directory holds the canonical shared KB
 // (people, tasks, calendar, projects, …). Mounted into every container at

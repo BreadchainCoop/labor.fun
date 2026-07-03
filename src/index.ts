@@ -17,6 +17,8 @@ import {
   OPS_REPORT_PERIOD,
   OPS_REPORT_DUE_SOON_DAYS,
   OPS_REPORT_TARGET_GROUP,
+  OPS_REPORT_WEB_BASE_URL,
+  OPS_REPORT_PAGEDATA_DIR,
   ORG_NAME,
   POLL_INTERVAL,
   REMINDER_ESCALATION_CONTACT,
@@ -109,7 +111,10 @@ import {
   buildPmRun,
 } from './integrations/pm-orchestration.js';
 import { isPmCommand } from './pm-orchestration.js';
-import { startOperationalReport } from './integrations/operational-report.js';
+import {
+  startOperationalReport,
+  type OpsPageData,
+} from './integrations/operational-report.js';
 import { loadMemberCapacitiesFromKb } from './member-profiles.js';
 import {
   loadDeadlineItemsFromKb,
@@ -1309,6 +1314,31 @@ async function main(): Promise<void> {
       fs.writeFileSync(tmp, markdown);
       fs.renameSync(tmp, digestPath);
     },
+    // Web delivery (#34): when OPS_REPORT_WEB_BASE_URL is set, write the page-data
+    // JSON the agenda-web service (serve.mjs) renders + StatiCrypt-encrypts into
+    // ops-<id>.html, and return the public link. Empty base URL → return null so
+    // the loop falls back to the markdown DM. Atomic tmp+rename, mkdir -p.
+    publishPage: OPS_REPORT_WEB_BASE_URL
+      ? (pageId: string, pageData: OpsPageData): string | null => {
+          const dir =
+            OPS_REPORT_PAGEDATA_DIR ||
+            path.join(path.dirname(sharedKbTasksDir()), 'ops-pages');
+          try {
+            fs.mkdirSync(dir, { recursive: true });
+            const file = path.join(dir, `ops-${pageId}.json`);
+            const tmp = `${file}.tmp`;
+            fs.writeFileSync(tmp, JSON.stringify(pageData));
+            fs.renameSync(tmp, file);
+            return `${OPS_REPORT_WEB_BASE_URL}/ops-${pageId}.html`;
+          } catch (err) {
+            logger.warn(
+              { err, pageId },
+              'Operational report: failed to write page-data — falling back to markdown',
+            );
+            return null;
+          }
+        }
+      : undefined,
   });
 
   startIpcWatcher({
