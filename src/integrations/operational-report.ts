@@ -21,11 +21,119 @@ import type { MemberCapacity } from '../member-profiles.js';
 import {
   buildOperationalReport,
   renderOperationalReport,
+  type OperationalReport,
   type ReportAudience,
 } from '../operational-report.js';
+import { parseDeadline } from '../reminder-engine.js';
 import type { PmTask } from '../pm-orchestration.js';
 
 const DAY_MS = 86_400_000;
+
+/** A minimal, plain-data task shape for the HTML page (no TS types leak in). */
+export interface OpsPageTask {
+  id: string;
+  title: string;
+  url?: string;
+  owner?: string;
+  owners: string[];
+  team?: string;
+  deadline?: string;
+  /** Whole days past deadline (>0 = overdue); omitted when no deadline. */
+  daysOverdue?: number;
+  /** Downstream task ids this one blocks (bottleneck view). */
+  downstream: string[];
+}
+
+/**
+ * The exact JSON the ops page (tools/agenda-page/render-ops.mjs) renders. A
+ * clean, explicit serializable projection of the OperationalReport plus meta —
+ * so the renderer never depends on internal TS types and the page-data on disk
+ * stays stable.
+ */
+export interface OpsPageData {
+  orgName?: string;
+  generatedAt: string;
+  audience: ReportAudience;
+  totalOpen: number;
+  overdue: OpsPageTask[];
+  blocking: OpsPageTask[];
+  teams: {
+    team: string;
+    members: string[];
+    openCount: number;
+    estimateSum: number;
+    overdueTasks: OpsPageTask[];
+  }[];
+  members: {
+    name: string;
+    team?: string;
+    openCount: number;
+    estimateSum: number;
+    overdueCount: number;
+    expectedHoursPerWeek?: number;
+    capacityPoints?: number;
+    loadRatio?: number;
+    overloaded: boolean;
+    payParityNote?: string;
+  }[];
+}
+
+/** Days a task is past its deadline (whole days, >0 = overdue), or undefined. */
+function daysOverdueOf(t: PmTask, nowMs: number): number | undefined {
+  if (!t.deadline) return undefined;
+  const dMs = parseDeadline(t.deadline);
+  if (Number.isNaN(dMs)) return undefined;
+  const days = Math.ceil((nowMs - dMs) / DAY_MS);
+  return days > 0 ? days : undefined;
+}
+
+function toPageTask(t: PmTask, nowMs: number): OpsPageTask {
+  return {
+    id: t.id,
+    title: t.title,
+    url: t.ref || undefined,
+    owner: t.owners.length ? t.owners.join(', ') : undefined,
+    owners: t.owners,
+    deadline: t.deadline,
+    daysOverdue: daysOverdueOf(t, nowMs),
+    downstream: t.downstream ?? [],
+  };
+}
+
+/** Project the OperationalReport into the serializable page-data the HTML wants. */
+export function toOpsPageData(
+  report: OperationalReport,
+  meta: { orgName?: string; audience: ReportAudience },
+): OpsPageData {
+  const nowMs = report.generatedAtMs;
+  return {
+    orgName: meta.orgName,
+    generatedAt: new Date(nowMs).toISOString().slice(0, 10),
+    audience: meta.audience,
+    totalOpen: report.totalOpen,
+    overdue: report.overdue.map((t) => toPageTask(t, nowMs)),
+    blocking: report.blocking.map((t) => toPageTask(t, nowMs)),
+    teams: report.teams.map((tm) => ({
+      team: tm.team,
+      members: tm.members,
+      openCount: tm.openCount,
+      estimateSum: tm.estimateSum,
+      overdueTasks: tm.overdueTasks.map((t) => toPageTask(t, nowMs)),
+    })),
+    members: report.members.map((m) => ({
+      name: m.name,
+      team: m.team,
+      openCount: m.openCount,
+      estimateSum: m.estimateSum,
+      overdueCount: m.overdueCount,
+      expectedHoursPerWeek: m.expectedHoursPerWeek,
+      capacityPoints: m.capacityPoints,
+      loadRatio: m.loadRatio,
+      overloaded: m.overloaded,
+      payParityNote: m.payParityNote,
+    })),
+  };
+}
 
 export interface OperationalReportDeps {
   /** Deliver the report to a chat JID. */
@@ -38,6 +146,14 @@ export interface OperationalReportDeps {
   loadCapacities: () => MemberCapacity[];
   /** Persist the rendered report (optional; e.g. write to the shared KB). */
   writeDigest?: (markdown: string) => void;
+  /**
+   * Publish the report as a StatiCrypt-encrypted HTML page and return its public
+   * URL (or null if web delivery isn't configured). When it returns a URL, the
+   * leader is DM'd the link instead of the raw markdown; when absent or it
+   * returns null, delivery falls back to the markdown DM.
+   * `pageId` is the period key (e.g. `2026-W26`) → page `ops-2026-W26.html`.
+   */
+  publishPage?: (pageId: string, pageData: OpsPageData) => string | null;
   /** Sweep cadence in ms; <= 0 disables the loop. */
   intervalMs?: number;
   /** Days before a deadline a task counts as "due soon". */
@@ -130,14 +246,44 @@ export async function runOperationalReportTick(
     return { sent: false };
   }
 
+  // Prefer the readable web page: publish the StatiCrypt-encrypted HTML and DM a
+  // short link. Fall back to the raw markdown DM when web delivery isn't wired
+  // (publishPage absent) or fails to produce a URL. The rolling digest above is
+  // always the markdown, regardless.
+  let pageUrl: string | null = null;
+  if (deps.publishPage) {
+    try {
+      pageUrl = deps.publishPage(
+        period,
+        toOpsPageData(report, {
+          orgName: deps.orgName,
+          audience: deps.audience ?? 'leaders',
+        }),
+      );
+    } catch (err) {
+      logger.warn(
+        { err, period },
+        'Operational report: publishPage failed — falling back to markdown',
+      );
+      pageUrl = null;
+    }
+  }
+
+  const message = pageUrl
+    ? `🗒️ Your ${deps.orgName ? `${deps.orgName} ` : ''}operational report for ${period} is ready — ` +
+      `what's late, bottlenecks, and load vs. capacity, in a readable page:\n${pageUrl}\n` +
+      `(password-protected — use the shared agenda page password.)`
+    : markdown;
+
   try {
-    await deps.sendMessage(targetJid, markdown);
+    await deps.sendMessage(targetJid, message);
     recordOpsReportFired(period);
     logger.info(
       {
         period,
         overdue: report.overdue.length,
         overloaded: report.overloaded.length,
+        delivery: pageUrl ? 'link' : 'markdown',
       },
       'Operational report delivered',
     );

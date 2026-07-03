@@ -111,4 +111,70 @@ describe('runOperationalReportTick', () => {
     expect(r2.sent).toBe(true);
     expect(sent).toHaveLength(1);
   });
+
+  it('DMs the link (not the markdown) when publishPage returns a URL', async () => {
+    const pages: { id: string; data: unknown }[] = [];
+    const {
+      deps: d,
+      sent,
+      digests,
+    } = deps({
+      publishPage: (id, data) => {
+        pages.push({ id, data });
+        return `https://host:8091/ops-${id}.html`;
+      },
+    });
+    const r = await runOperationalReportTick(d);
+    expect(r.sent).toBe(true);
+    expect(sent).toHaveLength(1);
+    // The DM carries the link and mentions the password, and does NOT dump md.
+    expect(sent[0]).toContain('https://host:8091/ops-2026-W24.html');
+    expect(sent[0].toLowerCase()).toContain('password');
+    expect(sent[0]).not.toContain('## What'); // no markdown sections dumped
+    // The page-data was published under the period key.
+    expect(pages).toHaveLength(1);
+    expect(pages[0].id).toBe('2026-W24');
+    // Digest is still the full markdown.
+    expect(digests).toHaveLength(1);
+    expect(digests[0]).toContain("What's late");
+  });
+
+  it('falls back to the markdown DM when publishPage returns null', async () => {
+    const { deps: d, sent } = deps({
+      publishPage: () => null,
+    });
+    const r = await runOperationalReportTick(d);
+    expect(r.sent).toBe(true);
+    expect(sent).toHaveLength(1);
+    // The DM is the markdown report itself.
+    expect(sent[0]).toContain("What's late");
+    expect(sent[0]).not.toContain('ops-2026');
+  });
+
+  it('falls back to markdown when publishPage is absent (backwards compatible)', async () => {
+    const { deps: d, sent } = deps(); // no publishPage
+    const r = await runOperationalReportTick(d);
+    expect(r.sent).toBe(true);
+    expect(sent[0]).toContain("What's late");
+  });
+
+  it('web delivery preserves once-per-period idempotency', async () => {
+    let calls = 0;
+    const {
+      deps: d,
+      sent,
+      digests,
+    } = deps({
+      publishPage: (id) => {
+        calls++;
+        return `https://host:8091/ops-${id}.html`;
+      },
+    });
+    await runOperationalReportTick(d);
+    const r = await runOperationalReportTick(d);
+    expect(r.sent).toBe(false);
+    expect(sent).toHaveLength(1); // link DM'd once
+    expect(calls).toBe(1); // page published once
+    expect(digests).toHaveLength(2); // digest still refreshed every tick
+  });
 });
