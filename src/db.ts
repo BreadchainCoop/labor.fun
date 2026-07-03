@@ -440,6 +440,31 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
+  // --- API usage metering ---
+
+  // One row per upstream Anthropic API call the credential proxy observes,
+  // with the per-request token counts parsed from the response. Powers the
+  // usage-budget quota check (month-to-date sum) and the hosted control-plane
+  // usage reporting (rows are pushed up by id, cursor tracked in router_state).
+  // Append-only; `id` is a monotonic AUTOINCREMENT used as the report cursor.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_tag TEXT,
+      model TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      est_cost_usd REAL NOT NULL DEFAULT 0,
+      status_code INTEGER,
+      created_at TEXT NOT NULL
+    )
+  `);
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at)`,
+  );
+
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:jane-doe","platform":"cli","kb_person":"jane-doe"}]'
@@ -1074,6 +1099,142 @@ export function setRouterState(key: string, value: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run(key, value);
+}
+
+// --- API usage metering + reporting accessors ---
+
+export interface ApiUsageEvent {
+  id: number;
+  runTag: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estCostUsd: number;
+  statusCode: number | null;
+  createdAt: string;
+}
+
+/**
+ * Record one observed upstream API call. Append-only; the auto-increment `id`
+ * doubles as the control-plane report cursor. Returns the inserted row id.
+ */
+export function recordApiUsage(usage: {
+  runTag?: string | null;
+  model?: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  estCostUsd?: number;
+  statusCode?: number | null;
+  createdAt?: string;
+}): number {
+  const result = db
+    .prepare(
+      `INSERT INTO api_usage
+        (run_tag, model, input_tokens, output_tokens, cache_read_tokens,
+         cache_write_tokens, est_cost_usd, status_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      usage.runTag ?? null,
+      usage.model ?? null,
+      usage.inputTokens ?? 0,
+      usage.outputTokens ?? 0,
+      usage.cacheReadTokens ?? 0,
+      usage.cacheWriteTokens ?? 0,
+      usage.estCostUsd ?? 0,
+      usage.statusCode ?? null,
+      usage.createdAt ?? new Date().toISOString(),
+    );
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * Sum tokens (all dimensions) and estimated cost for rows created on/after
+ * `sinceIso`. Used by the usage-budget month-to-date quota check.
+ */
+export function getUsageTotalsSince(sinceIso: string): {
+  totalTokens: number;
+  totalCostUsd: number;
+} {
+  const row = db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS cost
+       FROM api_usage
+       WHERE created_at >= ?`,
+    )
+    .get(sinceIso) as { tokens: number; cost: number };
+  return { totalTokens: row.tokens, totalCostUsd: row.cost };
+}
+
+/**
+ * Fetch up to `limit` usage rows with id greater than `cursor`, oldest first.
+ * Used by the control-plane sync to drain usage deltas in batches.
+ */
+export function getApiUsageSince(
+  cursor: number,
+  limit: number,
+): ApiUsageEvent[] {
+  const rows = db
+    .prepare(
+      `SELECT id, run_tag, model, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens, est_cost_usd,
+              status_code, created_at
+       FROM api_usage
+       WHERE id > ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .all(cursor, limit) as Array<{
+    id: number;
+    run_tag: string | null;
+    model: string | null;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    est_cost_usd: number;
+    status_code: number | null;
+    created_at: string;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    runTag: r.run_tag,
+    model: r.model,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheReadTokens: r.cache_read_tokens,
+    cacheWriteTokens: r.cache_write_tokens,
+    estCostUsd: r.est_cost_usd,
+    statusCode: r.status_code,
+    createdAt: r.created_at,
+  }));
+}
+
+/**
+ * Control-plane usage-report cursor: the last api_usage.id already reported
+ * upstream. Persisted in router_state so it survives restarts and never
+ * re-sends drained rows. Defaults to 0 (report from the beginning).
+ */
+const USAGE_REPORT_CURSOR_KEY = 'control_plane_usage_cursor';
+
+export function getUsageReportCursor(): number {
+  const raw = getRouterState(USAGE_REPORT_CURSOR_KEY);
+  if (raw === undefined) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+export function setUsageReportCursor(cursor: number): void {
+  setRouterState(
+    USAGE_REPORT_CURSOR_KEY,
+    String(Math.max(0, Math.trunc(cursor))),
+  );
 }
 
 // --- Session accessors ---

@@ -69,7 +69,7 @@ Key-value state persistence for the message router.
 | **key** | TEXT PK | State key          |
 | value   | TEXT    | JSON-encoded value |
 
-Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group).
+Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group), and `control_plane_usage_cursor` (control-plane usage report cursor — see `api_usage`).
 
 ### scheduled_tasks
 
@@ -284,6 +284,25 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | **period** | TEXT PK | Period key — ISO week (`2026-W24`) or month (`2026-06`) |
 | sent_at    | TEXT    | ISO timestamp the report was delivered                  |
 
+### api_usage
+
+Per-request API usage metering (`src/credential-proxy.ts` records one row per Anthropic Messages API call it observes; token counts parsed from the response). Powers the month-to-date budget guard (`src/usage-budget.ts`) and the hosted control-plane usage report (`src/integrations/control-plane-sync.ts`). Append-only; the auto-increment `id` doubles as the control-plane report cursor.
+
+| Column               | Type       | Notes                                                        |
+| -------------------- | ---------- | ------------------------------------------------------------ |
+| **id**               | INTEGER PK | AUTOINCREMENT; monotonic; used as the report cursor          |
+| run_tag              | TEXT       | Optional group/run attribution (`x-nanoclaw-run-tag` header) |
+| model                | TEXT       | Model id from the response                                   |
+| input_tokens         | INTEGER    | Prompt (non-cached) input tokens                             |
+| output_tokens        | INTEGER    | Generated output tokens                                      |
+| cache_read_tokens    | INTEGER    | Cache-read input tokens                                      |
+| cache_write_tokens   | INTEGER    | Cache-creation input tokens                                  |
+| est_cost_usd         | REAL       | Estimated USD cost (`src/model-pricing.ts`; not billing-grade) |
+| status_code          | INTEGER    | Upstream HTTP status                                         |
+| created_at           | TEXT       | ISO timestamp (indexed)                                      |
+
+`router_state` also stores the key `control_plane_usage_cursor` (JSON int) — the last `api_usage.id` already reported upstream, so a restart never re-sends drained rows.
+
 ## Indices
 
 | Index                          | Columns                                | Purpose                                      |
@@ -299,3 +318,4 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | idx_expenses_status            | expenses(status)                       | Approval-queue lookup                        |
 | idx_expenses_requester         | expenses(requester_user_id)            | Per-person expense history                   |
 | idx_expenses_event             | expenses(event_id)                     | Expense grouping by event_id                 |
+| idx_api_usage_created          | api_usage(created_at)                  | Month-to-date usage sum for the budget guard |

@@ -2,13 +2,21 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import http from 'http';
 import type { AddressInfo } from 'net';
 
-const mockEnv: Record<string, string> = {};
+const mockEnv = vi.hoisted(() => ({}) as Record<string, string>);
 vi.mock('./env.js', () => ({
   readEnvFile: vi.fn(() => ({ ...mockEnv })),
 }));
 
 vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
+}));
+
+// Isolate the proxy from the usage-metering side effects it now performs on
+// /v1/messages requests: no real DB, quota always allows. Metering behavior has
+// its own tests (usage-db, usage-budget, control-plane-sync).
+vi.mock('./db.js', () => ({ recordApiUsage: vi.fn() }));
+vi.mock('./usage-budget.js', () => ({
+  checkQuota: vi.fn(() => ({ ok: true })),
 }));
 
 import { startCredentialProxy } from './credential-proxy.js';
