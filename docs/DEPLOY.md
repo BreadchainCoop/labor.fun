@@ -4,12 +4,24 @@ How to deploy Breadbrich Engels to the droplet without clobbering state, and how
 
 ## TL;DR
 
+**Normal path: just merge to `main` — it auto-deploys.** A host systemd timer
+(`breadbrich-auto-deploy.timer`) runs `setup/auto-deploy.sh` ~every 2 min; when
+`origin/main` advances it runs `safe-deploy.sh` (rsync -> snapshot -> build/pull
+image -> restart -> health-check -> rollback on failure), deferring while an
+agent container is mid-run (~15 min cap), then posts a `Deployed to production`
+comment on the merged PR. There is **no manual step** for a normal change. See
+[the agent-facing summary](../rules/deployment.md).
+
 ```bash
-# Deploy (rsync → snapshot → build → restart → health-check → rollback on failure)
+# Manual / emergency override only (normal changes deploy themselves on merge):
 ./scripts/deploy.sh
 
 # Preview without applying
 ./scripts/deploy.sh --dry-run
+
+# Status / logs
+./scripts/deploy.sh --status
+./scripts/deploy.sh --logs
 
 # Pull droplet backups to your Mac as off-site mirror
 ./scripts/pull-backups.sh
@@ -221,7 +233,7 @@ The local checkout is not a running instance. `npm run dev` locally spawns conta
 Any stateful path you add (or path that gets touched at runtime) must be added to BOTH `scripts/deploy.sh` `EXCLUDES=()` AND `safe-deploy.sh` `STATEFUL_PATHS=()`. If only one has it, the other side will still clobber it. Audit after any directory structure change.
 
 ### 10. Fork's `main` is behind upstream NanoClaw `main`
-`cvnt/main` has only Dave's PRs merged in; `qwibitai/nanoclaw@main` has many more commits. The fork hasn't been synced with upstream in a while. Sync at your own risk — the PR merge conflicts we already dealt with hint at how divergent they are.
+`cvnt/main` has only one contributor's PRs merged in; `qwibitai/nanoclaw@main` has many more commits. The fork hasn't been synced with upstream in a while. Sync at your own risk — the PR merge conflicts we already dealt with hint at how divergent they are.
 
 ### 11. Breadbrich Engels deploy safety (legacy memory item)
 Per earlier notes: `rsync` clobbered `.env`, sessions cached stale source, merge conflicts broke containers. All three are now handled by the safe-deploy script, but re-read `feedback_breadbrich_deploy_safety.md` before making changes to deploy scripts.
