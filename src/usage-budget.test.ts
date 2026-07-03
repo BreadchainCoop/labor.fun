@@ -379,3 +379,139 @@ describe('entitlement mtime-based cache invalidation', () => {
     expect(second?.state).toBe(first?.state);
   });
 });
+
+describe('entitlement staleness backstop', () => {
+  const originalEnv = { ...process.env };
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  beforeEach(() => {
+    _resetUsageBudgetCache();
+    vi.clearAllMocks();
+    mockSummary.input_tokens = 0;
+    mockSummary.output_tokens = 0;
+    mockSummary.cache_read_tokens = 0;
+    mockSummary.cache_write_tokens = 0;
+    mockSummary.est_cost_usd = 0;
+    delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
+    delete process.env.USAGE_MONTHLY_COST_BUDGET_USD;
+    delete process.env.ENTITLEMENT_STALE_BLOCK_HOURS;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('allows a fresh entitlement (default threshold, env unset)', () => {
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      fetchedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(), // 5 min ago
+    } as Entitlement);
+    mockSummary.input_tokens = 100;
+    expect(checkQuota().ok).toBe(true);
+  });
+
+  it('blocks a stale entitlement (fetchedAt 8 days ago, default threshold)', () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * DAY_MS).toISOString();
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      fetchedAt: eightDaysAgo,
+    } as Entitlement);
+    mockSummary.input_tokens = 100;
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/stale/i);
+    expect(result.reason).toMatch(/control-plane connectivity/i);
+    expect(result.reason).toContain(eightDaysAgo);
+  });
+
+  it('threshold 0 disables the backstop (stale file honored)', () => {
+    process.env.ENTITLEMENT_STALE_BLOCK_HOURS = '0';
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      fetchedAt: new Date(Date.now() - 8 * DAY_MS).toISOString(),
+    } as Entitlement);
+    mockSummary.input_tokens = 100; // under budget
+    expect(checkQuota().ok).toBe(true);
+  });
+
+  it('never triggers when no entitlement file is present (self-hosted)', () => {
+    // No entitlement.json; env budget under limit → staleness path untouched.
+    process.env.USAGE_MONTHLY_TOKEN_BUDGET = '1000';
+    mockSummary.input_tokens = 100;
+    expect(checkQuota().ok).toBe(true);
+    // And with no budget at all it's still unlimited/ok.
+    delete process.env.USAGE_MONTHLY_TOKEN_BUDGET;
+    _resetUsageBudgetCache();
+    expect(checkQuota().ok).toBe(true);
+  });
+
+  it('missing fetchedAt: stale via old file mtime', () => {
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      // no fetchedAt
+    } as Entitlement);
+    // Whole seconds: sub-second mtime precision doesn't survive the
+    // utimesSync → statSync round-trip on every filesystem.
+    const oldDate = new Date(
+      Math.floor((Date.now() - 8 * DAY_MS) / 1000) * 1000,
+    );
+    fs.utimesSync(entitlementFilePath(), oldDate, oldDate);
+    _resetEntitlementCache(); // force re-stat so loadEntitlement sees new mtime
+    mockSummary.input_tokens = 100;
+    const result = checkQuota();
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected ok:false');
+    expect(result.reason).toMatch(/stale/i);
+    expect(result.reason).toContain(oldDate.toISOString());
+  });
+
+  it('missing fetchedAt: fresh via recent file mtime', () => {
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      // no fetchedAt; just-written file has a recent mtime
+    } as Entitlement);
+    mockSummary.input_tokens = 100;
+    expect(checkQuota().ok).toBe(true);
+  });
+
+  it('honors a custom threshold (ENTITLEMENT_STALE_BLOCK_HOURS=1)', () => {
+    process.env.ENTITLEMENT_STALE_BLOCK_HOURS = '1';
+    // 2 hours old → older than 1h threshold → blocked.
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      fetchedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    } as Entitlement);
+    mockSummary.input_tokens = 100;
+    expect(checkQuota().ok).toBe(false);
+
+    // 30 minutes old → within 1h threshold → allowed.
+    _resetUsageBudgetCache();
+    writeEntitlement({
+      state: 'active',
+      plan: 'starter',
+      monthlyTokenBudget: 1000,
+      monthlyCostBudgetUsd: null,
+      fetchedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    } as Entitlement);
+    expect(checkQuota().ok).toBe(true);
+  });
+});

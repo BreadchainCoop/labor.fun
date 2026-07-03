@@ -165,13 +165,23 @@ neither env var set the instance is self-hosted and all of this stays dormant.
 
 Optional tuning: `CONTROL_PLANE_SYNC_INTERVAL_MS` (default `300000`, 5 min) and
 `CONTROL_PLANE_SYNC_FIRST_DELAY_MS` (default `15000`).
+`ENTITLEMENT_STALE_BLOCK_HOURS` (default `168`, 7 days) is a **staleness
+backstop**: when a present `entitlement.json` hasn't been re-synced in more
+hours than this, `checkQuota` refuses new agent runs — so a canceled tenant
+whose sync channel breaks (revoked token, blocked egress) can't run
+indefinitely on a stale "active" entitlement. Set `0` to disable it (stale
+entitlements honored forever, the prior behavior). It only affects a **present**
+entitlement.json; a missing file is self-hosted env-budget mode and is never
+stale-blocked.
 
 Budget precedence (`src/usage-budget.ts`): **entitlement.json → env vars →
 unlimited**. A `null` budget in the entitlement means that dimension is
 unlimited (it does **not** fall through to env). If the entitlement `state` is
 `suspended` or `canceled`, API requests are blocked regardless of budgets;
 every other state (`trialing`/`active`/`grace`/`over_quota`) enforces budgets
-normally.
+normally. Independently, a **present** entitlement older than
+`ENTITLEMENT_STALE_BLOCK_HOURS` (default 7 days) is refused regardless of its
+state or budgets (see the staleness backstop above).
 
 ### HTTP contract
 
@@ -239,7 +249,14 @@ adding a `"fetchedAt"` ISO timestamp:
 `src/usage-budget.ts` reads this file (mtime-cached) on each API request. It
 is **fail-open**: a missing or corrupt file falls back to env budgets and
 never blocks or crashes. A control-plane outage leaves the last-known
-entitlement in place until the next successful fetch.
+entitlement in place until the next successful fetch — but only up to
+`ENTITLEMENT_STALE_BLOCK_HOURS` (default `168`, 7 days). Past that window the
+stale entitlement stops being honored and `checkQuota` refuses new agent runs,
+so a canceled tenant whose sync breaks can't run forever. Age is measured from
+the entitlement's `fetchedAt` (or the file's mtime if `fetchedAt` is
+absent/unparseable). Set `ENTITLEMENT_STALE_BLOCK_HOURS=0` to disable the
+backstop. A missing entitlement.json is unaffected (self-hosted env-budget
+mode).
 
 ### How it fits together
 

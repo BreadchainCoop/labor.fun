@@ -241,6 +241,22 @@ function readFloatEnv(name: string): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** Default staleness backstop window (hours) when the env var is unset. */
+const DEFAULT_STALE_BLOCK_HOURS = 168; // 7 days
+
+/**
+ * Read ENTITLEMENT_STALE_BLOCK_HOURS. Unlike readIntEnv, this must distinguish
+ * "unset" (→ default 168) from an explicit "0" (→ backstop disabled). Garbage /
+ * negatives fall back to the default. Returns hours; 0 means disabled.
+ */
+function readStaleBlockHours(): number {
+  const raw = process.env.ENTITLEMENT_STALE_BLOCK_HOURS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_STALE_BLOCK_HOURS;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_STALE_BLOCK_HOURS;
+  return n; // 0 = disabled; otherwise the positive window in hours
+}
+
 export interface ResolvedBudgets {
   /** undefined = that dimension unlimited (never checked). */
   tokenBudget: number | undefined;
@@ -280,9 +296,55 @@ export function resolveBudgets(): ResolvedBudgets {
 }
 
 /**
+ * Staleness backstop. A PRESENT entitlement.json whose last sync is older than
+ * ENTITLEMENT_STALE_BLOCK_HOURS is refused: if the control-plane sync channel
+ * breaks (revoked token, blocked egress) a canceled tenant would otherwise keep
+ * the last-known "active" entitlement forever. Returns a QuotaResult when the
+ * entitlement is stale, else null (fresh / no entitlement / disabled).
+ *
+ * Only applies to a present, structurally-valid entitlement — a missing or
+ * corrupt file is the self-hosted / env-budget path and is never stale-blocked.
+ * Age is measured from `fetchedAt`; if that's absent or unparseable, the
+ * entitlement.json file's mtime is used as the fallback "last synced" time.
+ */
+function checkEntitlementStaleness(ent: Entitlement): QuotaResult | null {
+  const blockHours = readStaleBlockHours();
+  if (blockHours === 0) return null; // backstop disabled
+
+  // Determine the "last synced" instant: fetchedAt, else the file mtime.
+  let lastSynced: Date | null = null;
+  if (ent.fetchedAt) {
+    const parsed = new Date(ent.fetchedAt);
+    if (!Number.isNaN(parsed.getTime())) lastSynced = parsed;
+  }
+  if (!lastSynced) {
+    try {
+      lastSynced = new Date(fs.statSync(entitlementFilePath()).mtimeMs);
+    } catch {
+      // File vanished between load and stat — stay fail-safe, don't block.
+      return null;
+    }
+  }
+
+  const ageMs = Date.now() - lastSynced.getTime();
+  if (ageMs <= blockHours * 3_600_000) return null; // fresh enough
+
+  const iso = lastSynced.toISOString();
+  logger.warn(
+    { fetchedAt: iso, blockHours },
+    'Entitlement is stale — refusing new agent runs (control-plane sync may be broken)',
+  );
+  return {
+    ok: false,
+    reason: `Entitlement information is stale (last synced ${iso}); refusing new agent runs. Check control-plane connectivity.`,
+  };
+}
+
+/**
  * Check the current entitlement state and month-to-date usage against the
  * resolved budgets (entitlement.json → env vars → unlimited). A `suspended`
- * or `canceled` entitlement blocks unconditionally; otherwise an absent
+ * or `canceled` entitlement blocks unconditionally; a present entitlement that
+ * is stale (see checkEntitlementStaleness) is also blocked; otherwise an absent
  * budget = unlimited (that dimension is never checked).
  */
 export function checkQuota(): QuotaResult {
@@ -303,6 +365,19 @@ export function checkQuota(): QuotaResult {
       reason:
         'This workspace subscription is canceled. API access is disabled.',
     };
+  }
+
+  // Staleness backstop: only a present, valid entitlement (source ===
+  // 'entitlement') can go stale. This runs after the suspended/canceled blocks
+  // (which already refuse) and before budget enforcement — a stale entitlement
+  // of unknown true state must refuse runs. A missing/corrupt file resolves to
+  // 'env'/'unlimited' and is never stale-blocked (self-hosted path unchanged).
+  if (budgets.source === 'entitlement') {
+    const ent = loadEntitlement(); // cheap: mtime/size-cached
+    if (ent) {
+      const stale = checkEntitlementStaleness(ent);
+      if (stale) return stale;
+    }
   }
 
   const { tokenBudget, costBudget } = budgets;
