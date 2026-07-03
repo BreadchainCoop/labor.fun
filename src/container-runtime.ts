@@ -1,11 +1,22 @@
 /**
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
+ *
+ * This file is the Docker implementation (the default, self-hosted path).
+ * The Kubernetes backend (CONTAINER_RUNTIME=kubernetes) lives in
+ * container-runtime-k8s.ts — see docs/KUBERNETES.md for why it's a separate
+ * module rather than branches sprinkled through this one.
  */
 import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
+import { CONTAINER_RUNTIME, K8S_NAMESPACE } from './config.js';
+import {
+  buildClusterCheckArgs,
+  buildDeletePodArgs,
+  buildListOrphanPodsArgs,
+} from './container-runtime-k8s.js';
 import { logger } from './logger.js';
 
 /** The container runtime binary name. */
@@ -19,11 +30,15 @@ export const CONTAINER_HOST_GATEWAY = 'host.docker.internal';
  * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
  * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
  *   falling back to 0.0.0.0 if the interface isn't found.
+ * Kubernetes: 0.0.0.0 — pods reach each other by pod IP, not host.docker.internal;
+ *   binding 0.0.0.0 is safe here because it's scoped to the pod's own network
+ *   namespace, not the node's. See docs/KUBERNETES.md "Credential proxy reachability".
  */
 export const PROXY_BIND_HOST =
   process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
 
 function detectProxyBindHost(): string {
+  if (CONTAINER_RUNTIME === 'kubernetes') return '0.0.0.0';
   if (os.platform() === 'darwin') return '127.0.0.1';
 
   // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
@@ -81,16 +96,41 @@ export function resourceLimitArgs(): string[] {
   return args;
 }
 
-/** Stop a container by name. Uses execFileSync to avoid shell injection. */
+/**
+ * Stop a container/pod by name. Docker path unchanged (execSync + docker
+ * stop). Under CONTAINER_RUNTIME=kubernetes this deletes the pod instead —
+ * see container-runtime-k8s.ts's buildDeletePodArgs and
+ * docs/KUBERNETES.md "Timeout/kill parity".
+ */
 export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
+  }
+  if (CONTAINER_RUNTIME === 'kubernetes') {
+    const args = buildDeletePodArgs(name, K8S_NAMESPACE);
+    execSync(`kubectl ${args.join(' ')}`, { stdio: 'pipe' });
+    return;
   }
   execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
+  if (CONTAINER_RUNTIME === 'kubernetes') {
+    try {
+      execSync(`kubectl ${buildClusterCheckArgs().join(' ')}`, {
+        stdio: 'pipe',
+        timeout: 10000,
+      });
+      logger.debug('Kubernetes cluster reachable');
+      return;
+    } catch (err) {
+      logger.error({ err }, 'Failed to reach Kubernetes cluster');
+      throw new Error('Container runtime is required but failed to start', {
+        cause: err,
+      });
+    }
+  }
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
@@ -129,14 +169,24 @@ export function ensureContainerRuntimeRunning(): void {
   }
 }
 
-/** Kill orphaned NanoClaw containers from previous runs. */
+/** Kill orphaned NanoClaw containers/pods from previous runs. */
 export function cleanupOrphans(): void {
   try {
-    const output = execSync(
-      `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,
-      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
-    );
-    const orphans = output.trim().split('\n').filter(Boolean);
+    let orphans: string[];
+    if (CONTAINER_RUNTIME === 'kubernetes') {
+      // jsonpath output is space-separated pod names, not newline-separated.
+      const output = execSync(
+        `kubectl ${buildListOrphanPodsArgs(K8S_NAMESPACE).join(' ')}`,
+        { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+      );
+      orphans = output.trim().split(/\s+/).filter(Boolean);
+    } else {
+      const output = execSync(
+        `${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw- --format '{{.Names}}'`,
+        { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+      );
+      orphans = output.trim().split('\n').filter(Boolean);
+    }
     for (const name of orphans) {
       try {
         stopContainer(name);
