@@ -10,6 +10,7 @@ import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { SlackHttpReceiver } from './slack-http-receiver.js';
 import {
   Channel,
   OnInboundMessage,
@@ -78,22 +79,60 @@ export class SlackChannel implements Channel {
 
     // Read tokens from .env (not process.env — keeps secrets off the environment
     // so they don't leak to child processes, matching NanoClaw's security pattern)
-    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+    const env = readEnvFile([
+      'SLACK_BOT_TOKEN',
+      'SLACK_APP_TOKEN',
+      'SLACK_RECEIVER_MODE',
+      'SLACK_HTTP_PORT',
+      'SLACK_INGRESS_SECRET',
+      'SLACK_SIGNING_SECRET',
+    ]);
     const botToken = env.SLACK_BOT_TOKEN;
-    const appToken = env.SLACK_APP_TOKEN;
+    const mode = (env.SLACK_RECEIVER_MODE || 'socket').toLowerCase();
 
-    if (!botToken || !appToken) {
-      throw new Error(
-        'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
-      );
+    if (mode === 'http') {
+      // HTTP receiver mode: Slack Events API over HTTP POST /slack/events.
+      // Used by the hosted control-plane ingress (one multi-workspace Slack
+      // app forwarding events per tenant) or for direct Events API exposure.
+      // No app-level token needed — outbound still uses the bot token, and
+      // app.start()/stop() delegate to the receiver, so connect()/disconnect()
+      // work unchanged. All event handlers below are shared with socket mode.
+      if (!botToken) {
+        throw new Error('SLACK_BOT_TOKEN must be set in .env');
+      }
+      if (!env.SLACK_INGRESS_SECRET && !env.SLACK_SIGNING_SECRET) {
+        const msg =
+          'SLACK_RECEIVER_MODE=http requires SLACK_INGRESS_SECRET ' +
+          '(forwarded-from-ingress) or SLACK_SIGNING_SECRET (direct Slack ' +
+          'exposure) to be set in .env';
+        logger.error(msg);
+        throw new Error(msg);
+      }
+      const receiver = new SlackHttpReceiver({
+        port: Number(env.SLACK_HTTP_PORT) || 3012,
+        ingressSecret: env.SLACK_INGRESS_SECRET,
+        signingSecret: env.SLACK_SIGNING_SECRET,
+      });
+      this.app = new App({
+        token: botToken,
+        receiver,
+        logLevel: LogLevel.ERROR,
+      });
+    } else {
+      // Socket Mode (default): unchanged behavior.
+      const appToken = env.SLACK_APP_TOKEN;
+      if (!botToken || !appToken) {
+        throw new Error(
+          'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
+        );
+      }
+      this.app = new App({
+        token: botToken,
+        appToken,
+        socketMode: true,
+        logLevel: LogLevel.ERROR,
+      });
     }
-
-    this.app = new App({
-      token: botToken,
-      appToken,
-      socketMode: true,
-      logLevel: LogLevel.ERROR,
-    });
 
     this.setupEventHandlers();
   }
@@ -680,8 +719,28 @@ export class SlackChannel implements Channel {
 }
 
 registerChannel('slack', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
-  if (!envVars.SLACK_BOT_TOKEN || !envVars.SLACK_APP_TOKEN) {
+  const envVars = readEnvFile([
+    'SLACK_BOT_TOKEN',
+    'SLACK_APP_TOKEN',
+    'SLACK_RECEIVER_MODE',
+    'SLACK_INGRESS_SECRET',
+    'SLACK_SIGNING_SECRET',
+  ]);
+  const mode = (envVars.SLACK_RECEIVER_MODE || 'socket').toLowerCase();
+  if (mode === 'http') {
+    // HTTP mode needs the bot token plus one verification secret — the
+    // app-level (Socket Mode) token is NOT required.
+    if (
+      !envVars.SLACK_BOT_TOKEN ||
+      (!envVars.SLACK_INGRESS_SECRET && !envVars.SLACK_SIGNING_SECRET)
+    ) {
+      logger.warn(
+        'Slack (http mode): SLACK_BOT_TOKEN plus SLACK_INGRESS_SECRET or ' +
+          'SLACK_SIGNING_SECRET must be set',
+      );
+      return null;
+    }
+  } else if (!envVars.SLACK_BOT_TOKEN || !envVars.SLACK_APP_TOKEN) {
     logger.warn('Slack: SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set');
     return null;
   }
