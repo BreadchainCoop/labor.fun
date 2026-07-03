@@ -8,13 +8,22 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
+  AGENT_CONTAINER_CPUS: '',
+  AGENT_CONTAINER_MEMORY: '',
+  AGENT_CONTAINER_PIDS_LIMIT: '',
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+  CONTAINER_RUNTIME: 'docker',
   CONTAINER_TIMEOUT: 1800000, // 30min
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  K8S_DATA_PVC_NAME: '',
+  K8S_NAMESPACE: '',
+  K8S_NODE_NAME: '',
+  K8S_POD_IP: '',
+  K8S_VOLUME_MODE: 'hostPath',
   NANOCLAW_MODEL: undefined,
   NANOCLAW_SUBAGENT_MODEL: undefined,
   PROFILE_DIR: '/tmp/nanoclaw-test-profile',
@@ -67,6 +76,14 @@ vi.mock('./container-runtime.js', () => ({
   hostGatewayArgs: () => [],
   readonlyMountArgs: (h: string, c: string) => ['-v', `${h}:${c}:ro`],
   stopContainer: vi.fn(),
+}));
+
+// Mock container-runtime-k8s (only exercised when CONTAINER_RUNTIME is
+// mocked to 'kubernetes' in a specific describe block; harmless default here).
+vi.mock('./container-runtime-k8s.js', () => ({
+  buildK8sPodOverrides: vi.fn(() => ({})),
+  buildKubectlRunArgs: vi.fn(() => ['run', 'test-pod']),
+  warnPidsLimitUnsupported: vi.fn(),
 }));
 
 // Mock credential-proxy
