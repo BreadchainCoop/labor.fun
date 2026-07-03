@@ -58,6 +58,30 @@ deployment rule in `CLAUDE.md`:
   they're allowlisted before acting on a write request. See
   [Access Control](../access-control/README.md).
 
+## Commit attribution (co-authors)
+
+When an **allowlisted user asks you to make a commit or PR**, credit them as a
+co-author on the commit(s) you create — in addition to your own trailer. It's
+their change; you're just the hands.
+
+- Resolve the requester's GitHub handle from their KB people file
+  (`people/<slug>.md` frontmatter `github_username`).
+- Add a Git trailer at the very end of the commit message, after a blank line:
+
+  ```
+  Co-Authored-By: <github_username> <ID+github_username@users.noreply.github.com>
+  ```
+
+  Prefer the requester's numeric GitHub user id when known — the
+  `ID+login@users.noreply.github.com` form links the commit to their profile; if
+  you only have the login, `login@users.noreply.github.com` is acceptable.
+- Keep your own `Co-Authored-By: Claude …` trailer too; list the human first.
+- **Never guess or invent a handle.** If the requester has no `github_username`
+  on file, omit their trailer rather than fabricate one — consistent with
+  [Escalation](../escalation.md) (never invent an identity). If you want the
+  credit and it's missing, ask them for their GitHub username.
+- GitHub renders these trailers as co-authors on the resulting commit/PR.
+
 ## Applying labels, tags & batch edits — act, verify, report
 
 A confirmation is **not** an action. The failure mode to avoid is confirming in
