@@ -142,8 +142,116 @@ the fresh group automatically on first message, or on request ("onboarding").
 - No per-profile control plane UI exists yet — every step above is manual, on
   the shared host, by an operator with shell access. That's the explicit scope
   of "concierge phase."
-- `USAGE_MONTHLY_COST_BUDGET_USD` was not present in the codebase at the time
-  of writing (parallel work); verify the env var name and enforcement point
-  before relying on it operationally.
+- `USAGE_MONTHLY_COST_BUDGET_USD` (and `USAGE_MONTHLY_TOKEN_BUDGET`) now exist:
+  enforced by `src/usage-budget.ts` via the credential proxy's quota gate. See
+  "Control-plane sync" below for how a hosted control plane overrides them.
 - Per-container CPU/memory resource limits are not currently configurable —
   don't promise resource isolation guarantees to customers until they exist.
+
+## Control-plane sync (instance ↔ billing service)
+
+The concierge phase above is manual. The first piece of the self-serve control
+plane is instance-side and already ships in the framework: each tenant instance
+can pull its **entitlement** (plan state + monthly budgets) from a control
+plane and push **usage rows** up for metering/billing. Strictly opt-in — with
+neither env var set the instance is self-hosted and all of this stays dormant.
+
+### Environment
+
+| Var | Meaning |
+|-----|---------|
+| `CONTROL_PLANE_URL` | Control-plane base URL, e.g. `https://cloud.labor.fun`. |
+| `CONTROL_PLANE_TOKEN` | Bearer token identifying this org to the control plane. |
+
+Optional tuning: `CONTROL_PLANE_SYNC_INTERVAL_MS` (default `300000`, 5 min) and
+`CONTROL_PLANE_SYNC_FIRST_DELAY_MS` (default `15000`).
+
+Budget precedence (`src/usage-budget.ts`): **entitlement.json → env vars →
+unlimited**. A `null` budget in the entitlement means that dimension is
+unlimited (it does **not** fall through to env). If the entitlement `state` is
+`suspended` or `canceled`, API requests are blocked regardless of budgets;
+every other state (`trialing`/`active`/`grace`/`over_quota`) enforces budgets
+normally.
+
+### HTTP contract
+
+The instance is a **client**; the control plane implements these two
+endpoints. Both require `Authorization: Bearer <CONTROL_PLANE_TOKEN>`.
+
+**`GET {CONTROL_PLANE_URL}/api/instance/entitlement`** → `200` JSON:
+
+```json
+{
+  "state": "trialing|active|grace|over_quota|suspended|canceled",
+  "plan": "free|starter|team|dedicated",
+  "monthlyTokenBudget": 250000,
+  "monthlyCostBudgetUsd": 20,
+  "periodStart": "2026-07-01T00:00:00.000Z",
+  "periodEnd": "2026-08-01T00:00:00.000Z"
+}
+```
+
+`monthlyTokenBudget` / `monthlyCostBudgetUsd` may be `null` (that dimension
+unlimited).
+
+**`POST {CONTROL_PLANE_URL}/api/instance/usage`** — body:
+
+```json
+{
+  "cursor": 41,
+  "events": [
+    {
+      "id": 42, "runTag": "nanoclaw-main-abc", "model": "claude-opus-4-6",
+      "inputTokens": 1200, "outputTokens": 300,
+      "cacheReadTokens": 0, "cacheWriteTokens": 0,
+      "estCostUsd": 0.0135, "statusCode": 200,
+      "createdAt": "2026-07-03T18:04:11.000Z"
+    }
+  ]
+}
+```
+
+→ `200` `{"ok": true, "cursor": 42}`. `cursor` is the last `api_usage.id`
+already reported; the instance sends rows with `id > cursor`, ≤ 500 per POST,
+and loops until drained, advancing its persisted cursor from each response
+(the echoed cursor must be strictly increasing or the instance stops the drain
+to avoid a loop). `runTag` is the spawning container's name — see
+`schema/tables.md` → `api_usage`.
+
+### Local entitlement cache: `<profile data dir>/entitlement.json`
+
+Each sync tick atomically (tmp + rename) writes the entitlement to
+`entitlement.json` under the profile's data dir (`DATA_DIR`, gitignored),
+adding a `"fetchedAt"` ISO timestamp:
+
+```json
+{
+  "state": "active",
+  "plan": "starter",
+  "monthlyTokenBudget": 250000,
+  "monthlyCostBudgetUsd": 20,
+  "periodStart": "2026-07-01T00:00:00.000Z",
+  "periodEnd": "2026-08-01T00:00:00.000Z",
+  "fetchedAt": "2026-07-03T18:00:00.000Z"
+}
+```
+
+`src/usage-budget.ts` reads this file (mtime-cached) on each API request. It
+is **fail-open**: a missing or corrupt file falls back to env budgets and
+never blocks or crashes. A control-plane outage leaves the last-known
+entitlement in place until the next successful fetch.
+
+### How it fits together
+
+- `src/credential-proxy.ts` — parses usage from each `/v1/messages` response
+  (`onUsage` hook) and gates requests on `checkQuota` (HTTP 429 when blocked).
+- `src/index.ts` — wires the hooks: persists rows to `api_usage` with an
+  estimated cost (`src/model-pricing.ts`).
+- `src/usage-budget.ts` — resolves budgets + entitlement state, answers
+  `checkQuota()`.
+- `src/integrations/control-plane-sync.ts` — the 5-minute loop: fetch
+  entitlement → write cache → drain usage deltas. Self-registered via
+  `src/integrations/registry.ts`; network errors are logged and retried next
+  tick, never fatal.
+- Table + cursor: `schema/tables.md` → `api_usage` and the
+  `control_plane_usage_cursor` key in `router_state`.

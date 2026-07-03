@@ -69,7 +69,7 @@ Key-value state persistence for the message router.
 | **key** | TEXT PK | State key          |
 | value   | TEXT    | JSON-encoded value |
 
-Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group).
+Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group), and `control_plane_usage_cursor` (last `api_usage.id` already reported to the hosted control plane — see `api_usage`).
 
 ### scheduled_tasks
 
@@ -286,7 +286,7 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 
 ### api_usage
 
-API cost tracking & budgets: one row per completed `/v1/messages` call observed by the credential proxy (`src/credential-proxy.ts`). Powers usage reporting (`scripts/usage-report.ts`) and budget enforcement (`src/usage-budget.ts`). `run_tag` is the spawning container's name (see `container-runner.ts`), which encodes the group folder, so usage can be grouped per-group by prefix. `est_cost_usd` is computed at insert time from `src/model-pricing.ts`, so historical rows keep the price in effect when the call was made even if pricing is later overridden.
+API cost tracking & budgets: one row per completed `/v1/messages` call observed by the credential proxy (`src/credential-proxy.ts`). Powers usage reporting (`scripts/usage-report.ts`), budget enforcement (`src/usage-budget.ts`), and hosted control-plane usage push (`src/integrations/control-plane-sync.ts` — drains rows by `id` in batches, cursor persisted in `router_state` under `control_plane_usage_cursor`). `run_tag` is the spawning container's name (see `container-runner.ts`), which encodes the group folder, so usage can be grouped per-group by prefix. `est_cost_usd` is computed at insert time from `src/model-pricing.ts`, so historical rows keep the price in effect when the call was made even if pricing is later overridden.
 
 | Column             | Type       | Notes                                              |
 | ------------------ | ---------- | --------------------------------------------------- |

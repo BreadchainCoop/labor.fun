@@ -26,6 +26,14 @@ describe('model-pricing', () => {
       expect(pricing.output).toBe(15);
     });
 
+    it('matches fable/mythos frontier models by substring', async () => {
+      const { resolvePricing } = await import('./model-pricing.js');
+      const fable = resolvePricing('claude-fable-5');
+      expect(fable.input).toBe(10);
+      expect(fable.output).toBe(50);
+      expect(resolvePricing('claude-mythos-5')).toEqual(fable);
+    });
+
     it('matches haiku models by substring', async () => {
       const { resolvePricing } = await import('./model-pricing.js');
       const pricing = resolvePricing('claude-haiku-4-5');

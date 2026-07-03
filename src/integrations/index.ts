@@ -7,6 +7,10 @@
 // own config and no-op'ing when disabled. See docs/PLUGINS.md.
 
 import { startGroupDigestLoop } from '../group-digest.js';
+import {
+  startControlPlaneSyncLoop,
+  stopControlPlaneSyncLoop,
+} from './control-plane-sync.js';
 import { startDiscordMembersSyncLoop } from './discord-members-sync.js';
 import { startGitHubProjectSyncLoop } from './github-project-sync.js';
 import { registerIntegration } from './registry.js';
@@ -31,4 +35,10 @@ registerIntegration({
   name: 'safe-payouts',
   start: () => startSafePayoutsLoop(),
   stop: () => stopSafePayoutsLoop(),
+});
+
+registerIntegration({
+  name: 'control-plane-sync',
+  start: () => startControlPlaneSyncLoop(),
+  stop: () => stopControlPlaneSyncLoop(),
 });

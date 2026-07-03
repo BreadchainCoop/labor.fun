@@ -2122,6 +2122,60 @@ export function getUsageByRunTag(sinceIso: string): Array<{
   }>;
 }
 
+export interface ApiUsageRow {
+  id: number;
+  run_tag: string | null;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+  status_code: number | null;
+  created_at: string;
+}
+
+/**
+ * Raw usage rows with id greater than `cursor`, oldest first, capped at
+ * `limit`. Used by the hosted control-plane sync
+ * (src/integrations/control-plane-sync.ts) to drain usage deltas in batches;
+ * the autoincrement `id` doubles as the report cursor.
+ */
+export function getApiUsageSince(cursor: number, limit: number): ApiUsageRow[] {
+  return db
+    .prepare(
+      `SELECT id, run_tag, model, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens, est_cost_usd,
+              status_code, created_at
+       FROM api_usage
+       WHERE id > ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .all(cursor, limit) as ApiUsageRow[];
+}
+
+/**
+ * Control-plane usage-report cursor: the last api_usage.id already reported
+ * upstream. Persisted in router_state so it survives restarts and never
+ * re-sends drained rows. Defaults to 0 (report from the beginning).
+ */
+const USAGE_REPORT_CURSOR_KEY = 'control_plane_usage_cursor';
+
+export function getUsageReportCursor(): number {
+  const raw = getRouterState(USAGE_REPORT_CURSOR_KEY);
+  if (raw === undefined) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+export function setUsageReportCursor(cursor: number): void {
+  setRouterState(
+    USAGE_REPORT_CURSOR_KEY,
+    String(Math.max(0, Math.trunc(cursor))),
+  );
+}
+
 // --- JSON migration ---
 
 function migrateJsonState(): void {

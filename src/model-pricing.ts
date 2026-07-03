@@ -37,6 +37,11 @@ export interface UsageForCost {
 // against the model id via substring (see resolvePricing) so dated snapshots
 // (e.g. "claude-opus-4-6-20260115") resolve without listing every date.
 const BASE_PRICING: Record<string, ModelPricing> = {
+  // Frontier tier ($10/$50 per MTok) — without these entries a fable/mythos
+  // model id would fall through to the sonnet-priced default and
+  // under-estimate by >3x.
+  fable: { input: 10, output: 50, cacheWrite: 12.5, cacheRead: 1 },
+  mythos: { input: 10, output: 50, cacheWrite: 12.5, cacheRead: 1 },
   opus: { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
   sonnet: { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
   haiku: { input: 0.8, output: 4, cacheWrite: 1, cacheRead: 0.08 },
