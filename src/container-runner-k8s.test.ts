@@ -10,31 +10,50 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // 'kubernetes' — this file exercises the k8s dispatch branch of
 // buildSpawnCommand (container-runner.ts) end to end via runContainerAgent,
 // without a live cluster (spawn itself is mocked).
-vi.mock('./config.js', () => ({
-  AGENT_CONTAINER_CPUS: '2',
-  AGENT_CONTAINER_MEMORY: '2g',
-  AGENT_CONTAINER_PIDS_LIMIT: '',
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
-  CONTAINER_MAX_OUTPUT_SIZE: 10485760,
-  CONTAINER_RUNTIME: 'kubernetes',
-  CONTAINER_TIMEOUT: 1800000,
-  CREDENTIAL_PROXY_PORT: 3001,
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
-  IDLE_TIMEOUT: 1800000,
-  K8S_DATA_PVC_NAME: 'nanoclaw-data',
-  K8S_NAMESPACE: 'tenant-acme',
-  K8S_NODE_NAME: 'node-1',
-  K8S_POD_IP: '10.0.0.5',
-  K8S_VOLUME_MODE: 'hostPath',
-  KB_DASHBOARD_URL: '',
-  NANOCLAW_MODEL: undefined,
-  NANOCLAW_SUBAGENT_MODEL: undefined,
-  PROFILE_DIR: '/tmp/nanoclaw-test-profile',
-  SHARED_KB_GROUP: 'slack_main',
-  STORE_DIR: '/tmp/nanoclaw-test-profile/store',
-  TIMEZONE: 'America/Los_Angeles',
-}));
+vi.mock('./config.js', async () => {
+  // Real (deps-free) env-var-name resolver so container-runner's MCP env
+  // plumbing runs its actual logic; MCP_SERVERS defaults to [] and is
+  // overridden per-test via setMcpServers() for the generic-bridge cases.
+  const { mcpServerEnvVarNames } = await vi.importActual<
+    typeof import('./mcp-servers.js')
+  >('./mcp-servers.js');
+  return {
+    AGENT_CONTAINER_CPUS: '2',
+    AGENT_CONTAINER_MEMORY: '2g',
+    AGENT_CONTAINER_PIDS_LIMIT: '',
+    CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+    CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+    CONTAINER_RUNTIME: 'kubernetes',
+    CONTAINER_TIMEOUT: 1800000,
+    CREDENTIAL_PROXY_PORT: 3001,
+    DATA_DIR: '/tmp/nanoclaw-test-data',
+    GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+    IDLE_TIMEOUT: 1800000,
+    K8S_DATA_PVC_NAME: 'nanoclaw-data',
+    K8S_NAMESPACE: 'tenant-acme',
+    K8S_NODE_NAME: 'node-1',
+    K8S_POD_IP: '10.0.0.5',
+    K8S_VOLUME_MODE: 'hostPath',
+    KB_DASHBOARD_URL: '',
+    NANOCLAW_MODEL: undefined,
+    NANOCLAW_SUBAGENT_MODEL: undefined,
+    PROFILE_DIR: '/tmp/nanoclaw-test-profile',
+    SHARED_KB_GROUP: 'slack_main',
+    STORE_DIR: '/tmp/nanoclaw-test-profile/store',
+    TIMEZONE: 'America/Los_Angeles',
+    get MCP_SERVERS() {
+      return mockMcpServers;
+    },
+    mcpServerEnvVarNames,
+  };
+});
+
+// Mutable holder so individual tests can inject configured MCP servers into the
+// mocked config without re-mocking the module. Reset in beforeEach.
+let mockMcpServers: unknown[] = [];
+function setMcpServers(servers: unknown[]): void {
+  mockMcpServers = servers;
+}
 
 vi.mock('./logger.js', () => ({
   logger: {

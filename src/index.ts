@@ -11,6 +11,7 @@ import {
   IDLE_TIMEOUT,
   isPrivilegedGroup,
   MAX_MESSAGES_PER_PROMPT,
+  MCP_SERVERS,
   FRESH_SESSION_BACKFILL_MESSAGES,
   OPS_REPORT_AUDIENCE,
   OPS_REPORT_INTERVAL_MS,
@@ -806,6 +807,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         allowedTools: opts?.allowedTools,
         systemPromptAppend: opts?.systemPromptAppend,
+        mcpServers: MCP_SERVERS,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -1105,6 +1107,7 @@ async function main(): Promise<void> {
               isScheduledTask: true,
               modelOverride,
               allowedTools,
+              mcpServers: MCP_SERVERS,
               // We stop the container ourselves below — keep the runner from
               // logging the resulting non-zero exit as an error.
               expectExternalStop: true,
