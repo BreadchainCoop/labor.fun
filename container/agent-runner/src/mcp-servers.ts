@@ -85,7 +85,8 @@ export function buildDynamicMcpServers(
     if (cfg.type === 'http') {
       const referenced: string[] = [];
       if (cfg.bearerEnvVar) referenced.push(cfg.bearerEnvVar);
-      if (cfg.headerEnvVars) referenced.push(...Object.values(cfg.headerEnvVars));
+      if (cfg.headerEnvVars)
+        referenced.push(...Object.values(cfg.headerEnvVars));
 
       // Gate: every referenced var must resolve to a non-empty value.
       const allPresent = referenced.every((name) => Boolean(env[name]));

@@ -4,7 +4,6 @@ import path from 'path';
 import { readEnvFile } from './env.js';
 import {
   type McpServerConfig,
-  mcpServerEnvVarNames,
   validateMcpServerConfigs,
 } from './mcp-servers.js';
 import {
@@ -162,6 +161,7 @@ export const MCP_SERVERS: McpServerConfig[] = (() => {
     } catch (err) {
       throw new Error(
         `MCP_SERVERS env var is not valid JSON: ${(err as Error).message}`,
+        { cause: err },
       );
     }
     if (!Array.isArray(parsed)) {

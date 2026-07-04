@@ -128,7 +128,9 @@ export function validateMcpServerConfigs(configs: unknown): McpServerConfig[] {
         );
       }
       if (entry.args !== undefined && !isStringArray(entry.args)) {
-        throw new Error(`${where}.args must be an array of strings if present.`);
+        throw new Error(
+          `${where}.args must be an array of strings if present.`,
+        );
       }
       if (entry.envVars !== undefined && !isStringArray(entry.envVars)) {
         throw new Error(

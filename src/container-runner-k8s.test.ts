@@ -14,9 +14,10 @@ vi.mock('./config.js', async () => {
   // Real (deps-free) env-var-name resolver so container-runner's MCP env
   // plumbing runs its actual logic; MCP_SERVERS defaults to [] and is
   // overridden per-test via setMcpServers() for the generic-bridge cases.
-  const { mcpServerEnvVarNames } = await vi.importActual<
-    typeof import('./mcp-servers.js')
-  >('./mcp-servers.js');
+  const { mcpServerEnvVarNames } =
+    await vi.importActual<typeof import('./mcp-servers.js')>(
+      './mcp-servers.js',
+    );
   return {
     AGENT_CONTAINER_CPUS: '2',
     AGENT_CONTAINER_MEMORY: '2g',
@@ -180,10 +181,12 @@ describe('container-runner Kubernetes dispatch (CONTAINER_RUNTIME=kubernetes)', 
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
     vi.mocked(spawn).mockClear();
+    setMcpServers([]);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.ZAPIER_MCP_TOKEN;
   });
 
   it('spawns kubectl instead of docker', async () => {
@@ -251,5 +254,71 @@ describe('container-runner Kubernetes dispatch (CONTAINER_RUNTIME=kubernetes)', 
     } finally {
       delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
     }
+  });
+
+  describe('generic remote-MCP bridge', () => {
+    it('resolves a configured MCP server env var into the pod spec env, and redacts it from the logged argv', async () => {
+      setMcpServers([
+        {
+          name: 'zapier',
+          type: 'http',
+          url: 'https://mcp.zapier.com/api/mcp/abc',
+          bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+        },
+      ]);
+      process.env.ZAPIER_MCP_TOKEN = 'zapier-secret-value';
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const [, args] = lastSpawnCall();
+      const overrides = JSON.parse(args[args.indexOf('--overrides') + 1]);
+      const env = overrides.spec.containers[0].env as Array<{
+        name: string;
+        value: string;
+      }>;
+      const tokenEnv = env.find((e) => e.name === 'ZAPIER_MCP_TOKEN');
+      expect(tokenEnv?.value).toBe('zapier-secret-value');
+
+      // The logged (debug) argv is a separate, redacted rendering built by
+      // redactSecretsInArgs — assert the secret value never lands there.
+      const { logger } = await import('./logger.js');
+      const debugCalls = vi.mocked(logger.debug).mock.calls;
+      const loggedText = JSON.stringify(debugCalls);
+      expect(loggedText).not.toContain('zapier-secret-value');
+    });
+
+    it('omits the server from the pod env and passes no --overrides env entry when its env var is unset', async () => {
+      setMcpServers([
+        {
+          name: 'zapier',
+          type: 'http',
+          url: 'https://mcp.zapier.com/api/mcp/abc',
+          bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+        },
+      ]);
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const [, args] = lastSpawnCall();
+      const overrides = JSON.parse(args[args.indexOf('--overrides') + 1]);
+      const env = overrides.spec.containers[0].env as Array<{
+        name: string;
+        value: string;
+      }>;
+      expect(env.find((e) => e.name === 'ZAPIER_MCP_TOKEN')).toBeUndefined();
+    });
+
+    it('injects mcpServers into the stdin-JSON payload written to the container process', async () => {
+      const configured = [
+        {
+          name: 'zapier',
+          type: 'http' as const,
+          url: 'https://mcp.zapier.com/api/mcp/abc',
+          bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+        },
+      ];
+      setMcpServers(configured);
+      const writeSpy = vi.spyOn(fakeProc.stdin, 'write');
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const written = writeSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(written);
+      expect(parsed.mcpServers).toEqual(configured);
+    });
   });
 });

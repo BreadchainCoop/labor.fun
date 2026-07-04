@@ -231,6 +231,21 @@ opt-in flag to add a private skill entirely on the server:
 The skill syncs into that org's containers only, stays out of the public repo,
 and the framework needs no changes to host it.
 
+## 3b. Remote MCP servers (config-driven tool access)
+
+Beyond the built-in MCP servers wired directly into the agent
+(`nanoclaw`/`gws`/`github`/`linear`), an org can add **any** MCP server —
+hosted remote (streamable HTTP + Bearer/header auth) or local stdio — purely
+via config: `mcpServers` in `profile.config.json`, or the `MCP_SERVERS` env var
+for a hosted/multi-tenant install. No framework code change, no new
+registration mechanism — the entry is validated at startup and, once its
+referenced env var(s) are set, shows up in every agent container's
+`mcpServers` map and `mcp__<name>__*` tool allowlist. This is how you add
+Zapier (30k+ actions across 9k apps), Jira/Confluence, Stripe, Notion,
+PagerDuty, or any other MCP-speaking service. See
+[MCP-SERVERS.md](MCP-SERVERS.md) for the config schema, the exact
+config-to-container path, and a worked Zapier example.
+
 ## 4. Setup steps
 
 Install-wizard steps are modules in `setup/` registered in the `STEPS` map
