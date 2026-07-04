@@ -34,6 +34,17 @@ const envConfig = readEnvFile([
   // should be operator-configurable must be listed here for readEnvFile to
   // pick it up at process start.
   'FLAT_ACCESS',
+  // Microsoft Teams channel (src/channels/teams.ts). Opt-in via TEAMS_ENABLED;
+  // stays fully inert (no HTTP port opened) unless TEAMS_APP_ID +
+  // TEAMS_APP_PASSWORD are also set. The secret (TEAMS_APP_PASSWORD) is
+  // deliberately NOT listed here — it's read directly by teams.ts via its own
+  // readEnvFile call (matching slack.ts's SLACK_BOT_TOKEN / discord.ts's
+  // DISCORD_TOKEN), so it never flows through this module or gets exported.
+  'TEAMS_ENABLED',
+  'TEAMS_APP_ID',
+  'TEAMS_APP_TENANT_ID',
+  'TEAMS_MESSAGING_PORT',
+  'TEAMS_HOST',
   'DISCORD_DM_ALLOWED_ROLE_IDS',
   'DISCORD_DM_ALLOWED_GUILD_IDS',
   'DISCORD_DM_ROLE_REFRESH_INTERVAL',
@@ -387,6 +398,21 @@ function splitIds(raw: string | undefined): string[] {
 export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
   envVal('DISCORD_DM_ALLOWED_ROLE_IDS'),
 );
+
+// --- Microsoft Teams channel (src/channels/teams.ts) ---
+// Non-secret feature flags, exported for anything outside the channel module
+// that needs to know Teams is configured (e.g. setup/status tooling). The App
+// ID is not a secret (it's a public GUID identifying the Azure AD app
+// registration) but TEAMS_APP_PASSWORD (the app's client secret) is — that one
+// is intentionally read only inside teams.ts itself and never exported here.
+export const TEAMS_ENABLED = envVal('TEAMS_ENABLED') === 'true';
+export const TEAMS_APP_ID = envVal('TEAMS_APP_ID') || '';
+export const TEAMS_APP_TENANT_ID = envVal('TEAMS_APP_TENANT_ID') || '';
+export const TEAMS_MESSAGING_PORT = parseInt(
+  envVal('TEAMS_MESSAGING_PORT') || '3978',
+  10,
+);
+export const TEAMS_HOST = envVal('TEAMS_HOST') || '0.0.0.0';
 // Optional: scope role lookup to specific guild IDs. Empty = check every
 // guild the bot is in.
 export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
