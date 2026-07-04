@@ -17,6 +17,8 @@ vi.mock('../../logger.js', () => ({
 const configMock = vi.hoisted(() => ({
   GOOGLE_DRIVE_FOLDER_IDS: [] as string[],
   CONNECTOR_SYNC_INTERVAL_MS: 1800000,
+  GROUPS_DIR: '',
+  SHARED_KB_GROUP: 'slack_main',
 }));
 
 vi.mock('../../config.js', () => configMock);
@@ -28,6 +30,17 @@ const readEnvFileMock = vi.hoisted(() =>
 );
 vi.mock('../../env.js', () => ({ readEnvFile: readEnvFileMock }));
 
+// In-memory router_state so runConnector's cursor plumbing works without a
+// real DB (unused by google-drive.ts's own sync logic post-Fix-4, but
+// base.ts's runConnector() still reads/writes it as framework infra).
+const routerState = vi.hoisted(() => new Map<string, string>());
+vi.mock('../../db.js', () => ({
+  getRouterState: (k: string) => routerState.get(k),
+  setRouterState: (k: string, v: string) => {
+    routerState.set(k, v);
+  },
+}));
+
 // Import AFTER the mocks are wired.
 import {
   googleDocToMarkdown,
@@ -38,6 +51,7 @@ import {
   getGoogleDriveDefaultVisibility,
   type DocsDocument,
 } from './google-drive.js';
+import { runConnector } from './base.js';
 import type { ConnectorContext } from './base.js';
 
 // --- Helpers ---
@@ -474,8 +488,8 @@ describe('googleDriveConnector.sync', () => {
     }) as unknown as typeof fetch;
   }
 
-  it('full pull (no cursor) reports complete:true and advances the cursor', async () => {
-    const { ctx, cursorValue } = makeCtx({
+  it('pulls every doc every run and reports complete:true on a clean pull', async () => {
+    const { ctx } = makeCtx({
       fetchImpl: makeFetch([
         {
           id: 'D1',
@@ -495,40 +509,32 @@ describe('googleDriveConnector.sync', () => {
     const res = await googleDriveConnector.sync(ctx);
     expect(res.complete).toBe(true);
     expect(res.docs.map((d) => d.id).sort()).toEqual(['D1', 'D2']);
-    // Cursor advanced to the max modifiedTime seen.
-    expect(cursorValue()).toBe('2026-05-20T00:00:00Z');
   });
 
-  it('incremental pull (cursor present) reports complete:false and skips unchanged docs', async () => {
-    const { ctx, cursorValue } = makeCtx({
-      getCursor: () => '2026-05-15T00:00:00Z',
-      fetchImpl: makeFetch([
-        {
-          id: 'D1',
-          name: 'Old Doc',
-          modifiedTime: '2026-05-10T00:00:00Z', // <= cursor -> skipped
-          webViewLink: 'https://docs.google.com/document/d/D1/edit',
-        },
-        {
-          id: 'D2',
-          name: 'New Doc',
-          modifiedTime: '2026-05-20T00:00:00Z', // > cursor -> exported
-          webViewLink: 'https://docs.google.com/document/d/D2/edit',
-        },
-      ]),
-    });
-    // makeCtx's default setCursor writes to its closure; override to observe.
-    let written: string | undefined;
-    ctx.setCursor = (v: string) => {
-      written = v;
-    };
-
-    const res = await googleDriveConnector.sync(ctx);
-    // Incremental runs must never be "complete" (no delete-reconcile).
-    expect(res.complete).toBe(false);
-    expect(res.docs.map((d) => d.id)).toEqual(['D2']);
-    expect(written).toBe('2026-05-20T00:00:00Z');
-    void cursorValue;
+  it('repeated runs each re-export the full set again (no persisted cursor gates it)', async () => {
+    const files = [
+      {
+        id: 'D1',
+        name: 'Doc One',
+        modifiedTime: '2026-05-10T00:00:00Z',
+        webViewLink: 'https://docs.google.com/document/d/D1/edit',
+      },
+      {
+        id: 'D2',
+        name: 'Doc Two',
+        modifiedTime: '2026-05-10T00:00:00Z', // same timestamp as D1
+        webViewLink: 'https://docs.google.com/document/d/D2/edit',
+      },
+    ];
+    const { ctx: ctx1 } = makeCtx({ fetchImpl: makeFetch(files) });
+    const res1 = await googleDriveConnector.sync(ctx1);
+    const { ctx: ctx2 } = makeCtx({ fetchImpl: makeFetch(files) });
+    const res2 = await googleDriveConnector.sync(ctx2);
+    expect(res1.complete).toBe(true);
+    expect(res2.complete).toBe(true);
+    // Fix 5 dissolved: both docs sync every run even though they share a
+    // modifiedTime — there is no cursor boundary to drop one of them at.
+    expect(res2.docs.map((d) => d.id).sort()).toEqual(['D1', 'D2']);
   });
 
   it('a per-file export failure forces complete:false and skips that file', async () => {
@@ -559,6 +565,101 @@ describe('googleDriveConnector.sync', () => {
     const res = await googleDriveConnector.sync(ctx);
     expect(res.complete).toBe(false);
     expect(res.docs.map((d) => d.id)).toEqual(['D1']);
+  });
+
+  // --- Fix 3: a file whose export fails isn't skipped forever ---
+
+  it('a file whose export fails this run is retried (and picked up) next run', async () => {
+    let failD2 = true;
+    const flakyFetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.startsWith('https://oauth2.googleapis.com/token')) {
+        return jsonResponse({ access_token: 'ya29.x' });
+      }
+      if (u.includes('/documents/D2') && failD2) {
+        return jsonResponse({ error: 'boom' }, false, 500);
+      }
+      if (u.startsWith('https://docs.googleapis.com/v1/documents')) {
+        return jsonResponse(makeDocsDoc());
+      }
+      if (u.includes('mimeType%3D%27application%2Fvnd.google-apps.folder%27')) {
+        return jsonResponse({ files: [] });
+      }
+      return jsonResponse({
+        files: [
+          { id: 'D1', name: 'Ok', modifiedTime: '2026-05-10T00:00:00Z' },
+          { id: 'D2', name: 'Bad', modifiedTime: '2026-05-11T00:00:00Z' },
+        ],
+      });
+    }) as unknown as typeof fetch;
+
+    // Run 1: D2's export fails.
+    const { ctx: ctx1 } = makeCtx({ fetchImpl: flakyFetch });
+    const res1 = await googleDriveConnector.sync(ctx1);
+    expect(res1.complete).toBe(false);
+    expect(res1.docs.map((d) => d.id)).toEqual(['D1']);
+
+    // Run 2: D2 succeeds — because there's no cursor to have advanced past
+    // it, it's retried rather than skipped forever (the Fix 3 bug dissolved).
+    failD2 = false;
+    const { ctx: ctx2 } = makeCtx({ fetchImpl: flakyFetch });
+    const res2 = await googleDriveConnector.sync(ctx2);
+    expect(res2.complete).toBe(true);
+    expect(res2.docs.map((d) => d.id).sort()).toEqual(['D1', 'D2']);
+  });
+
+  // --- Fix 4: deletions reconcile on every complete run, not just the first ---
+
+  it('a doc removed upstream is deleted from the KB on a later run', async () => {
+    const kbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gdrive-reconcile-'));
+    try {
+      const filesRun1 = [
+        {
+          id: 'D1',
+          name: 'Doc One',
+          modifiedTime: '2026-05-10T00:00:00Z',
+          webViewLink: 'https://docs.google.com/document/d/D1/edit',
+        },
+        {
+          id: 'D2',
+          name: 'Doc Two',
+          modifiedTime: '2026-05-10T00:00:00Z',
+          webViewLink: 'https://docs.google.com/document/d/D2/edit',
+        },
+      ];
+      const { ctx: ctx1 } = makeCtx({ fetchImpl: makeFetch(filesRun1) });
+      const run1 = await runConnector(
+        { ...googleDriveConnector, syncInterval: 0 },
+        {
+          fetchImpl: ctx1.fetchImpl,
+          dir: kbDir,
+          now: () => '2026-05-10T01:00:00Z',
+        },
+      );
+      expect(run1.upserted).toBe(2);
+      expect(
+        fs.readdirSync(kbDir).filter((f) => f.endsWith('.md')).sort(),
+      ).toEqual(['D1.md', 'D2.md']);
+
+      // Run 2 (later): D2 removed upstream — only D1 comes back.
+      const { ctx: ctx2 } = makeCtx({ fetchImpl: makeFetch([filesRun1[0]]) });
+      const run2 = await runConnector(
+        { ...googleDriveConnector, syncInterval: 0 },
+        {
+          fetchImpl: ctx2.fetchImpl,
+          dir: kbDir,
+          now: () => '2026-05-10T02:00:00Z',
+        },
+      );
+      // The SECOND complete run reconciles the deletion, proving reconcile
+      // isn't a one-time-ever event gated on a persisted cursor.
+      expect(run2.deleted).toBe(1);
+      expect(fs.readdirSync(kbDir).filter((f) => f.endsWith('.md'))).toEqual([
+        'D1.md',
+      ]);
+    } finally {
+      fs.rmSync(kbDir, { recursive: true, force: true });
+    }
   });
 
   it('propagates a fatal auth (401) error from the Drive listing', async () => {

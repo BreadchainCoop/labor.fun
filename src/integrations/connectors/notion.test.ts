@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 // --- Mocks ---
 
@@ -15,11 +18,24 @@ const configMock = vi.hoisted(() => ({
   CONNECTOR_SYNC_INTERVAL_MS: 1800000,
   NOTION_ROOT_PAGE_IDS: [] as string[],
   NOTION_DATABASE_IDS: [] as string[],
+  GROUPS_DIR: '',
+  SHARED_KB_GROUP: 'slack_main',
 }));
 
 vi.mock('../../config.js', () => configMock);
 
 vi.mock('../../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
+
+// In-memory router_state so runConnector's cursor plumbing works without a
+// real DB (unused by notion.ts's own sync logic post-Fix-4, but base.ts's
+// runConnector() still reads/writes it as framework infra).
+const routerState = vi.hoisted(() => new Map<string, string>());
+vi.mock('../../db.js', () => ({
+  getRouterState: (k: string) => routerState.get(k),
+  setRouterState: (k: string, v: string) => {
+    routerState.set(k, v);
+  },
+}));
 
 // Import the module under test AFTER the mocks are wired.
 import {
@@ -32,6 +48,7 @@ import {
   getNotionDefaultVisibility,
   NotionError,
 } from './notion.js';
+import { runConnector } from './base.js';
 import type { ConnectorContext } from './base.js';
 
 // --- Helpers ---
@@ -466,7 +483,20 @@ function dbFetch(pages: any[]): any {
   });
 }
 
-describe('incremental sync + complete flag', () => {
+/** Run the real notionConnector through base.ts's runConnector() against a
+ * scratch KB dir, so reconcile-delete behavior is exercised end-to-end. */
+async function runConnectorForTest(
+  fetchImpl: any,
+  dir: string,
+  now: string,
+): Promise<{ upserted: number; deleted: number; complete: boolean }> {
+  return runConnector(
+    { ...notionConnector, syncInterval: 0 },
+    { fetchImpl, dir, now: () => now },
+  );
+}
+
+describe('full-pull-every-run + complete flag (Fixes 3/4/5)', () => {
   beforeEach(() => {
     process.env.NOTION_API_KEY = 'secret';
     configMock.NOTION_DATABASE_IDS = ['db1'];
@@ -491,65 +521,127 @@ describe('incremental sync + complete flag', () => {
     properties: { Name: { type: 'title', title: [rt('B')] } },
   };
 
-  it('full pull (no cursor) reports complete=true and advances cursor to max', async () => {
-    const setCursor = vi.fn();
-    const ctx = makeCtx({
-      getCursor: () => undefined,
-      setCursor,
-      fetchImpl: dbFetch([pageA, pageB]),
-    });
+  it('pulls every page every run and reports complete=true on a clean pull', async () => {
+    const ctx = makeCtx({ fetchImpl: dbFetch([pageA, pageB]) });
     const res = await notionConnector.sync(ctx);
     expect(res.complete).toBe(true);
     expect(res.docs.map((d) => d.id).sort()).toEqual(['page-a', 'page-b']);
     // Body was converted from blocks.
     expect(res.docs[0].markdown).toBe('content');
-    // Cursor advances to the newest last_edited_time seen.
-    expect(setCursor).toHaveBeenCalledWith('2026-06-10T00:00:00.000Z');
   });
 
-  it('incremental pull (with cursor) reports complete=false and skips unchanged', async () => {
-    const setCursor = vi.fn();
-    const ctx = makeCtx({
-      // Cursor between A and B → only B is newer.
-      getCursor: () => '2026-06-05T00:00:00.000Z',
-      setCursor,
-      fetchImpl: dbFetch([pageA, pageB]),
-    });
-    const res = await notionConnector.sync(ctx);
-    // Incremental runs must NEVER be complete (framework must not delete).
-    expect(res.complete).toBe(false);
-    // Only the changed page comes back; A (<= cursor) is skipped.
-    expect(res.docs.map((d) => d.id)).toEqual(['page-b']);
-    expect(setCursor).toHaveBeenCalledWith('2026-06-10T00:00:00.000Z');
-  });
-
-  it('does not fetch blocks for skipped (unchanged) pages', async () => {
+  it('fetches blocks for every page every run, not just "changed" ones', async () => {
     const fetchImpl = dbFetch([pageA, pageB]);
-    const ctx = makeCtx({
-      getCursor: () => '2026-06-05T00:00:00.000Z',
-      setCursor: vi.fn(),
-      fetchImpl,
-    });
+    const ctx = makeCtx({ fetchImpl });
     await notionConnector.sync(ctx);
     const blockCalls = fetchImpl.mock.calls.filter((c: any[]) =>
       String(c[0]).includes('/children'),
     );
-    // Only page-b's blocks fetched, not page-a's.
-    expect(blockCalls).toHaveLength(1);
-    expect(String(blockCalls[0][0])).toContain('page-b');
+    // Both pages' blocks are fetched — there is no cursor to skip against.
+    expect(blockCalls).toHaveLength(2);
   });
 
-  it('does not advance the cursor when nothing changed', async () => {
-    const setCursor = vi.fn();
-    const ctx = makeCtx({
-      // Cursor at/after the newest page → nothing to do.
-      getCursor: () => '2026-06-10T00:00:00.000Z',
-      setCursor,
-      fetchImpl: dbFetch([pageA, pageB]),
-    });
+  it('repeated runs each pull the full set again (no persisted cursor gates it)', async () => {
+    const ctx1 = makeCtx({ fetchImpl: dbFetch([pageA, pageB]) });
+    const res1 = await notionConnector.sync(ctx1);
+    const ctx2 = makeCtx({ fetchImpl: dbFetch([pageA, pageB]) });
+    const res2 = await notionConnector.sync(ctx2);
+    expect(res1.complete).toBe(true);
+    expect(res2.complete).toBe(true);
+    expect(res2.docs.map((d) => d.id).sort()).toEqual(['page-a', 'page-b']);
+  });
+
+  // --- Fix 5: same-timestamp docs are never dropped (no boundary at all now) ---
+
+  it('two pages sharing the exact same last_edited_time are both synced', async () => {
+    const sameTime = '2026-06-05T00:00:00.000Z';
+    const pageC = {
+      id: 'page-c',
+      url: 'https://www.notion.so/c',
+      last_edited_time: sameTime,
+      properties: { Name: { type: 'title', title: [rt('C')] } },
+    };
+    const pageD = {
+      id: 'page-d',
+      url: 'https://www.notion.so/d',
+      last_edited_time: sameTime,
+      properties: { Name: { type: 'title', title: [rt('D')] } },
+    };
+    const ctx = makeCtx({ fetchImpl: dbFetch([pageC, pageD]) });
     const res = await notionConnector.sync(ctx);
-    expect(res.docs).toEqual([]);
-    expect(res.complete).toBe(false);
-    expect(setCursor).not.toHaveBeenCalled();
+    expect(res.docs.map((d) => d.id).sort()).toEqual(['page-c', 'page-d']);
+  });
+
+  // --- Fix 3: a page whose block-fetch fails isn't skipped forever ---
+
+  it('a page whose block fetch fails this run is retried (and picked up) next run', async () => {
+    let failPageA = true;
+    const flakyFetch = makeFetch((url, init) => {
+      if (url.includes('/databases/') && init.method === 'POST') {
+        return {
+          body: { results: [pageA, pageB], has_more: false, next_cursor: null },
+        };
+      }
+      if (url.includes('/children')) {
+        if (url.includes(pageA.id) && failPageA) {
+          return { ok: false, status: 500, body: { message: 'boom' } };
+        }
+        return {
+          body: {
+            results: [
+              block('paragraph', { paragraph: { rich_text: [rt('content')] } }),
+            ],
+            has_more: false,
+            next_cursor: null,
+          },
+        };
+      }
+      return { body: { results: [] } };
+    });
+
+    // Run 1: page-a's block fetch fails.
+    const res1 = await notionConnector.sync(makeCtx({ fetchImpl: flakyFetch }));
+    expect(res1.complete).toBe(false);
+    expect(res1.docs.map((d) => d.id)).toEqual(['page-b']);
+
+    // Run 2: page-a succeeds this time — because there's no cursor, it's
+    // retried rather than skipped forever (the Fix 3 bug this dissolves).
+    failPageA = false;
+    const res2 = await notionConnector.sync(makeCtx({ fetchImpl: flakyFetch }));
+    expect(res2.complete).toBe(true);
+    expect(res2.docs.map((d) => d.id).sort()).toEqual(['page-a', 'page-b']);
+  });
+
+  // --- Fix 4: deletions reconcile on every complete run, not just the first ---
+
+  it('a page removed upstream is deleted from the KB on a later complete run', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notion-reconcile-'));
+    try {
+      // Run 1: both pages present.
+      const run1 = await runConnectorForTest(
+        dbFetch([pageA, pageB]),
+        dir,
+        '2026-06-01T00:00:00.000Z',
+      );
+      expect(run1.upserted).toBe(2);
+      expect(
+        fs.readdirSync(dir).filter((f) => f.endsWith('.md')).sort(),
+      ).toEqual(['page-a.md', 'page-b.md']);
+
+      // Run 2 (later): page-a removed upstream — only page-b comes back.
+      const run2 = await runConnectorForTest(
+        dbFetch([pageB]),
+        dir,
+        '2026-06-02T00:00:00.000Z',
+      );
+      // The SECOND complete run reconciles the deletion, proving reconcile
+      // isn't a one-time-ever event gated on a persisted cursor.
+      expect(run2.deleted).toBe(1);
+      expect(fs.readdirSync(dir).filter((f) => f.endsWith('.md'))).toEqual([
+        'page-b.md',
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
