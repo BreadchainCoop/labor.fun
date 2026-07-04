@@ -10,11 +10,7 @@ import {
   resolvePendingApproval,
   setRegisteredGroup,
 } from './db.js';
-import {
-  checkKbDeleteApproval,
-  processModifyKbFile,
-  IpcDeps,
-} from './ipc.js';
+import { checkKbDeleteApproval, processModifyKbFile, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
 const KB_CONTEXT_DIR = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context');

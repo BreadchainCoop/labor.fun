@@ -430,9 +430,9 @@ describe('resolve_approval — multi-sender batch identity verification', () => 
     // Fail closed: ambiguous → still pending, nothing attributed to Bob.
     expect(getPendingApproval(a.id)!.status).toBe('pending');
     expect(getPendingApproval(a.id)!.resolved_by_user_id).toBeNull();
-    expect(sent.some((m) => m.text.includes("Couldn't tell who approved"))).toBe(
-      true,
-    );
+    expect(
+      sent.some((m) => m.text.includes("Couldn't tell who approved")),
+    ).toBe(true);
   });
 
   it('EXPLOIT BLOCKED: even when actor_sender_id points at the proposer, self-approval is refused', async () => {
