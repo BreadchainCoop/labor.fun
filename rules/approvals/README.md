@@ -72,6 +72,33 @@ Action classes are free-form strings — a new feature can introduce its own
 (e.g. `slack_channel_create`) without any host code change; it only needs to
 be added to the gated set for orgs that want it reviewed.
 
+**Enforcement level — read this before assuming "gated" means "blocked":**
+for every action_class *except* `kb_delete`, this primitive is **advisory
+defense-in-depth**. The host gates the *conversation* (records the request,
+requires a verified human decision, notifies the outcome) but the agent
+itself executes the underlying action after seeing an "approved" outcome —
+the host has no idea how to open a PR, send a message, or move money, so it
+cannot physically stop a compromised or buggy agent from acting without
+waiting for that approval. The real backstop for those classes is the
+upstream tool/credential boundary (e.g. GitHub token scope, outbound-message
+allowlists, the Safe multisig threshold for on-chain payouts) — this gate
+makes the intended flow "ask first," it does not make asking mandatory at
+the code level for anything other than `kb_delete`.
+
+**`kb_delete` is hard-enforced, not advisory.** `modify_kb_file`'s delete
+branch (`processModifyKbFile` in `src/ipc.ts`) will not unlink a file unless
+the call carries an `approval_id` that resolves to a `pending_approvals` row
+that is *all* of: `action_class = 'kb_delete'`, `status = 'approved'`,
+unexpired (`expires_at` not in the past), and whose recorded `payload`
+references the exact same KB-relative path being deleted. Any miss — no id,
+wrong class, still-pending, expired, or a path mismatch — fails closed: the
+file is left in place, the gate is skipped entirely (no unauthorized delete
+occurs), and the requesting chat is told to get a `kb_delete` approval first.
+This is the one action_class in the default set where the host itself is the
+backstop, independent of what the agent chooses to do — see
+`checkKbDeleteApproval` / `processModifyKbFile` in `src/ipc.ts` and
+`src/kb-delete-approval.test.ts`.
+
 ## Who can approve
 
 Fail-closed, same posture as expense/transcript approval:
@@ -89,6 +116,65 @@ Fail-closed, same posture as expense/transcript approval:
 - Double-resolution is refused: only a still-`pending` row transitions; a
   second decision on an already-resolved row is a no-op (logged, and the
   approver is told the row is already `<status>`).
+
+### Identity verification in multi-sender batches
+
+The orchestrator processes messages in **batches** — a single agent run can
+see messages from several distinct humans in a group chat (e.g. the proposer
+and an approver both spoke before the container was invoked). This matters
+because the approver-tier check and the self-approval guard above are only as
+strong as the identity they're checked against.
+
+**The vulnerability this closes:** `sender_context.json` used to carry only
+the identity of the *last* message in the batch. If a proposer's own gated
+request landed earlier in a batch and another allowlisted user's message
+happened to land last, an agent forwarding "approve AP-…" would have that
+decision attributed to whoever spoke last — not necessarily the person who
+actually typed the approval. A proposer could exploit (or simply benefit
+from) that ordering to get their own request approved under someone else's
+identity.
+
+**The fix — a verified roster, not a trusted claim:**
+
+- `sender_context.json` now carries a `senders` array: every distinct human
+  sender the orchestrator resolved from the batch's real inbound messages
+  (deduped by platform id), each tagged with the `platform_sender_id` (Slack
+  user id, Telegram id, …) the orchestrator used to resolve them
+  (`buildBatchSenderContext` in `src/index.ts`). The top-level
+  `user_id`/`display_name`/`tags` fields are kept for back-compat (equal to
+  the *last* resolved sender) — non-decision consumers that only need "some
+  allowlisted human triggered this" (`add_kb_user`, `fetch_discord_history`,
+  KB write attribution, etc.) are unaffected.
+- Per-decision MCP tools — `resolve_approval`, `approve_expense`/
+  `deny_expense`/`modify_expense` (→ `expense_decision`), `submit_receipt`
+  (→ `expense_receipt`), `cancel_expense` (→ `expense_cancel`) — accept an
+  optional `actor_sender_id`: the platform id of the specific person whose
+  message carried *this* decision. The agent can only point at a
+  sender/message the orchestrator already resolved from real platform data —
+  it can never assert an approver identity by free-text string.
+- The host resolves the actual actor via `resolveActorFromSenderContext`
+  (`src/ipc.ts`), never by trusting the agent's claim of who decided:
+  - Roster has exactly **one** sender → that sender, unambiguous;
+    `actor_sender_id` is optional and ignored (the common case, unaffected).
+  - Roster has **more than one** sender and `actor_sender_id` matches one of
+    their `platform_sender_id`s → that sender.
+  - Roster has more than one sender and `actor_sender_id` is missing or
+    doesn't match any roster entry → **fail closed**: the decision is refused
+    as ambiguous (row stays `pending`/unchanged; the chat is told to re-issue
+    the decision identifying the approver), never silently attributed to
+    anyone.
+- The self-approval guard and the `APPROVER_SLUGS` tier check both run
+  against this **verified** actor identity — never against the batch-last
+  sender and never against a name the agent supplies directly. This is what
+  actually prevents the self-approval exploit: even if the agent (honestly or
+  maliciously) passes `actor_sender_id` for the original requester, the
+  self-approval guard still fires, because that identity was independently
+  verified against the roster rather than asserted.
+
+Tests: `src/batch-sender-context.test.ts` (roster construction) and the
+"multi-sender batch identity verification" describe blocks in
+`src/approval.test.ts` (`resolve_approval` and `expense_decision`), including
+the blocked-exploit cases.
 
 ## Lifecycle (`pending_approvals.status`)
 
@@ -133,14 +219,27 @@ key creates a fresh row — dedup only suppresses **live** duplicates.
 - **`request_approval`**`(action_class, summary, payload?, dedupe_key?, approver_hint?)`
   — propose a consequential action. Returns "not gated, proceed" or "pending,
   wait for a human." Never perform the action before seeing the outcome.
-- **`resolve_approval`**`(approval_id, decision, reason?)` — call only when an
-  allowlisted human in the chat clearly approved/rejected/asked to revise a
-  specific approval id (translate their natural-language reply into this
-  call, same pattern as `approve_proposed_tasks` / `expense_decision`).
+- **`resolve_approval`**`(approval_id, decision, reason?, actor_sender_id?)`
+  — call only when an allowlisted human in the chat clearly
+  approved/rejected/asked to revise a specific approval id (translate their
+  natural-language reply into this call, same pattern as
+  `approve_proposed_tasks` / `expense_decision`). Pass `actor_sender_id` (the
+  platform id of whoever's message carried the decision) whenever more than
+  one person spoke in the run — see "Identity verification in multi-sender
+  batches" above; omitting it when required fails the decision closed rather
+  than guessing.
+- **`modify_kb_file`**`(file_path, content?, action?, approval_id?)` — when
+  `action: "delete"` and the org gates `kb_delete`, `approval_id` must be an
+  approved, unexpired `kb_delete` approval referencing the same `file_path`;
+  the host refuses the delete otherwise (see "Enforcement level" above).
+- The expense decision tools (`approve_expense`, `deny_expense`,
+  `modify_expense`, `submit_receipt`, `cancel_expense`) accept the same
+  optional `actor_sender_id`, required under the same multi-sender condition.
 
-Both are implemented in `container/agent-runner/src/ipc-mcp-stdio.ts` and
+All are implemented in `container/agent-runner/src/ipc-mcp-stdio.ts` and
 handled host-side in `src/ipc.ts` (`case 'request_approval'` /
-`case 'resolve_approval'`).
+`case 'resolve_approval'` / `processModifyKbFile` / `case 'expense_decision'`
+/ `case 'expense_receipt'` / `case 'expense_cancel'`).
 
 ## Relationship to other approval flows
 
@@ -176,10 +275,20 @@ question was phrased.
 
 - `src/db.ts` — `pending_approvals` table + accessors
   (`createPendingApproval`, `resolvePendingApproval`, `expireStalePendingApprovals`, …)
-- `src/ipc.ts` — `request_approval`, `resolve_approval` IPC handlers
+- `src/ipc.ts` — `request_approval`, `resolve_approval` IPC handlers;
+  `resolveActorFromSenderContext` (verified multi-sender actor resolution);
+  `checkKbDeleteApproval` / `processModifyKbFile` (hard `kb_delete` gate)
+- `src/index.ts` — `buildBatchSenderContext` / `platformForChatJid` (builds
+  the per-run `sender_context.json` roster from the processed message batch)
 - `src/config.ts` — `GATED_ACTION_CLASSES`, `DEFAULT_GATED_ACTION_CLASSES`,
   `isGatedActionClass`, `APPROVER_SLUGS`, `APPROVAL_TIMEOUT_MINUTES`
 - `src/profile.ts` — `gatedActionClasses` / `approvals` profile config shape
 - `src/integrations/approval-expiry.ts` — expiry sweep background flow
 - `container/agent-runner/src/ipc-mcp-stdio.ts` — agent-facing MCP tools
+  (`resolve_approval`, expense decision tools, `modify_kb_file`), all
+  accepting `actor_sender_id` where relevant
 - `src/approval.test.ts` — lifecycle tests (propose, resolve, auth, expiry)
+  plus the multi-sender identity verification / blocked-exploit tests
+- `src/batch-sender-context.test.ts` — `buildBatchSenderContext` roster
+  construction tests
+- `src/kb-delete-approval.test.ts` — `kb_delete` hard-enforcement tests
