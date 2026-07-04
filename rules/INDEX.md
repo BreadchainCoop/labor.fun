@@ -12,6 +12,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Task scheduling**: [Scheduling](scheduling/README.md)
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
+- **Proposing a consequential action (gated write, external message, payout, …)**: [Approvals](approvals/README.md)
 - **Needs deploy/operator access or a human decision**: [Escalation](escalation.md)
 - **Shipping / "is it live?" / deploy questions**: [Deployment](deployment.md)
 - **Multi-step work / cloning repos / where files persist**: [Runtime Environment](runtime-environment.md)
@@ -45,6 +46,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Platform Identities](identity/platform-identities.md) | `rules/identity/platform-identities.md` | Resolving cross-platform users |
 | [Transcripts](transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction, HTML slideshow generation |
 | [Transcript Task Approval](transcripts/task-approval.md) | `rules/transcripts/task-approval.md` | Approval gate for tasks proposed from meeting transcripts |
+| [Approvals](approvals/README.md) | `rules/approvals/` | The reusable human-in-the-loop approval primitive — gated action classes, who approves, expiry, living-FAQ capture |
 | [Expenses](finance/expenses.md) | `rules/finance/` | Any time a user mentions money, spending, reimbursement, or receipts |
 | [GitHub Integration](integrations/github.md) | `rules/integrations/` | Any GitHub operation — issues, PRs, code, Actions on the org's GitHub org (`githubOrg`) |
 | [Linear Integration](integrations/linear.md) | `rules/integrations/` | Any Linear operation — issues, projects, comments in the org's Linear workspace |

@@ -8,6 +8,10 @@
 
 import { startGroupDigestLoop } from '../group-digest.js';
 import {
+  startApprovalExpiryLoop,
+  stopApprovalExpiryLoop,
+} from './approval-expiry.js';
+import {
   startControlPlaneSyncLoop,
   stopControlPlaneSyncLoop,
 } from './control-plane-sync.js';
@@ -45,4 +49,10 @@ registerIntegration({
   name: 'control-plane-sync',
   start: () => startControlPlaneSyncLoop(),
   stop: () => stopControlPlaneSyncLoop(),
+});
+
+registerIntegration({
+  name: 'approval-expiry',
+  start: () => startApprovalExpiryLoop(),
+  stop: () => stopApprovalExpiryLoop(),
 });

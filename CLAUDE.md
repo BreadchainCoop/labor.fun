@@ -22,6 +22,7 @@ Breadbrich Engels's behavior is defined by structured rule files in [`rules/`](r
 | [Scheduling](rules/scheduling/README.md) | `rules/scheduling/` | Cron tasks, scripts, API credit conservation |
 | [Identity & RBAC](rules/identity/README.md) | `rules/identity/` | User resolution, tag hierarchy, platform mapping |
 | [Transcripts](rules/transcripts/transcripts.md) | `rules/transcripts/` | Meeting transcript processing, action item extraction |
+| [Approvals](rules/approvals/README.md) | `rules/approvals/` | Reusable human-in-the-loop approval primitive: gated action classes, who approves, expiry |
 | [GitHub Integration](rules/integrations/github.md) | `rules/integrations/` | GitHub issues/PRs/code/Actions on the org's GitHub org (`githubOrg` in the active profile) |
 | [Linear Integration](rules/integrations/linear.md) | `rules/integrations/` | Linear issues/projects/comments in the org's Linear workspace (`LINEAR_API_KEY`) |
 

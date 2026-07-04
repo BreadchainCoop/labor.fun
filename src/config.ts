@@ -34,6 +34,9 @@ const envConfig = readEnvFile([
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
   'ENABLED_SKILLS',
+  'GATED_ACTION_CLASSES',
+  'APPROVAL_TIMEOUT_MINUTES',
+  'APPROVAL_EXPIRY_TICK_MS',
   'GITHUB_ORG',
   'SERVICE_USER',
   'REMINDER_LADDER',
@@ -118,6 +121,75 @@ export const ENABLED_SKILLS: string[] = (() => {
     : [];
   return Array.from(new Set([...fromProfile, ...fromEnv]));
 })();
+// --- Human-in-the-loop approval gate (reusable primitive) ---
+// Which classes of consequential action require a human approval before the
+// agent proceeds. Declared in config/rules, never hardcoded per-op. Merged from
+// the active profile's `gatedActionClasses` and the `GATED_ACTION_CLASSES` env
+// var (comma-separated); when NEITHER is set, a conservative default set
+// applies. See rules/approvals/README.md and src/ipc.ts (request_approval).
+//
+// Default gated set (conservative — write actions that are hard to undo or that
+// reach outside the org). Each token is a stable `action_class` an agent tags
+// its proposal with:
+//   outbound_external_message — a message/DM/email leaving the org
+//   github_write              — opening/merging PRs, pushing, editing issues
+//   linear_write              — creating/closing Linear issues/projects
+//   kb_delete                 — deleting a knowledge-base document
+//   payout                    — moving money / on-chain value
+export const DEFAULT_GATED_ACTION_CLASSES: string[] = [
+  'outbound_external_message',
+  'github_write',
+  'linear_write',
+  'kb_delete',
+  'payout',
+];
+
+export const GATED_ACTION_CLASSES: string[] = (() => {
+  const fromEnv = (envVal('GATED_ACTION_CLASSES') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromProfile = Array.isArray(PROFILE.gatedActionClasses)
+    ? PROFILE.gatedActionClasses.map((s) => String(s).trim()).filter(Boolean)
+    : [];
+  const merged = Array.from(new Set([...fromProfile, ...fromEnv]));
+  // Neither profile nor env declared anything → conservative default.
+  return merged.length > 0 ? merged : [...DEFAULT_GATED_ACTION_CLASSES];
+})();
+
+/** True when the given action_class must go through the human approval gate. */
+export function isGatedActionClass(actionClass: string): boolean {
+  return GATED_ACTION_CLASSES.includes(actionClass);
+}
+
+// KB people-slugs allowed to approve gated actions. Empty → ANY allowlisted
+// sender may approve (today's flat model). When non-empty, approval is narrowed
+// to these slugs.
+export const APPROVER_SLUGS: string[] = Array.isArray(
+  PROFILE.approvals?.approverSlugs,
+)
+  ? PROFILE.approvals!.approverSlugs!.map((s) => String(s).trim()).filter(
+      Boolean,
+    )
+  : [];
+
+// Minutes a pending approval stays open before auto-expiry. 0 → never expires.
+export const APPROVAL_TIMEOUT_MINUTES: number = (() => {
+  const raw = envVal('APPROVAL_TIMEOUT_MINUTES');
+  if (raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  if (
+    PROFILE.approvals &&
+    typeof PROFILE.approvals.timeoutMinutes === 'number'
+  ) {
+    return Math.max(0, Math.floor(PROFILE.approvals.timeoutMinutes));
+  }
+  // Present-but-unset block, or no block at all → 24h default.
+  return 1440;
+})();
+
 export const SERVICE_USER =
   envVal('SERVICE_USER') || PROFILE.serviceUser || 'breadbrich';
 export const ASSISTANT_HAS_OWN_NUMBER =
