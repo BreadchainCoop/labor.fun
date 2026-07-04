@@ -114,6 +114,38 @@ GOOGLE_WORKSPACE_CREDENTIALS_FILE=/home/breadbrich/.config/gws/credentials.json
 GOOGLE_DRIVE_FOLDER_IDS=0AbCdEf…,1GhIjKl…
 ```
 
+### Confluence
+
+Mirrors Confluence Cloud wiki pages. Auth is **Basic** (`email:api-token`) with
+an Atlassian API token created at
+id.atlassian.com/manage-profile/security/api-tokens.
+
+| Env | Required | Meaning |
+|---|---|---|
+| `CONFLUENCE_BASE_URL` | yes | Your Confluence site, e.g. `https://your-org.atlassian.net/wiki`. |
+| `CONFLUENCE_EMAIL` | yes | The Atlassian account email the API token belongs to (Basic-auth username). |
+| `CONFLUENCE_API_TOKEN` | yes | The Atlassian API token (Basic-auth password). Read-only content scope is enough. Never logged. |
+| `CONFLUENCE_SPACE_KEYS` | one of these | Comma-separated **space keys**. Every page in each space is synced as one doc. |
+| `CONFLUENCE_PAGE_IDS` | one of these | Comma-separated **page ids**, synced in addition to / instead of whole spaces. |
+| `CONFLUENCE_DEFAULT_VISIBILITY` | no | Overrides the default `visibility` frontmatter (default `restricted` — see "Visibility defaults"). |
+
+The connector lists pages in the configured spaces (paginated) via the
+Confluence Cloud REST API, converts each page's storage-format body → markdown
+(headings, lists, tables, links, and `code`/`noformat` macros — with all raw
+page text HTML-escaped so a wiki page can't inject markup into the dashboard),
+and records the page's web URL as `source_url`. **Full pull every run**: all
+configured spaces/pages are re-listed and re-fetched each tick, and pages
+removed upstream are reconciled (deleted) from the KB on the next run.
+
+Enable example (`.env`):
+
+```
+CONFLUENCE_BASE_URL=https://your-org.atlassian.net/wiki
+CONFLUENCE_EMAIL=you@your-org.com
+CONFLUENCE_API_TOKEN=…
+CONFLUENCE_SPACE_KEYS=ENG,OPS
+```
+
 ## How sync works
 
 Each connector's loop is registered as a background integration
