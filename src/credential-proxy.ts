@@ -190,12 +190,34 @@ function parseUsageFromBody(
   };
 }
 
+/**
+ * Read credential/config values preferring process.env, falling back to .env.
+ *
+ * The proxy originally read these from .env only. That breaks hosted
+ * Kubernetes mode, where a tenant orchestrator receives ANTHROPIC_API_KEY /
+ * ANTHROPIC_BASE_URL / etc. as pod env vars (from a Secret via secretKeyRef —
+ * see deploy/k8s/tenant-example/deployment.yaml) and has no .env file at all:
+ * the proxy would find no API key, silently fall into OAuth mode with no
+ * token, and every agent request would fail. process.env-first matches the
+ * convention already used by the Slack channel and container-runner
+ * (`process.env.X || env.X`), so self-hosted .env installs are unaffected.
+ */
+function readSecrets(keys: string[]): Record<string, string> {
+  const fromEnvFile = readEnvFile(keys);
+  const result: Record<string, string> = {};
+  for (const key of keys) {
+    const v = process.env[key] ?? fromEnvFile[key];
+    if (v) result[key] = v;
+  }
+  return result;
+}
+
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
   hooks: ProxyHooks = {},
 ): Promise<Server> {
-  const secrets = readEnvFile([
+  const secrets = readSecrets([
     'ANTHROPIC_API_KEY',
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_AUTH_TOKEN',
@@ -409,6 +431,9 @@ export function startCredentialProxy(
 
 /** Detect which auth mode the host is configured for. */
 export function detectAuthMode(): AuthMode {
-  const secrets = readEnvFile(['ANTHROPIC_API_KEY']);
+  // process.env-first (with .env fallback) so hosted Kubernetes tenants, whose
+  // ANTHROPIC_API_KEY arrives as a pod env var and not in a .env file, are
+  // detected as api-key mode. Must match startCredentialProxy's readSecrets.
+  const secrets = readSecrets(['ANTHROPIC_API_KEY']);
   return secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
 }
