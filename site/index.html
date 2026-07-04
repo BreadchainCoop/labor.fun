@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>labor.fun — the AI teammate that lives in your chats</title>
-<meta name="description" content="Drop labor.fun into your team's chats. Connect your platforms. It does the rest — memory, scheduling, GitHub, Linear, and real work in isolated agent sandboxes.">
+<meta name="description" content="Drop labor.fun into your team's chats. It answers only from what you're allowed to see, cites its sources, takes real action on GitHub and Linear, and runs every conversation in its own hardened sandbox — never training on your data.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -313,6 +313,88 @@
   .feature h3 { font-size: 16.5px; margin-bottom: 7px; }
   .feature p { color: var(--text-dim); font-size: 14.5px; line-height: 1.55; }
 
+  /* ---------- Why / Comparison ---------- */
+  .compare-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .compare-table th, .compare-table td {
+    padding: 16px 20px;
+    text-align: left;
+    font-size: 14.5px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .compare-table tr:last-child th, .compare-table tr:last-child td { border-bottom: none; }
+  .compare-table thead th {
+    font-family: var(--font-display);
+    font-size: 13px;
+    color: var(--text-dim);
+    font-weight: 600;
+    background: var(--bg-raised);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .compare-table thead th:first-child { color: var(--text-faint); }
+  .compare-table tbody th {
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .compare-table td { color: var(--text-dim); }
+  .compare-table td.yes { color: var(--text); }
+  .compare-table .tick { color: var(--accent); font-weight: 700; margin-right: 8px; }
+  .compare-table .cross { color: var(--text-faint); font-weight: 700; margin-right: 8px; }
+  .compare-wrap { overflow-x: auto; }
+  @media (max-width: 700px) {
+    .compare-table th, .compare-table td { padding: 13px 14px; font-size: 13.5px; }
+  }
+  .compare-note {
+    margin-top: 18px;
+    color: var(--text-faint);
+    font-size: 13.5px;
+  }
+
+  /* ---------- Onchain callout ---------- */
+  .onchain {
+    background: var(--bg-card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 32px 32px;
+    margin-top: 52px;
+    display: flex;
+    gap: 28px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .onchain .onchain-glyph {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--accent);
+    border: 1px solid rgba(180, 240, 60, 0.3);
+    border-radius: 8px;
+    padding: 10px 12px;
+    flex-shrink: 0;
+  }
+  .onchain .onchain-body { flex: 1; min-width: 240px; }
+  .onchain h3 { font-size: 18px; margin-bottom: 6px; }
+  .onchain p { color: var(--text-dim); font-size: 15px; }
+  .onchain .onchain-tag {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--accent);
+    background: rgba(180, 240, 60, 0.08);
+    border: 1px solid rgba(180, 240, 60, 0.25);
+    padding: 6px 12px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
   /* ---------- Pricing ---------- */
   .pricing-grid {
     display: grid;
@@ -501,6 +583,7 @@
     <div class="nav-links">
       <a href="#how">How it works</a>
       <a href="#features">Features</a>
+      <a href="#why">Why labor.fun</a>
       <a href="#pricing">Pricing</a>
       <a href="https://github.com/BreadchainCoop/labor.fun">GitHub</a>
       <a class="nav-cta" href="#waitlist">Get early access</a>
@@ -513,12 +596,12 @@
     <span class="kicker">now in early access</span>
     <h1>labor<span class="dot">.</span>fun</h1>
     <p class="tagline">Drop it into your chats. Connect your platforms. It does the rest.</p>
-    <p class="sub">A teammate you drop into your chats — it remembers, schedules, answers, and does the work. No dashboard to live in. No code. It introduces itself in your channel and sets itself up in conversation.</p>
+    <p class="sub">A teammate you drop into your chats — it remembers, schedules, answers with sources, and does the work: opens PRs, files issues, updates Linear, sends messages. No dashboard to live in. No code. It introduces itself in your channel and sets itself up in conversation.</p>
     <div class="cta-row">
       <a class="btn btn-primary" href="#waitlist">Add to Slack — free</a>
       <a class="btn btn-secondary" href="#waitlist">Connect Telegram</a>
     </div>
-    <p class="fineprint">Free tier, no card required. Discord support coming soon.</p>
+    <p class="fineprint">Free tier, no card required. Every conversation runs in its own sandbox — nothing you say ever trains a model. Discord support coming soon.</p>
   </div>
 </header>
 
@@ -587,28 +670,48 @@
   <div class="wrap">
     <div class="section-head">
       <h2>A real agent, not an autocomplete</h2>
-      <p>Every conversation gets its own sandboxed agent with memory, tools, and access you control.</p>
+      <p>Every conversation gets its own sandboxed agent with memory, tools, grounded answers, and access you control.</p>
     </div>
     <div class="features">
       <div class="feature">
-        <span class="glyph">[mem]</span>
-        <h3>Persistent memory</h3>
-        <p>Remembers context, decisions, and preferences per channel and group. No re-explaining.</p>
+        <span class="glyph">[box]</span>
+        <h3>Isolated per-conversation sandbox</h3>
+        <p>Every conversation spins up its own hardened container. Your data never trains a model, and nothing leaks between chats, teams, or tasks.</p>
+      </div>
+      <div class="feature">
+        <span class="glyph">[rbac]</span>
+        <h3>Permission-aware answers</h3>
+        <p>The assistant only answers from documents and channels each person is actually allowed to see. RBAC enforced per query, not just per login.</p>
       </div>
       <div class="feature">
         <span class="glyph">[agt]</span>
-        <h3>Does real work</h3>
-        <p>Each conversation runs a full agent in an isolated, sandboxed container — it can research, write, and execute.</p>
+        <h3>Takes real action, not just Q&amp;A</h3>
+        <p>Opens GitHub PRs and issues, updates Linear, browses the web, and sends messages — an action-taking teammate, not a chatbot.</p>
+      </div>
+      <div class="feature">
+        <span class="glyph">[cite]</span>
+        <h3>Cited, verifiable answers</h3>
+        <p>Every answer links back to the doc, thread, or ticket it came from — so you can check the source, not just trust the summary.</p>
+      </div>
+      <div class="feature">
+        <span class="glyph">[sync]</span>
+        <h3>Connects your knowledge</h3>
+        <p>Notion, Google Drive, and more sync straight into the assistant's knowledge base — no copy-pasting docs into a chat window.</p>
+      </div>
+      <div class="feature">
+        <span class="glyph">[hitl]</span>
+        <h3>Human-in-the-loop approvals</h3>
+        <p>"Ask me before you do anything consequential." Consequential actions pause for a thumbs-up before they execute.</p>
       </div>
       <div class="feature">
         <span class="glyph">[cron]</span>
         <h3>Schedules in plain English</h3>
-        <p>"Every Monday at 9, post the sprint summary." Recurring tasks and reminders, no cron syntax.</p>
+        <p>"Every Friday at 5, send the team a summary." Recurring digests and reminders, no cron syntax, always on.</p>
       </div>
       <div class="feature">
         <span class="glyph">[kb]</span>
-        <h3>Team knowledge base</h3>
-        <p>Builds and maintains a shared knowledge base from your conversations — people, tasks, artifacts.</p>
+        <h3>Living FAQ &amp; knowledge base</h3>
+        <p>Builds a shared knowledge base from your conversations and turns resolved questions into a self-improving FAQ.</p>
       </div>
       <div class="feature">
         <span class="glyph">[gh]</span>
@@ -626,10 +729,82 @@
         <p>Works across Slack and Telegram today. Discord is on the way. One teammate, everywhere you talk.</p>
       </div>
       <div class="feature">
-        <span class="glyph">[rbac]</span>
-        <h3>Role-based access</h3>
-        <p>Fine-grained control over who can see what and ask for what. Privacy enforced per channel.</p>
+        <span class="glyph">[$]</span>
+        <h3>Transparent usage &amp; cost</h3>
+        <p>See exactly what you're spending and what it's answering — a real free tier, plain metering, and a knowledge-gap dashboard on paid plans.</p>
       </div>
+    </div>
+  </div>
+</section>
+
+<section id="why">
+  <div class="wrap">
+    <div class="section-head">
+      <h2>Most AI assistants vs. labor.fun</h2>
+      <p>A lot of tools can answer questions about your docs. Fewer are built to act, stay grounded, and let you own the stack.</p>
+    </div>
+    <div class="compare-wrap">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th>&nbsp;</th>
+            <th>Most AI assistants</th>
+            <th>labor.fun</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Isolation</th>
+            <td><span class="cross">–</span>Shared backend, "we don't train on your data" (trust us)</td>
+            <td class="yes"><span class="tick">✓</span>Every conversation runs in its own hardened, single-use sandbox</td>
+          </tr>
+          <tr>
+            <th scope="row">What it does</th>
+            <td><span class="cross">–</span>Answers questions about documents</td>
+            <td class="yes"><span class="tick">✓</span>Opens PRs, files issues, updates Linear, browses the web, sends messages</td>
+          </tr>
+          <tr>
+            <th scope="row">Access control</th>
+            <td><span class="cross">–</span>Often bolted on, coarse per-app permissions</td>
+            <td class="yes"><span class="tick">✓</span>Per-document RBAC — it only ever answers from what you can see</td>
+          </tr>
+          <tr>
+            <th scope="row">Grounding</th>
+            <td><span class="cross">–</span>Summarized answers, source unclear</td>
+            <td class="yes"><span class="tick">✓</span>Inline citations back to the doc, thread, or ticket</td>
+          </tr>
+          <tr>
+            <th scope="row">Consequential actions</th>
+            <td><span class="cross">–</span>Fully autonomous or fully manual</td>
+            <td class="yes"><span class="tick">✓</span>Human-in-the-loop approval before anything risky runs</td>
+          </tr>
+          <tr>
+            <th scope="row">Ownership</th>
+            <td><span class="cross">–</span>Closed source, hosted-only</td>
+            <td class="yes"><span class="tick">✓</span>MIT licensed — self-host free, forever, or let us run it</td>
+          </tr>
+          <tr>
+            <th scope="row">Pricing</th>
+            <td><span class="cross">–</span>Opaque seat-based pricing</td>
+            <td class="yes"><span class="tick">✓</span>Transparent usage &amp; cost metering, real free tier</td>
+          </tr>
+          <tr>
+            <th scope="row">Payouts</th>
+            <td><span class="cross">–</span>Not offered</td>
+            <td class="yes"><span class="tick">✓</span>On-chain treasury payouts via Safe multisig, with human approval</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-note">"Most AI assistants" reflects common patterns among knowledge-assistant and support-bot tools as a category, not any specific vendor.</p>
+
+    <div class="onchain">
+      <span class="onchain-glyph">[Ξ]</span>
+      <div class="onchain-body">
+        <h3>On-chain treasury payouts — built for DAOs, open to everyone</h3>
+        <p>Approve a payout in chat and labor.fun proposes it directly to your Safe multisig — nothing moves without a human signature. If your treasury lives on-chain, this is the only assistant that speaks its language.</p>
+      </div>
+      <span class="onchain-tag">DAO &amp; web3 teams</span>
     </div>
   </div>
 </section>
@@ -686,6 +861,7 @@
         <a class="btn btn-secondary" href="#waitlist">Talk to us</a>
       </div>
     </div>
+    <p class="oss-note">Grounded answers with inline citations are included on every plan, free tier included — no upsell for "trust us."</p>
     <p class="oss-note">Prefer to run it yourself? labor.fun is open source (MIT) — <a href="https://github.com/BreadchainCoop/labor.fun">self-host free, forever</a>.</p>
   </div>
 </section>
@@ -694,11 +870,16 @@
   <div class="wrap">
     <div class="section-head">
       <h2>Built like it handles your team's data — because it does</h2>
+      <p>Most vendors ask you to trust a policy. labor.fun gives you an architecture: your data never trains a model, and every conversation is physically walled off from every other.</p>
     </div>
     <div class="security-grid">
       <div class="security-item">
-        <h3>Isolated containers</h3>
-        <p>Every conversation runs in its own sandboxed container. Nothing leaks between chats, teams, or tasks.</p>
+        <h3>Isolated containers, not just isolated prompts</h3>
+        <p>Every conversation runs in its own hardened, single-use sandbox — a stronger boundary than a shared model with a "we don't train on your data" policy. Nothing leaks between chats, teams, or tasks.</p>
+      </div>
+      <div class="security-item">
+        <h3>Permission-aware, per document</h3>
+        <p>Answers are filtered by what the asking person is actually allowed to see, down to the document — not just which app or channel they're in.</p>
       </div>
       <div class="security-item">
         <h3>Credentials stay outside</h3>
@@ -707,6 +888,14 @@
       <div class="security-item">
         <h3>Per-channel memory isolation</h3>
         <p>Each channel's memory is walled off. What's said in one group stays in that group.</p>
+      </div>
+      <div class="security-item">
+        <h3>Human approval on consequential actions</h3>
+        <p>Ask it to pause before anything risky — a merge, a payout, an external message — and it will wait for a thumbs-up.</p>
+      </div>
+      <div class="security-item">
+        <h3>Cited, checkable answers</h3>
+        <p>Every grounded answer links back to its source, so trust doesn't have to be blind.</p>
       </div>
     </div>
   </div>
@@ -731,6 +920,7 @@
     <span>© Breadchain. Open source under the MIT license.</span>
     <div class="footer-links">
       <a href="https://github.com/BreadchainCoop/labor.fun">GitHub</a>
+      <a href="#why">Why labor.fun</a>
       <a href="#pricing">Pricing</a>
       <a href="#waitlist">Waitlist</a>
     </div>
