@@ -52,14 +52,22 @@ describe('container-runtime kubernetes dispatch', () => {
     expect(mockExecSync).not.toHaveBeenCalled();
   });
 
-  it('ensureContainerRuntimeRunning checks kubectl cluster-info', () => {
+  it('ensureContainerRuntimeRunning checks namespaced pod-create permission', () => {
+    // Uses `auth can-i create pods --namespace <ns>`, not `cluster-info`, so a
+    // per-tenant namespaced Role can run it (cluster-info needs kube-system
+    // read). See buildClusterCheckArgs.
     mockExecSync.mockReturnValueOnce('');
     ensureContainerRuntimeRunning();
-    expect(mockExecSync).toHaveBeenCalledWith('kubectl cluster-info', {
-      stdio: 'pipe',
-      timeout: 10000,
-    });
-    expect(logger.debug).toHaveBeenCalledWith('Kubernetes cluster reachable');
+    expect(mockExecSync).toHaveBeenCalledWith(
+      'kubectl auth can-i create pods --quiet --namespace tenant-acme',
+      {
+        stdio: 'pipe',
+        timeout: 10000,
+      },
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      'Kubernetes cluster reachable and pod-create allowed',
+    );
   });
 
   it('ensureContainerRuntimeRunning throws when the cluster is unreachable', () => {

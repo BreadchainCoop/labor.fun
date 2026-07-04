@@ -118,14 +118,20 @@ export function stopContainer(name: string): void {
 export function ensureContainerRuntimeRunning(): void {
   if (CONTAINER_RUNTIME === 'kubernetes') {
     try {
-      execSync(`kubectl ${buildClusterCheckArgs().join(' ')}`, {
+      // Scope the reachability/permission check to the tenant namespace — see
+      // buildClusterCheckArgs (auth can-i create pods) for why this replaced
+      // cluster-info, which a namespaced tenant Role cannot run.
+      execSync(`kubectl ${buildClusterCheckArgs(K8S_NAMESPACE).join(' ')}`, {
         stdio: 'pipe',
         timeout: 10000,
       });
-      logger.debug('Kubernetes cluster reachable');
+      logger.debug('Kubernetes cluster reachable and pod-create allowed');
       return;
     } catch (err) {
-      logger.error({ err }, 'Failed to reach Kubernetes cluster');
+      logger.error(
+        { err },
+        'Failed to reach Kubernetes cluster or lacking pod-create permission',
+      );
       throw new Error('Container runtime is required but failed to start', {
         cause: err,
       });

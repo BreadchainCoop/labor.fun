@@ -374,8 +374,23 @@ export function buildListOrphanPodsArgs(namespace: string): string[] {
   return args;
 }
 
-/** Args for `kubectl cluster-info`, used to check cluster reachability —
- * the k8s equivalent of `docker info`. */
-export function buildClusterCheckArgs(): string[] {
-  return ['cluster-info'];
+/**
+ * Args for the startup cluster-reachability check — the k8s equivalent of
+ * `docker info`.
+ *
+ * Uses `kubectl auth can-i create pods [--namespace <ns>]` rather than
+ * `kubectl cluster-info`. `cluster-info` lists Services in `kube-system`, which
+ * a per-tenant orchestrator's namespaced Role does NOT permit — it crash-loops
+ * at boot with "services is forbidden ... in the namespace kube-system". A
+ * tenant ServiceAccount must never have cluster-wide/kube-system read, so the
+ * check itself must live within the namespaced Role. `auth can-i` is answered
+ * by a SelfSubjectAccessReview (always creatable by any authenticated user) and
+ * checks the EXACT permission the backend needs to spawn agent pods — so it
+ * doubles as an RBAC-misconfiguration check. It prints "yes"/"no" and exits
+ * non-zero (with --quiet) when the answer is "no" or the API is unreachable.
+ */
+export function buildClusterCheckArgs(namespace = ''): string[] {
+  const args = ['auth', 'can-i', 'create', 'pods', '--quiet'];
+  if (namespace) args.push('--namespace', namespace);
+  return args;
 }

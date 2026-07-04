@@ -513,7 +513,28 @@ describe('buildListOrphanPodsArgs', () => {
 // --- buildClusterCheckArgs ---
 
 describe('buildClusterCheckArgs', () => {
-  it('returns cluster-info', () => {
-    expect(buildClusterCheckArgs()).toEqual(['cluster-info']);
+  it('returns a namespaced auth can-i pod-create check with no namespace', () => {
+    // No namespace: check reachability + pod-create permission in the current
+    // context's default namespace (cluster-info would need kube-system read a
+    // tenant Role lacks — see the function doc).
+    expect(buildClusterCheckArgs()).toEqual([
+      'auth',
+      'can-i',
+      'create',
+      'pods',
+      '--quiet',
+    ]);
+  });
+
+  it('scopes the check to the given namespace', () => {
+    expect(buildClusterCheckArgs('tenant-acme')).toEqual([
+      'auth',
+      'can-i',
+      'create',
+      'pods',
+      '--quiet',
+      '--namespace',
+      'tenant-acme',
+    ]);
   });
 });
