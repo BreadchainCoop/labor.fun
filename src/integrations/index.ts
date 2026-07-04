@@ -7,6 +7,10 @@
 // own config and no-op'ing when disabled. See docs/PLUGINS.md.
 
 import { startGroupDigestLoop } from '../group-digest.js';
+// Importing this barrel self-registers every knowledge connector (Notion,
+// Google Drive, …) as a background integration; each stays inert until its
+// env config is present. See src/integrations/connectors/ + docs/CONNECTORS.md.
+import './connectors/index.js';
 import { startDiscordMembersSyncLoop } from './discord-members-sync.js';
 import { startGitHubProjectSyncLoop } from './github-project-sync.js';
 import { registerIntegration } from './registry.js';

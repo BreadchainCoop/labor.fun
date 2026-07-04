@@ -119,6 +119,19 @@ its own config and no-ops when unconfigured. The built-in flows
 (`group-digest`, `github-project-sync`, `discord-members-sync`) are the
 reference implementations.
 
+### Knowledge connectors (a specialized flow)
+
+A **knowledge connector** is a flow that syncs external documents (Notion,
+Google Drive, Confluence, …) **into the per-group markdown KB** so per-doc RBAC,
+search, and citations apply for free. Connectors share a small framework
+(`src/integrations/connectors/base.ts`) — you implement a `Connector`
+(`{ name, syncInterval, isConfigured, sync(ctx) }` returning `ConnectorDoc`s),
+and the framework does the KB writes, upsert idempotency, deletion-on-removal,
+path-safety, citable `source_url` frontmatter, and cursor bookkeeping. See
+[CONNECTORS.md](CONNECTORS.md) for the two built-in connectors (Notion, Google
+Drive), how to enable them, and how to write your own — including as a per-org
+profile plugin.
+
 ## 2b. Chat flows (sandboxed channel takeover)
 
 A **chat flow** claims specific chat JIDs and *replaces* the general assistant

@@ -10,6 +10,15 @@ The assistant maintains a structured KB, mounted into every container at `/works
 | Tasks | `context/tasks/` | open | Structured task tracking with dependencies |
 | Calendar | `context/calendar/` | open | Events, recurring schedules, deadlines |
 | Artifacts | `context/artifacts/` | open | Documents, creative works, equipment |
+| Connectors | `context/connectors/<source>/` | open | Docs synced from external sources (Notion, Google Drive, …), one file per source page/doc — **auto-maintained, do not hand-edit** |
+
+**Synced connector docs** under `context/connectors/` are pulled from external
+sources (Notion, Google Drive, …) by the knowledge connectors and refreshed
+automatically. They are normal KB markdown — so the same visibility/RBAC rules
+apply — and each carries a `source_url` in frontmatter pointing at the origin
+document, which is the citation to use when you quote them. Treat them as
+read-only mirrors: don't hand-edit (edits are overwritten on the next sync) and
+don't create files there yourself. See [docs/CONNECTORS.md](../../docs/CONNECTORS.md).
 
 ## Core Behaviors
 
