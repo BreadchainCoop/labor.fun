@@ -638,7 +638,10 @@ describe('googleDriveConnector.sync', () => {
       );
       expect(run1.upserted).toBe(2);
       expect(
-        fs.readdirSync(kbDir).filter((f) => f.endsWith('.md')).sort(),
+        fs
+          .readdirSync(kbDir)
+          .filter((f) => f.endsWith('.md'))
+          .sort(),
       ).toEqual(['D1.md', 'D2.md']);
 
       // Run 2 (later): D2 removed upstream — only D1 comes back.

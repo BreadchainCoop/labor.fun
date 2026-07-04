@@ -625,7 +625,10 @@ describe('full-pull-every-run + complete flag (Fixes 3/4/5)', () => {
       );
       expect(run1.upserted).toBe(2);
       expect(
-        fs.readdirSync(dir).filter((f) => f.endsWith('.md')).sort(),
+        fs
+          .readdirSync(dir)
+          .filter((f) => f.endsWith('.md'))
+          .sort(),
       ).toEqual(['page-a.md', 'page-b.md']);
 
       // Run 2 (later): page-a removed upstream — only page-b comes back.
