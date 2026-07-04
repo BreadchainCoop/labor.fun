@@ -704,6 +704,36 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   },
                   { sourceGroup, isMain, senderCtx },
                 );
+              } else if (
+                data.type === 'report_knowledge_gap' &&
+                typeof data.question === 'string'
+              ) {
+                // Analytics knowledge-gap signal from the agent. We DON'T insert
+                // the event here — the orchestrator's message loop logs exactly
+                // one assistant_events row per run at completion. Instead we drop
+                // a sentinel flag in this group's IPC dir; the message loop reads
+                // and clears it, attributing the gap (gap_source='agent_signal')
+                // to the run that just finished. Flag-only avoids double-counting
+                // and keeps the single canonical event per run.
+                //
+                // The flag path MUST match what src/index.ts reads:
+                // resolveGroupIpcPath(folder)/analytics/knowledge_gap.flag, which
+                // resolves to the same absolute path as
+                // <ipcBaseDir>/<sourceGroup>/analytics/knowledge_gap.flag.
+                const analyticsDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'analytics',
+                );
+                fs.mkdirSync(analyticsDir, { recursive: true });
+                fs.writeFileSync(
+                  path.join(analyticsDir, 'knowledge_gap.flag'),
+                  '1',
+                );
+                logger.info(
+                  { sourceGroup, topic: data.topic ?? null },
+                  'Knowledge-gap signal recorded (report_knowledge_gap)',
+                );
               }
               fs.unlinkSync(filePath);
             } catch (err) {
