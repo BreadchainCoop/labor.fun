@@ -69,6 +69,14 @@ const envConfig = readEnvFile([
   'AGENT_CONTAINER_MEMORY',
   'AGENT_CONTAINER_CPUS',
   'AGENT_CONTAINER_PIDS_LIMIT',
+  // Knowledge connectors (src/integrations/connectors/). Env-gated + off by
+  // default. Secrets (NOTION_API_KEY, Google creds file) are NOT read here —
+  // they're loaded lazily via readEnvFile in the connector modules so tokens
+  // never enter this module's cached config or any log.
+  'CONNECTOR_SYNC_INTERVAL_MS',
+  'NOTION_ROOT_PAGE_IDS',
+  'NOTION_DATABASE_IDS',
+  'GOOGLE_DRIVE_FOLDER_IDS',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -487,3 +495,26 @@ export const SMITHERS_BRIDGE_PORT = Number(
   envVal('SMITHERS_BRIDGE_PORT') || 3002,
 );
 export const SMITHERS_BRIDGE_TOKEN = envVal('SMITHERS_BRIDGE_TOKEN') || '';
+
+// --- Knowledge connectors (RAG) ---
+// External sources (Notion, Google Drive, …) synced INTO the per-group KB as
+// markdown so RBAC, search, and citations apply. Each connector self-registers
+// (src/integrations/connectors/) and is env-gated. See docs/CONNECTORS.md.
+//
+// Shared poll interval for all connectors unless a connector overrides it.
+// Default 30 min. Set to 0 to disable every connector loop at once.
+export const CONNECTOR_SYNC_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('CONNECTOR_SYNC_INTERVAL_MS') || '1800000', 10) || 1800000,
+);
+// Notion scope: comma-separated page ids (subtrees) and/or database ids to
+// mirror. Empty (both) → Notion connector off. The API key itself is a secret,
+// read lazily via readEnvFile (NOTION_API_KEY), never here.
+export const NOTION_ROOT_PAGE_IDS = splitIds(envVal('NOTION_ROOT_PAGE_IDS'));
+export const NOTION_DATABASE_IDS = splitIds(envVal('NOTION_DATABASE_IDS'));
+// Google Drive scope: comma-separated Drive folder ids whose Google Docs are
+// mirrored. Empty → Drive connector off. Auth reuses the existing
+// GOOGLE_WORKSPACE_CREDENTIALS_FILE (the same OAuth creds the `gws` tool uses).
+export const GOOGLE_DRIVE_FOLDER_IDS = splitIds(
+  envVal('GOOGLE_DRIVE_FOLDER_IDS'),
+);
