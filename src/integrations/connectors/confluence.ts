@@ -219,6 +219,16 @@ const VOID_TAGS = new Set(['br', 'hr', 'img', 'ac:image']);
  * to being treated as plain containers rather than throwing.
  */
 export function parseStorageHtml(html: string): StorageNode[] {
+  // CDATA sections (ac:plain-text-body code/noformat bodies) can contain raw
+  // '<'/'>' — e.g. `<![CDATA[<script>…</script>]]>` — that must NOT be parsed
+  // as tags. Escape their inner content (so it tokenizes as a single text
+  // leaf) and drop the CDATA markers BEFORE the tag scanner runs; the
+  // code-macro renderer later decodeEntities()+escapeHtml()s this back into a
+  // safe, HTML-escaped code body. '&' is escaped first so it can't double-encode.
+  html = html.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, inner: string) =>
+    inner.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+  );
+
   const tagRe = /<(\/?)([a-zA-Z][a-zA-Z0-9:._-]*)((?:"[^"]*"|'[^']*'|[^>])*)>/g;
   type RawTok =
     | { kind: 'open'; tag: string; attrs: string; selfClose: boolean }
@@ -247,15 +257,6 @@ export function parseStorageHtml(html: string): StorageNode[] {
     toks.push({ kind: 'text', text: html.slice(lastIndex) });
   }
 
-  // CDATA sections (used inside ac:plain-text-body) are emitted by the regex
-  // above as ordinary text since `<![CDATA[` doesn't match the tag pattern;
-  // strip the wrapper markers back out of any text token that carries them.
-  for (const t of toks) {
-    if (t.kind === 'text' && t.text.includes('<![CDATA[')) {
-      t.text = t.text.replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '');
-    }
-  }
-
   let pos = 0;
 
   function parseChildren(stopTag?: string): StorageNode[] {
@@ -280,7 +281,12 @@ export function parseStorageHtml(html: string): StorageNode[] {
       // open
       pos++;
       if (t.selfClose) {
-        nodes.push({ kind: 'element', tag: t.tag, attrs: t.attrs, children: [] });
+        nodes.push({
+          kind: 'element',
+          tag: t.tag,
+          attrs: t.attrs,
+          children: [],
+        });
       } else {
         const children = parseChildren(t.tag);
         nodes.push({ kind: 'element', tag: t.tag, attrs: t.attrs, children });
@@ -362,7 +368,9 @@ function renderInline(nodes: StorageNode[]): string {
 /** Render a `<table>` element's rows as one markdown bullet line per row
  * (`cell | cell | …`) — pragmatic, keeps content searchable without a full
  * GFM table conversion (same tradeoff google-drive.ts makes for Docs tables). */
-function renderTable(table: Extract<StorageNode, { kind: 'element' }>): string[] {
+function renderTable(
+  table: Extract<StorageNode, { kind: 'element' }>,
+): string[] {
   const lines: string[] = [];
   const rows = table.children.filter(
     (n): n is Extract<StorageNode, { kind: 'element' }> =>
@@ -422,7 +430,9 @@ const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
  * the raw (unescaped-markdown, HTML-escaped) CDATA body; every other macro
  * falls back to rendering its `ac:rich-text-body` inline so the surrounding
  * prose isn't silently dropped, just loses its special panel styling. */
-function renderMacro(macro: Extract<StorageNode, { kind: 'element' }>): string[] {
+function renderMacro(
+  macro: Extract<StorageNode, { kind: 'element' }>,
+): string[] {
   const name = getAttr(macro.attrs, 'ac:name');
   if (name === 'code') {
     const langParam = macro.children
@@ -469,7 +479,13 @@ export function renderBlocks(nodes: StorageNode[]): string[] {
       }
       case 'blockquote': {
         const text = renderInline(n.children).trim();
-        if (text) out.push(text.split('\n').map((l) => `> ${l}`).join('\n'));
+        if (text)
+          out.push(
+            text
+              .split('\n')
+              .map((l) => `> ${l}`)
+              .join('\n'),
+          );
         break;
       }
       case 'pre': {
@@ -647,7 +663,10 @@ async function fetchPageById(
  * (e.g. `/spaces/ENG/pages/123456/Runbook`); joined onto the base URL. Falls
  * back to a generic `/wiki/pages/{id}` URL when webui is absent.
  */
-export function confluencePageUrl(baseUrl: string, page: ConfluencePage): string {
+export function confluencePageUrl(
+  baseUrl: string,
+  page: ConfluencePage,
+): string {
   const webui = page._links?.webui;
   if (webui) {
     return `${baseUrl}${webui.startsWith('/') ? '' : '/'}${webui}`;
@@ -798,7 +817,13 @@ export const confluenceConnector: Connector = {
     for (const pageId of pageIds) {
       if (seen.has(pageId)) continue;
       try {
-        const page = await fetchPageById(fetchImpl, baseUrl, email, token, pageId);
+        const page = await fetchPageById(
+          fetchImpl,
+          baseUrl,
+          email,
+          token,
+          pageId,
+        );
         seen.add(page.id);
         targets.push(page);
       } catch (err) {

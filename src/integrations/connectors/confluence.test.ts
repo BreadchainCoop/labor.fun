@@ -147,7 +147,8 @@ describe('config reading', () => {
     readEnvFileMock.mockReturnValue({
       CONFLUENCE_BASE_URL: 'https://from-dotenv.atlassian.net/wiki',
     });
-    process.env.CONFLUENCE_BASE_URL = 'https://from-process-env.atlassian.net/wiki';
+    process.env.CONFLUENCE_BASE_URL =
+      'https://from-process-env.atlassian.net/wiki';
     expect(getConfluenceBaseUrl()).toBe(
       'https://from-process-env.atlassian.net/wiki',
     );
@@ -306,16 +307,16 @@ describe('storageToMarkdown', () => {
   });
 
   it('renders headings 1-3', () => {
-    const md = storageToMarkdown(
-      '<h1>Title</h1><h2>Section</h2><h3>Sub</h3>',
-    );
+    const md = storageToMarkdown('<h1>Title</h1><h2>Section</h2><h3>Sub</h3>');
     expect(md).toBe('# Title\n\n## Section\n\n### Sub');
   });
 
   it('renders bold/italic/code inline', () => {
-    expect(storageToMarkdown('<p><strong>bold</strong> and <em>italic</em> and <code>code</code></p>')).toBe(
-      '**bold** and *italic* and `code`',
-    );
+    expect(
+      storageToMarkdown(
+        '<p><strong>bold</strong> and <em>italic</em> and <code>code</code></p>',
+      ),
+    ).toBe('**bold** and *italic* and `code`');
   });
 
   it('renders links', () => {
@@ -343,9 +344,7 @@ describe('storageToMarkdown', () => {
   });
 
   it('renders a plain <pre> code block', () => {
-    expect(storageToMarkdown('<pre>raw code</pre>')).toBe(
-      '```\nraw code\n```',
-    );
+    expect(storageToMarkdown('<pre>raw code</pre>')).toBe('```\nraw code\n```');
   });
 
   it('renders a table as bullet rows', () => {
@@ -365,10 +364,13 @@ describe('storageToMarkdown', () => {
     expect(storageToMarkdown(undefined)).toBe('');
   });
 
-  it('decodes storage-format entities in text', () => {
-    expect(storageToMarkdown('<p>Ben &amp; Jerry&#39;s &quot;deal&quot;</p>')).toBe(
-      'Ben & Jerry\'s "deal"',
-    );
+  it('decodes storage-format entities then re-escapes HTML-significant chars', () => {
+    // Storage entities are decoded (&#39;->' , &quot;->") but '&' is
+    // re-escaped to &amp; by escapeHtml so synced text can never inject HTML
+    // when the KB markdown is rendered — consistent with the other connectors.
+    expect(
+      storageToMarkdown('<p>Ben &amp; Jerry&#39;s &quot;deal&quot;</p>'),
+    ).toBe('Ben &amp; Jerry\'s "deal"');
   });
 
   // --- Confluence macros ---
@@ -674,7 +676,10 @@ describe('runConnector integration: reconcile deletions on a complete pull', () 
       );
       expect(run1.upserted).toBe(2);
       expect(
-        fs.readdirSync(dir).filter((f) => f.endsWith('.md')).sort(),
+        fs
+          .readdirSync(dir)
+          .filter((f) => f.endsWith('.md'))
+          .sort(),
       ).toEqual(['p1.md', 'p2.md']);
 
       // p1 removed upstream on the next run.
