@@ -18,4 +18,7 @@ import './slack.js';
 // telegram
 import './telegram.js';
 
+// web (browser chat widget; opt-in via WEB_WIDGET_ENABLED)
+import './web.js';
+
 // whatsapp
