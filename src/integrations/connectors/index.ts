@@ -14,6 +14,7 @@
 
 import { registerIntegration } from '../registry.js';
 import { Connector, startConnectorLoop, stopConnectorLoop } from './base.js';
+import { confluenceConnector } from './confluence.js';
 import { googleDriveConnector } from './google-drive.js';
 import { notionConnector } from './notion.js';
 
@@ -28,3 +29,4 @@ export function registerConnector(connector: Connector): void {
 
 registerConnector(notionConnector);
 registerConnector(googleDriveConnector);
+registerConnector(confluenceConnector);
