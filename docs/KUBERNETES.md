@@ -316,18 +316,49 @@ instead of name prefix, since pod names in the examples/tests use the same
 `nanoclaw-<group>-<timestamp>` scheme but label selectors are the idiomatic
 k8s way to scope a list query safely.
 
+## Images: agent + orchestrator
+
+Two images are published to GHCR by `.github/workflows/container.yml`
+(linux/amd64, tagged `latest` + the commit SHA):
+
+| Image | Dockerfile | Build context | Role |
+|---|---|---|---|
+| `ghcr.io/<owner>/nanoclaw-agent` | `container/Dockerfile` | `./container` | short-lived per-run sandbox (`CONTAINER_IMAGE`) |
+| `ghcr.io/<owner>/nanoclaw-orchestrator` | `deploy/docker/Dockerfile.orchestrator` | repo root | long-lived per-tenant `node dist/index.js` process |
+
+The **orchestrator** image is the one a tenant Deployment runs; the hosted
+control plane references it as `TENANT_ORCHESTRATOR_IMAGE`. It bundles a pinned
+`kubectl` (needed to spawn agent pods) plus the runtime assets the orchestrator
+reads relative to its working directory (`container/skills/`,
+`container/agent-runner/`, `scripts/`, `rules/`, `setup/`, `docs/`). It does
+**not** bake any `profiles/<org>/` data — that comes from the tenant's PVC or
+hostPath mount, selected by `LABOR_PROFILE`. Build it locally with:
+
+```bash
+docker build -f deploy/docker/Dockerfile.orchestrator -t nanoclaw-orchestrator:latest .
+```
+
 ## Self-host-on-Kubernetes quickstart
 
 This walks through a **single-node** cluster (k3s, kind, minikube, or a
 single-VM cluster) using `K8S_VOLUME_MODE=hostPath` — the simplest mode, and
 the one that matches "one org, one droplet" self-hosting most closely.
 
-1. **Build and push the agent image** (or use GHCR as the existing droplet
-   deploy already does):
+For a fully-scripted, self-contained single-node run on kind (build both images,
+seed a minimal tenant, deploy, and assert the whole spawn→proxy→metering→cleanup
+loop), see `deploy/k8s/smoke-test.sh` — it is the executable version of this
+quickstart.
+
+1. **Build and push both images** (or use GHCR as the existing droplet deploy
+   already does):
    ```bash
    ./container/build.sh
    docker tag nanoclaw-agent:latest <registry>/<you>/nanoclaw-agent:latest
    docker push <registry>/<you>/nanoclaw-agent:latest
+
+   docker build -f deploy/docker/Dockerfile.orchestrator -t nanoclaw-orchestrator:latest .
+   docker tag nanoclaw-orchestrator:latest <registry>/<you>/nanoclaw-orchestrator:latest
+   docker push <registry>/<you>/nanoclaw-orchestrator:latest
    ```
 
 2. **Prepare the host paths.** Since `K8S_VOLUME_MODE=hostPath` pins agent

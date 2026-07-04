@@ -3,9 +3,11 @@
 # Pods in this same namespace. See docs/KUBERNETES.md for the full design.
 #
 # Replace before applying:
-#   - image: the orchestrator image (built from the repo root, not
+#   - image: the orchestrator image, built from the repo root via
+#     deploy/docker/Dockerfile.orchestrator (published to GHCR as
+#     nanoclaw-orchestrator by .github/workflows/container.yml). NOT
 #     container/Dockerfile — that one builds the AGENT image referenced by
-#     CONTAINER_IMAGE below).
+#     CONTAINER_IMAGE below.
 #   - CONTAINER_IMAGE: the agent image (container/build.sh output), pushed
 #     to a registry the cluster can pull from.
 #   - hostPath volumes: only used in K8S_VOLUME_MODE=hostPath (default) —

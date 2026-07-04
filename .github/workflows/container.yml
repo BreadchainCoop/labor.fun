@@ -1,34 +1,51 @@
 name: Container Image
 
-# Build the agent container in CI so a broken Dockerfile fails the PR instead of
-# the production deploy. This workflow only runs when container/** (or this file)
-# changes — see the `paths` filters below. On such a push to main it publishes a
-# SHA-pinned image to GHCR so the host pulls a pre-built image (seconds) instead
-# of building locally (~10 min); commits that don't touch container/** produce no
-# new image (the deploy falls back to the existing image). The deploy scripts
-# (setup/safe-deploy.sh, scripts/safe-deploy.sh) pull
-# `<CONTAINER_REGISTRY_IMAGE>:<sha>` when CONTAINER_REGISTRY_IMAGE is set in the
-# profile's deploy.config; otherwise they fall back to building on the host.
+# Builds the two published images:
+#   - nanoclaw-agent        (container/Dockerfile)        the per-run sandbox
+#   - nanoclaw-orchestrator (deploy/docker/Dockerfile.orchestrator)
+#                                                          the per-tenant process
 #
-# Build context is ./container (matches container/build.sh): the Dockerfile
-# COPYs agent-runner/ and scripts/ relative to that dir. linux/amd64 only — the
-# droplet is amd64 and CI runners build it natively. Local macOS (arm64) dev
-# keeps using container/build.sh.
+# Build them in CI so a broken Dockerfile fails the PR instead of the production
+# deploy. On a push to main each publishes a SHA-pinned (+latest) image to GHCR
+# so hosts/clusters pull a pre-built image (seconds) instead of building locally
+# (~10 min). PRs build-only (no push). The path filters below scope which
+# changes rebuild which image; a change touching only orchestrator inputs won't
+# rebuild the agent image and vice-versa (each job has its own `paths` guard is
+# not possible at job granularity, so both jobs run on any matched push but the
+# GHA cache makes the untouched one cheap).
 
 on:
   push:
     branches: [main]
     paths:
       - 'container/**'
+      - 'src/**'
+      - 'scripts/**'
+      - 'rules/**'
+      - 'setup/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'deploy/docker/**'
+      - '.dockerignore'
       - '.github/workflows/container.yml'
   pull_request:
     branches: [main]
     paths:
       - 'container/**'
+      - 'src/**'
+      - 'scripts/**'
+      - 'rules/**'
+      - 'setup/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'deploy/docker/**'
+      - '.dockerignore'
       - '.github/workflows/container.yml'
 
 jobs:
-  build:
+  agent:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -62,11 +79,55 @@ jobs:
       - name: Build (and push on main)
         uses: docker/build-push-action@v6
         with:
+          # Build context is ./container (matches container/build.sh): the
+          # Dockerfile COPYs agent-runner/ and scripts/ relative to that dir.
           context: ./container
           file: ./container/Dockerfile
           platforms: linux/amd64
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+
+  orchestrator:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/nanoclaw-orchestrator
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=long,prefix=
+
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v6
+        with:
+          # Build context is the repo root (the orchestrator Dockerfile COPYs
+          # dist/src/container/scripts/rules/setup/docs relative to the root).
+          context: .
+          file: ./deploy/docker/Dockerfile.orchestrator
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=orchestrator
+          cache-to: type=gha,mode=max,scope=orchestrator
