@@ -198,6 +198,45 @@ is no way around this without changing the mount model to something
 network-based (e.g. syncing over the IPC channel instead of sharing a
 filesystem), which is a much larger change than this task scopes.
 
+### PVC layout contract (the `profile/` prefix)
+
+Because every non-`/dev/null` mount for a group falls under `PROFILE_DIR`
+(`GROUPS_DIR` and `DATA_DIR` are both under it), the path translator maps them
+all to subPaths under the **`profile`** prefix (e.g. `PROFILE_DIR/groups/acme`
+→ `profile/groups/acme`, `DATA_DIR/sessions/acme/.claude` →
+`profile/data/sessions/acme/.claude`). For an agent pod's subPath to resolve to
+the same bytes the orchestrator wrote, the orchestrator must therefore see its
+own `PROFILE_DIR` at the PVC-internal path `profile/`. Mount it with a
+volume-level `subPath: profile`:
+
+```yaml
+volumeMounts:
+  - name: data
+    mountPath: /app/profiles/<LABOR_PROFILE>   # == PROFILE_DIR
+    subPath: profile
+```
+
+Agent pods mount the **same** PVC at the volume root (no volume-level subPath)
+and get per-mount subPaths `profile/…` from the translator — so both sides
+address identical files. `deploy/k8s/smoke-test.sh` sets this up end to end;
+copy its orchestrator Deployment as the reference. (The `DATA_DIR`→`data`
+pvcRoot entry in `pvcRootMappings()` is currently unreachable — `PROFILE_DIR`
+matches first since `DATA_DIR` is nested under it — so everything lands under
+`profile/…`; harmless, but don't rely on a separate `data/` top-level tree.)
+
+### Main-group / project-root mount is not supported under PVC mode
+
+A **main** group (or any group when `FLAT_ACCESS=true`, cooperative mode) mounts
+the framework **project root** (`process.cwd()`, i.e. the orchestrator image's
+`/app`) read-only into the agent pod. Under PVC mode that host path has no
+counterpart on the tenant PVC — the project code lives in the image, not the
+PVC — so the mount cannot be satisfied, and the main-group `projectRoot/store`
+stub mkdir would hit the read-only image dir as a non-root user. A hosted tenant
+therefore runs its group as a **non-main** group (`FLAT_ACCESS=false`), which is
+the normal single-tenant case. Supporting a main-group project mount on PVC
+would require baking the project tree onto the PVC too (or a second read-only
+image-backed volume) — out of scope for the current primitives.
+
 ## Credential proxy reachability
 
 Docker's `host.docker.internal:host-gateway` has no Kubernetes equivalent —
@@ -407,3 +446,22 @@ quickstart.
   caps how many runs the orchestrator starts at once; nothing about k8s
   changes that logic, since concurrency is enforced in the orchestrator
   process, not by the runtime backend.
+- **NetworkPolicy enforcement** — a real multi-tenant deployment should apply a
+  default-deny `NetworkPolicy` per tenant namespace (agent pods should only
+  reach the orchestrator's proxy port and cluster DNS, nothing else). The kind
+  smoke test does **not** verify this: kind's default CNI (kindnetd) does not
+  enforce NetworkPolicy, so a policy would be silently ignored there. Verify
+  isolation on a CNI that enforces it (Calico, Cilium) before relying on it.
+
+## Verified on a real cluster
+
+`deploy/k8s/smoke-test.sh` runs the whole path on a single-node kind cluster and
+asserts, end to end: orchestrator Deployment boots and its credential proxy
+starts; a due `once` scheduled task makes the orchestrator spawn an agent Pod
+via `kubectl run --rm -i` (attach carries the stdin/stdout JSON protocol); the
+agent Pod reaches the orchestrator's in-pod proxy, which forwards upstream; a
+per-run `api_usage` row is metered into the tenant SQLite store; the agent Pod
+is deleted after the run (`--rm` parity); and `task_run_logs` records the run.
+It uses `K8S_VOLUME_MODE=pvc` (kind is single-node, so the default RWO
+StorageClass suffices — production multi-node still needs RWX) and the scoped
+RBAC from `deploy/k8s/tenant-example/rbac.yaml`.
