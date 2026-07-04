@@ -36,7 +36,7 @@ import { storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { RegisteredGroup, SendMessageOpts } from '../types.js';
+import { Channel, RegisteredGroup, SendMessageOpts } from '../types.js';
 
 /** Opaque session token shape: 8–128 url-safe chars. Untrusted client input
  * must match this before it is ever used to build a jid. */
@@ -78,7 +78,7 @@ interface ResLike {
   on?(event: string, cb: () => void): unknown;
 }
 
-export class WebChannel {
+export class WebChannel implements Channel {
   name = 'web';
 
   private opts: ChannelOpts;
