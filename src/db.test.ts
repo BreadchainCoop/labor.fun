@@ -858,26 +858,25 @@ describe('getRecentMessages', () => {
     });
   });
 
-  it('returns recent messages chronologically, regardless of any cursor', () => {
-    const msgs = getRecentMessages('dm@g.us', 'Breadbrich Engels', 40);
-    // 3 user messages (bot reply excluded), oldest -> newest
-    expect(msgs.map((m) => m.content)).toEqual(['first', 'second', 'third']);
-  });
-
-  it('excludes bot messages', () => {
-    const msgs = getRecentMessages('dm@g.us', 'Breadbrich Engels', 40);
-    expect(msgs.some((m) => m.content === 'bot reply')).toBe(false);
+  it("returns the full recent thread chronologically, including the assistant's own messages", () => {
+    const msgs = getRecentMessages('dm@g.us', 40);
+    // Unlike getMessagesSince, the bot's own message IS kept — so a fresh
+    // session can see the reminder/question the user is responding to.
+    expect(msgs.map((m) => m.content)).toEqual([
+      'first',
+      'second',
+      'bot reply',
+      'third',
+    ]);
   });
 
   it('respects the limit, keeping the most recent', () => {
-    const msgs = getRecentMessages('dm@g.us', 'Breadbrich Engels', 2);
-    // last 2 user messages, still chronological
-    expect(msgs.map((m) => m.content)).toEqual(['second', 'third']);
+    const msgs = getRecentMessages('dm@g.us', 2);
+    // last 2 messages by time (bot reply included), still chronological
+    expect(msgs.map((m) => m.content)).toEqual(['bot reply', 'third']);
   });
 
   it('returns [] for a chat with no messages', () => {
-    expect(getRecentMessages('nobody@g.us', 'Breadbrich Engels', 40)).toEqual(
-      [],
-    );
+    expect(getRecentMessages('nobody@g.us', 40)).toEqual([]);
   });
 });
