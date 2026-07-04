@@ -301,6 +301,27 @@ API cost tracking & budgets: one row per completed `/v1/messages` call observed 
 | status_code        | INTEGER    | HTTP status of the upstream response               |
 | created_at         | TEXT       | ISO timestamp (indexed)                            |
 
+### assistant_events
+
+Assistant usage + knowledge-gap analytics: one row per completed agent run in a group (`src/db.ts`, `logAssistantEvent`). Powers the KB dashboard's `/analytics` tab (`kb-ui/server.mjs`). `run_id` is a soft link to `agent_runs.id` (no FK) so analytics can be pruned/rebuilt independently. `outcome` is one of `answered` | `knowledge_gap` | `error` | `unknown`; `gap_source` (`agent_signal` | `heuristic`) records how a `knowledge_gap` outcome was determined. Question text and sender are subject to the `ASSISTANT_ANALYTICS_PRIVACY` stance — see [rules/knowledge-base/analytics.md](../rules/knowledge-base/analytics.md) for the knowledge-gap signal convention and the privacy modes.
+
+| Column        | Type       | Notes                                                                 |
+| ------------- | ---------- | ---------------------------------------------------------------------- |
+| **id**        | INTEGER PK | Autoincrement                                                         |
+| run_id        | INTEGER    | Soft link to `agent_runs.id` (nullable, no FK)                        |
+| chat_jid      | TEXT       | Chat/group JID the run served                                         |
+| channel       | TEXT       | Channel the trigger arrived on (slack/telegram/etc, nullable)         |
+| group_name    | TEXT       | Display name of the group (nullable)                                  |
+| group_folder  | TEXT       | Group folder (stable identifier; NOT NULL)                            |
+| is_main       | INTEGER    | 1 if the run happened in the main/shared-KB group                     |
+| sender_name   | TEXT       | Trigger message sender; suppressed (null) per privacy mode            |
+| is_question   | INTEGER    | 1 if the trigger text heuristically looks like a question             |
+| outcome       | TEXT       | `answered` \| `knowledge_gap` \| `error` \| `unknown`                  |
+| gap_source    | TEXT       | `agent_signal` \| `heuristic` \| null (set only when outcome is `knowledge_gap`) |
+| topic         | TEXT       | Coarse keyword-bucketed topic (e.g. `expenses`, `calendar`), nullable |
+| question_text | TEXT       | Trigger text, redacted/truncated/nulled per `ASSISTANT_ANALYTICS_PRIVACY` |
+| created_at    | TEXT       | ISO timestamp (indexed)                                               |
+
 ## Indices
 
 | Index                          | Columns                                | Purpose                                      |
@@ -319,3 +340,6 @@ API cost tracking & budgets: one row per completed `/v1/messages` call observed 
 | idx_api_usage_created          | api_usage(created_at)                  | Time-range usage queries                     |
 | idx_api_usage_run_tag          | api_usage(run_tag)                     | Per-run/group usage lookup                   |
 | idx_api_usage_model            | api_usage(model)                       | Per-model usage breakdown                    |
+| idx_assistant_events_created   | assistant_events(created_at)           | Time-range analytics queries                 |
+| idx_assistant_events_group     | assistant_events(group_folder, created_at) | Per-group analytics breakdown            |
+| idx_assistant_events_outcome   | assistant_events(outcome, created_at)  | Resolution-rate / knowledge-gap filtering    |
