@@ -24,6 +24,7 @@ import {
   K8S_POD_IP,
   K8S_VOLUME_MODE,
   K8S_DATA_PVC_NAME,
+  KB_DASHBOARD_URL,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
   PROFILE_DIR,
@@ -629,6 +630,14 @@ function buildContainerArgs(
     args.push('-e', `NANOCLAW_SUBAGENT_MODEL=${NANOCLAW_SUBAGENT_MODEL}`);
   }
 
+  // KB dashboard base URL (non-secret, from profile.config.json). The agent
+  // reads $KB_DASHBOARD_URL to render internal-doc citations as deep-links into
+  // the dashboard (`/doc/:category/:file`). See the `citations` container skill.
+  // Safe to pass by value — it's a public URL, not a credential.
+  if (KB_DASHBOARD_URL) {
+    args.push('-e', `KB_DASHBOARD_URL=${KB_DASHBOARD_URL}`);
+  }
+
   // GitHub MCP server: enable the env passthrough WITHOUT putting the
   // secret in argv. `-e NAME` (no value) makes the runtime read the value
   // from its own process environment, which runContainerAgent populates.
@@ -734,6 +743,13 @@ function buildK8sEnvVars(
       name: 'NANOCLAW_SUBAGENT_MODEL',
       value: NANOCLAW_SUBAGENT_MODEL,
     });
+  }
+
+  // Non-secret: lets the citations skill render internal-doc deep-links into
+  // the KB dashboard under the kubernetes runtime too (mirrors the docker
+  // `-e KB_DASHBOARD_URL` passthrough in buildContainerArgs).
+  if (KB_DASHBOARD_URL) {
+    env.push({ name: 'KB_DASHBOARD_URL', value: KB_DASHBOARD_URL });
   }
 
   // Secrets: resolved to their real value here (unlike the docker path's bare

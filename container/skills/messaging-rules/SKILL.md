@@ -30,6 +30,14 @@ Format based on the channel prefix in the group folder name:
 ### Discord (`discord_*`)
 - Standard Markdown: `**bold**`, `*italic*`, `[links](url)`, `# headings`
 
+## Cite Your Sources
+
+When an answer draws on a specific KB doc, web page, or GitHub/Linear item, end
+it with a compact channel-native **Sources** block (Slack `<url|Title>`, Telegram
+`[Title](url)`, WhatsApp `Title (url)`). Skip for chit-chat. Deep-link internal
+docs into the KB dashboard when `KB_DASHBOARD_URL` is set. Full guidance: the
+`citations` skill and `/workspace/project/rules/messaging/citations.md`.
+
 ## Communication Model
 
 1. **Standard output** — returned text goes to the requesting channel
