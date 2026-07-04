@@ -27,6 +27,7 @@ vi.mock('./config.js', () => ({
   K8S_NODE_NAME: 'node-1',
   K8S_POD_IP: '10.0.0.5',
   K8S_VOLUME_MODE: 'hostPath',
+  KB_DASHBOARD_URL: '',
   NANOCLAW_MODEL: undefined,
   NANOCLAW_SUBAGENT_MODEL: undefined,
   PROFILE_DIR: '/tmp/nanoclaw-test-profile',
