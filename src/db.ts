@@ -409,6 +409,43 @@ function createSchema(database: Database.Database): void {
     `CREATE INDEX IF NOT EXISTS idx_agent_runs_channel ON agent_runs(channel, started_at)`,
   );
 
+  // --- Assistant usage + knowledge-gap analytics ---
+  //
+  // One row per completed agent run in a group: was it a question, did the
+  // assistant answer or hit a knowledge gap, the run outcome, and (subject to
+  // the privacy config) the question text. Decoupled from agent_runs by design
+  // — run_id is a soft link (no hard FK) so analytics can be pruned/rebuilt
+  // independently and a missing agent_runs row never blocks an event insert.
+  // See rules/knowledge-base/analytics.md for the knowledge_gap signal
+  // convention and the ASSISTANT_ANALYTICS_PRIVACY stance.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS assistant_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER,
+      chat_jid TEXT NOT NULL,
+      channel TEXT,
+      group_name TEXT,
+      group_folder TEXT NOT NULL,
+      is_main INTEGER NOT NULL DEFAULT 0,
+      sender_name TEXT,
+      is_question INTEGER NOT NULL DEFAULT 0,
+      outcome TEXT NOT NULL,
+      gap_source TEXT,
+      topic TEXT,
+      question_text TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assistant_events_created ON assistant_events(created_at)`,
+  );
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assistant_events_group ON assistant_events(group_folder, created_at)`,
+  );
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assistant_events_outcome ON assistant_events(outcome, created_at)`,
+  );
+
   // --- Permissions tables ---
 
   // Maps platform sender IDs to KB people
@@ -2174,6 +2211,415 @@ export function setUsageReportCursor(cursor: number): void {
     USAGE_REPORT_CURSOR_KEY,
     String(Math.max(0, Math.trunc(cursor))),
   );
+}
+
+// --- Assistant analytics (usage + knowledge-gap) ---
+//
+// Feedback loop for admins: "what did the team ask, and where couldn't the
+// assistant answer." The valuable-but-imprecise part is the knowledge-gap
+// signal, which is BEST-EFFORT: it comes either from an explicit agent signal
+// (the container agent calls the `report_knowledge_gap` tool → the orchestrator
+// records gap_source='agent_signal') or, failing that, from output heuristics
+// (gap_source='heuristic'). Heuristics can both miss real gaps and
+// false-positive on hedging language — treat the numbers as directional, not
+// exact. See rules/knowledge-base/analytics.md.
+
+/**
+ * Privacy stance for stored question text / sender, from
+ * ASSISTANT_ANALYTICS_PRIVACY (read lazily so tests can flip it per-case):
+ *   'main-only' (default) — full text + sender only for the main group;
+ *                           other groups get a redacted summary and null sender.
+ *   'full'                — full text + sender for every group (opt-in).
+ *   'redacted'            — never store raw question text (redacted form only)
+ *                           for any group; sender is still stored.
+ */
+export function analyticsPrivacyMode(): 'main-only' | 'full' | 'redacted' {
+  const raw = (process.env.ASSISTANT_ANALYTICS_PRIVACY || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'full' || raw === 'redacted') return raw;
+  return 'main-only';
+}
+
+/**
+ * Best-effort privacy-safe summary of a question: collapse whitespace, replace
+ * email addresses with `<email>` and long digit runs (7+, phone-like) with
+ * `<number>`, then truncate to ~120 chars. Deterministic and intentionally
+ * simple — it reduces obvious PII, it does NOT guarantee anonymization.
+ */
+export function redactQuestionText(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const noEmail = collapsed.replace(
+    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    '<email>',
+  );
+  const noNumbers = noEmail.replace(/\d[\d\s().-]{6,}\d/g, '<number>');
+  return noNumbers.length > 120
+    ? noNumbers.slice(0, 117).trimEnd() + '…'
+    : noNumbers;
+}
+
+/**
+ * Decide what question text to persist for an event given the privacy mode and
+ * whether the event is from the main group. Full text is capped at 500 chars.
+ */
+export function resolveStoredQuestion(
+  rawText: string | null | undefined,
+  opts: { isMain: boolean; mode: 'main-only' | 'full' | 'redacted' },
+): { question_text: string | null } {
+  if (!rawText || !rawText.trim()) return { question_text: null };
+  const full = () => rawText.trim().slice(0, 500);
+  switch (opts.mode) {
+    case 'full':
+      return { question_text: full() };
+    case 'redacted':
+      return { question_text: redactQuestionText(rawText) };
+    case 'main-only':
+    default:
+      return {
+        question_text: opts.isMain ? full() : redactQuestionText(rawText),
+      };
+  }
+}
+
+const QUESTION_WORDS =
+  /^(who|what|when|where|why|how|which|whose|whom|can|could|would|should|is|are|do|does|did|will|any)\b/i;
+
+/** Cheap heuristic: does the trigger text look like a question? */
+export function looksLikeQuestion(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+  if (t.endsWith('?')) return true;
+  if (QUESTION_WORDS.test(t)) return true;
+  const lower = t.toLowerCase();
+  return lower.includes('how do i') || lower.includes('how to');
+}
+
+// Phrases the assistant tends to use when it cannot answer. Best-effort and
+// deliberately phrase-level (not single words) to keep false positives down.
+const KNOWLEDGE_GAP_PATTERNS: RegExp[] = [
+  /i\s+don'?t\s+have\s+(that\s+|the\s+|any\s+)?(information|info|details|data)/i,
+  /i\s+don'?t\s+know/i,
+  /not\s+in\s+the\s+(knowledge\s*base|kb)/i,
+  /no\s+relevant\s+(knowledge|information|info|docs?|documents?)/i,
+  /couldn'?t\s+find/i,
+  /could\s+not\s+find/i,
+  /i'?m\s+not\s+sure/i,
+  /no\s+information\s+about/i,
+  /there'?s\s+nothing\s+in\s+the\s+kb/i,
+  /i\s+don'?t\s+have\s+access\s+to\s+that/i,
+];
+
+/**
+ * Heuristic fallback for the knowledge-gap signal, derived from the agent's
+ * OUTPUT text. Low precision by nature — a real answer that merely hedges
+ * ("I'm not sure, but…") can trip it, and a genuine gap phrased differently can
+ * be missed. Prefer the explicit agent signal; this is the safety net.
+ */
+export function detectKnowledgeGapMarker(
+  output: string | null | undefined,
+): boolean {
+  if (!output) return false;
+  return KNOWLEDGE_GAP_PATTERNS.some((re) => re.test(output));
+}
+
+const TOPIC_KEYWORDS: Array<[string, RegExp]> = [
+  ['expenses', /\b(expense|reimburs|receipt|invoice|budget)\b/i],
+  ['payments', /\b(payout|payment|safe|multisig|wallet|transfer\s+funds)\b/i],
+  ['calendar', /\b(calendar|event|meeting|schedule|availab)\b/i],
+  ['tasks', /\b(task|todo|assignee|deadline|due\s+date)\b/i],
+  ['people', /\b(who\s+is|contact|person|member|people|email\s+address)\b/i],
+  ['github', /\b(github|pull\s+request|\bpr\b|issue|repo|commit)\b/i],
+];
+
+/** Very cheap coarse topic bucket by keyword, or null when nothing matches. */
+export function coarseTopic(text: string | null | undefined): string | null {
+  if (!text) return null;
+  for (const [topic, re] of TOPIC_KEYWORDS) {
+    if (re.test(text)) return topic;
+  }
+  return null;
+}
+
+export interface AssistantEventInput {
+  runId?: number | null;
+  chatJid: string;
+  channel?: string | null;
+  groupName?: string | null;
+  groupFolder: string;
+  isMain: boolean;
+  senderName?: string | null;
+  /** RAW trigger text; this function applies the privacy policy to it. */
+  questionText?: string | null;
+  outcome: 'answered' | 'knowledge_gap' | 'error' | 'unknown';
+  gapSource?: 'agent_signal' | 'heuristic' | null;
+  topic?: string | null;
+}
+
+/**
+ * Insert one analytics event. Applies the privacy policy (question redaction +
+ * sender suppression) here so callers pass raw values and never have to reason
+ * about the stance. Returns the new row id.
+ */
+export function logAssistantEvent(input: AssistantEventInput): number {
+  const mode = analyticsPrivacyMode();
+  const isQuestion = looksLikeQuestion(input.questionText) ? 1 : 0;
+  const { question_text } = resolveStoredQuestion(input.questionText, {
+    isMain: input.isMain,
+    mode,
+  });
+  // Suppress the sender for non-main groups under the default main-only stance.
+  const storeSender = !(mode === 'main-only' && !input.isMain);
+  const senderName = storeSender ? (input.senderName ?? null) : null;
+
+  const result = db
+    .prepare(
+      `INSERT INTO assistant_events
+       (run_id, chat_jid, channel, group_name, group_folder, is_main,
+        sender_name, is_question, outcome, gap_source, topic, question_text, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.runId ?? null,
+      input.chatJid,
+      input.channel ?? null,
+      input.groupName ?? null,
+      input.groupFolder,
+      input.isMain ? 1 : 0,
+      senderName,
+      isQuestion,
+      input.outcome,
+      input.gapSource ?? null,
+      input.topic ?? null,
+      question_text,
+      new Date().toISOString(),
+    );
+  return Number(result.lastInsertRowid);
+}
+
+/** Clause + params for an optional `created_at >= sinceIso` filter. */
+function sinceClause(sinceIso?: string, days?: number): [string, string[]] {
+  if (sinceIso) return ['created_at >= ?', [sinceIso]];
+  if (days && days > 0) {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    return ['created_at >= ?', [cutoff]];
+  }
+  return ['1=1', []];
+}
+
+export interface VolumePoint {
+  day: string;
+  total: number;
+  answered: number;
+  knowledgeGap: number;
+  error: number;
+}
+
+/** Daily volume with per-outcome counts, chronological. Default last 14 days. */
+export function getEventVolumeByDay(opts?: {
+  sinceIso?: string;
+  days?: number;
+}): VolumePoint[] {
+  const [where, params] = sinceClause(opts?.sinceIso, opts?.days ?? 14);
+  const rows = db
+    .prepare(
+      `SELECT date(created_at) AS day,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'answered' THEN 1 ELSE 0 END) AS answered,
+              SUM(CASE WHEN outcome = 'knowledge_gap' THEN 1 ELSE 0 END) AS knowledgeGap,
+              SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS error
+       FROM assistant_events
+       WHERE ${where}
+       GROUP BY day
+       ORDER BY day`,
+    )
+    .all(...params) as Array<{
+    day: string;
+    total: number;
+    answered: number;
+    knowledgeGap: number;
+    error: number;
+  }>;
+  return rows;
+}
+
+export interface GroupBreakdownRow {
+  groupFolder: string;
+  groupName: string | null;
+  total: number;
+  answered: number;
+  knowledgeGap: number;
+  error: number;
+  resolutionRate: number;
+}
+
+/**
+ * Per-group answered/gap/error counts + resolution rate. Resolution rate is
+ * answered / (answered + knowledge_gap): errors are EXCLUDED from the
+ * denominator so an outage doesn't masquerade as a knowledge problem.
+ */
+export function getEventGroupBreakdown(opts?: {
+  sinceIso?: string;
+}): GroupBreakdownRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const rows = db
+    .prepare(
+      `SELECT group_folder AS groupFolder,
+              MAX(group_name) AS groupName,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'answered' THEN 1 ELSE 0 END) AS answered,
+              SUM(CASE WHEN outcome = 'knowledge_gap' THEN 1 ELSE 0 END) AS knowledgeGap,
+              SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS error
+       FROM assistant_events
+       WHERE ${where}
+       GROUP BY group_folder
+       ORDER BY total DESC`,
+    )
+    .all(...params) as Array<Omit<GroupBreakdownRow, 'resolutionRate'>>;
+  return rows.map((r) => {
+    const denom = r.answered + r.knowledgeGap;
+    return { ...r, resolutionRate: denom > 0 ? r.answered / denom : 0 };
+  });
+}
+
+export interface ResolutionStats {
+  total: number;
+  questions: number;
+  answered: number;
+  knowledgeGap: number;
+  error: number;
+  unknown: number;
+  resolutionRate: number;
+}
+
+/** Overall counts + resolution rate, optionally scoped to a group. */
+export function getResolutionStats(opts?: {
+  sinceIso?: string;
+  groupFolder?: string;
+}): ResolutionStats {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const clauses = [where];
+  if (opts?.groupFolder) {
+    clauses.push('group_folder = ?');
+    params.push(opts.groupFolder);
+  }
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(is_question) AS questions,
+              SUM(CASE WHEN outcome = 'answered' THEN 1 ELSE 0 END) AS answered,
+              SUM(CASE WHEN outcome = 'knowledge_gap' THEN 1 ELSE 0 END) AS knowledgeGap,
+              SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS error,
+              SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END) AS unknown
+       FROM assistant_events
+       WHERE ${clauses.join(' AND ')}`,
+    )
+    .get(...params) as {
+    total: number;
+    questions: number | null;
+    answered: number | null;
+    knowledgeGap: number | null;
+    error: number | null;
+    unknown: number | null;
+  };
+  const answered = row.answered ?? 0;
+  const knowledgeGap = row.knowledgeGap ?? 0;
+  const denom = answered + knowledgeGap;
+  return {
+    total: row.total ?? 0,
+    questions: row.questions ?? 0,
+    answered,
+    knowledgeGap,
+    error: row.error ?? 0,
+    unknown: row.unknown ?? 0,
+    resolutionRate: denom > 0 ? answered / denom : 0,
+  };
+}
+
+export interface TopUnansweredRow {
+  question: string;
+  count: number;
+  lastSeen: string;
+  sampleGroup: string | null;
+}
+
+/**
+ * Top knowledge-gap questions, grouped case/whitespace-insensitively. Rows with
+ * no stored question text (redacted-to-null) carry no actionable text and are
+ * skipped — so the list surfaces exactly what an admin could add to the KB.
+ */
+export function getTopUnanswered(opts?: {
+  sinceIso?: string;
+  limit?: number;
+}): TopUnansweredRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const limit = opts?.limit ?? 15;
+  const rows = db
+    .prepare(
+      `SELECT MAX(question_text) AS question,
+              COUNT(*) AS count,
+              MAX(created_at) AS lastSeen,
+              MAX(group_folder) AS sampleGroup
+       FROM assistant_events
+       WHERE ${where}
+         AND outcome = 'knowledge_gap'
+         AND question_text IS NOT NULL
+         AND TRIM(question_text) != ''
+       GROUP BY LOWER(TRIM(question_text))
+       ORDER BY count DESC, lastSeen DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as TopUnansweredRow[];
+  return rows;
+}
+
+export interface ActiveEntityRow {
+  name: string;
+  count: number;
+}
+
+/** Most active groups by event count (by display name, folder fallback). */
+export function getMostActiveGroups(opts?: {
+  sinceIso?: string;
+  limit?: number;
+}): ActiveEntityRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const limit = opts?.limit ?? 10;
+  return db
+    .prepare(
+      `SELECT COALESCE(group_name, group_folder) AS name, COUNT(*) AS count
+       FROM assistant_events
+       WHERE ${where}
+       GROUP BY COALESCE(group_name, group_folder)
+       ORDER BY count DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as ActiveEntityRow[];
+}
+
+/**
+ * Most active users by event count. Only rows with a stored sender appear, so
+ * privacy-redacted (null-sender) events are naturally excluded.
+ */
+export function getMostActiveUsers(opts?: {
+  sinceIso?: string;
+  limit?: number;
+}): ActiveEntityRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const limit = opts?.limit ?? 10;
+  return db
+    .prepare(
+      `SELECT sender_name AS name, COUNT(*) AS count
+       FROM assistant_events
+       WHERE ${where}
+         AND sender_name IS NOT NULL
+         AND TRIM(sender_name) != ''
+       GROUP BY sender_name
+       ORDER BY count DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as ActiveEntityRow[];
 }
 
 // --- JSON migration ---

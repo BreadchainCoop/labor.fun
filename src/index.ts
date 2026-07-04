@@ -81,6 +81,9 @@ import {
   storeMessage,
   startAgentRun,
   completeAgentRun,
+  logAssistantEvent,
+  detectKnowledgeGapMarker,
+  coarseTopic,
   recordPmDm,
   insertApiUsage,
 } from './db.js';
@@ -580,6 +583,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // ('success'/'error'), and which previously made agent_runs.output_length
   // always 7 ("success") or 5 ("error") regardless of the real reply.
   let outputLength = 0;
+  // Accumulated agent reply text, used by the analytics knowledge-gap heuristic
+  // (detectKnowledgeGapMarker) after the run completes.
+  let agentReplyText = '';
 
   // ACK pattern: react with a thinking emoji on the triggering message,
   // then swap to a checkmark when processing completes.
@@ -612,6 +618,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         });
         outputSentToUser = true;
         outputLength += text.length;
+        agentReplyText += text + '\n';
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -638,6 +645,54 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const runDuration = Date.now() - runStartTime;
 
+  // Analytics: an explicit knowledge-gap signal from the agent arrives as a
+  // sentinel flag file written by the IPC handler (report_knowledge_gap tool).
+  // Read-and-clear it so it's attributed to THIS run and never leaks into the
+  // next. Falls back to the output heuristic when no explicit signal is present.
+  let agentSignaledGap = false;
+  try {
+    const gapFlag = path.join(
+      resolveGroupIpcPath(group.folder),
+      'analytics',
+      'knowledge_gap.flag',
+    );
+    if (fs.existsSync(gapFlag)) {
+      agentSignaledGap = true;
+      fs.unlinkSync(gapFlag);
+    }
+  } catch {
+    /* best-effort — never let analytics break the message loop */
+  }
+
+  // Record a single analytics event for this run (best-effort; guarded so a
+  // logging failure never affects message handling). Privacy redaction is
+  // applied inside logAssistantEvent per the ASSISTANT_ANALYTICS_PRIVACY stance.
+  const recordEvent = (
+    outcome: 'answered' | 'knowledge_gap' | 'error',
+    gapSource: 'agent_signal' | 'heuristic' | null,
+  ) => {
+    try {
+      logAssistantEvent({
+        runId,
+        chatJid,
+        channel: channelRoute,
+        groupName: group.name,
+        groupFolder: group.folder,
+        isMain: isMainGroup,
+        senderName: triggerMsg?.sender_name,
+        questionText: triggerMsg?.content,
+        outcome,
+        gapSource,
+        topic: coarseTopic(triggerMsg?.content),
+      });
+    } catch (err) {
+      logger.warn(
+        { group: group.name, err },
+        'Failed to record assistant analytics event',
+      );
+    }
+  };
+
   if (output === 'error' || hadError) {
     completeAgentRun(
       runId,
@@ -648,6 +703,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         ? 'Agent returned error (partial output sent to user)'
         : 'Agent returned error (no output sent)',
     );
+    recordEvent('error', null);
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -668,6 +724,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   completeAgentRun(runId, 'success', outputLength, runDuration);
+  // Knowledge-gap on a successful run: prefer the explicit agent signal, else
+  // fall back to the (lower-precision) output heuristic.
+  if (agentSignaledGap) {
+    recordEvent('knowledge_gap', 'agent_signal');
+  } else if (detectKnowledgeGapMarker(agentReplyText)) {
+    recordEvent('knowledge_gap', 'heuristic');
+  } else {
+    recordEvent('answered', null);
+  }
   return true;
 }
 

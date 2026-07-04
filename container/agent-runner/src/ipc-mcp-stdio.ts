@@ -86,6 +86,48 @@ server.tool(
 );
 
 server.tool(
+  'report_knowledge_gap',
+  'Call this when you could NOT answer the user because the needed information ' +
+    'is NOT in the knowledge base / you genuinely lack the knowledge to answer. ' +
+    'It records a knowledge-gap signal so admins can see what to add to the KB. ' +
+    'Call it IN ADDITION to telling the user you do not have the info (do not ' +
+    'rely on this tool to reply — still answer the user). Do NOT call it when: ' +
+    'you answered the question, the request was a command/action rather than a ' +
+    'question, or something errored. One call per unanswerable question.',
+  {
+    question: z
+      .string()
+      .describe(
+        'A short paraphrase of what the user asked that you could not answer.',
+      ),
+    topic: z
+      .string()
+      .optional()
+      .describe('Optional coarse topic, e.g. "expenses", "calendar".'),
+  },
+  async (args) => {
+    const data = {
+      type: 'report_knowledge_gap',
+      question: args.question,
+      topic: args.topic ?? null,
+      chatJid,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(MESSAGES_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: 'Knowledge gap recorded. Remember to still reply to the user.',
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
   'send_email',
   'Send an email from the configured Breadbrich Engels address. RESTRICTED: can only send to addresses in the orchestrator-configured whitelist (EMAIL_WHITELIST env var). Sends to any other address will be rejected by the orchestrator. The orchestrator handles SMTP.',
   {
