@@ -52,7 +52,7 @@ function clearSenderContext(sourceGroup: string): void {
 
 const MAIN_GROUP: RegisteredGroup = {
   name: 'Main',
-  folder: 'whatsapp_main',
+  folder: 'approval-test-main',
   trigger: 'always',
   added_at: '2024-01-01T00:00:00.000Z',
   isMain: true,
@@ -60,7 +60,7 @@ const MAIN_GROUP: RegisteredGroup = {
 
 const OTHER_GROUP: RegisteredGroup = {
   name: 'Other',
-  folder: 'other-group',
+  folder: 'approval-test-other',
   trigger: '@Breadbrich Engels',
   added_at: '2024-01-01T00:00:00.000Z',
 };
@@ -93,8 +93,8 @@ beforeEach(() => {
     writeGroupsSnapshot: () => {},
     onTasksChanged: () => {},
   };
-  clearSenderContext('whatsapp_main');
-  clearSenderContext('other-group');
+  clearSenderContext('approval-test-main');
+  clearSenderContext('approval-test-other');
 });
 
 // --- config-driven action-class gating ---
@@ -125,7 +125,7 @@ describe('action-class gating (config-driven)', () => {
 
 describe('request_approval', () => {
   it('records a pending row and posts an approve/reject prompt for a gated class', async () => {
-    writeSenderContext('other-group', { user_id: 'alice' });
+    writeSenderContext('approval-test-other', { user_id: 'alice' });
     await processTaskIpc(
       {
         type: 'request_approval',
@@ -134,7 +134,7 @@ describe('request_approval', () => {
         payload: { pr: 42 },
         chatJid: 'other@g.us',
       },
-      'other-group',
+      'approval-test-other',
       false,
       deps,
     );
@@ -154,7 +154,7 @@ describe('request_approval', () => {
   });
 
   it('does NOT gate an undeclared class — tells the agent to proceed', async () => {
-    writeSenderContext('other-group', { user_id: 'alice' });
+    writeSenderContext('approval-test-other', { user_id: 'alice' });
     await processTaskIpc(
       {
         type: 'request_approval',
@@ -162,7 +162,7 @@ describe('request_approval', () => {
         summary: 'read a public file',
         chatJid: 'other@g.us',
       },
-      'other-group',
+      'approval-test-other',
       false,
       deps,
     );
@@ -173,7 +173,7 @@ describe('request_approval', () => {
   });
 
   it('is idempotent on dedupe_key — a live pending row is reused', async () => {
-    writeSenderContext('other-group', { user_id: 'alice' });
+    writeSenderContext('approval-test-other', { user_id: 'alice' });
     for (let i = 0; i < 2; i++) {
       await processTaskIpc(
         {
@@ -183,7 +183,7 @@ describe('request_approval', () => {
           dedupe_key: 'pr-7-merge',
           chatJid: 'other@g.us',
         },
-        'other-group',
+        'approval-test-other',
         false,
         deps,
       );
@@ -201,17 +201,17 @@ describe('resolve_approval lifecycle', () => {
       summary: 'merge PR #99',
       payload: JSON.stringify({ pr: 99 }),
       chat_jid: 'other@g.us',
-      group_folder: 'other-group',
+      group_folder: 'approval-test-other',
       requested_by_user_id: requester,
     });
   }
 
   it('an authorized approver (different user) approves → status approved', async () => {
     const a = seedApproval('alice');
-    writeSenderContext('whatsapp_main', { user_id: 'bob' });
+    writeSenderContext('approval-test-main', { user_id: 'bob' });
     await processTaskIpc(
       { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -221,9 +221,27 @@ describe('resolve_approval lifecycle', () => {
     expect(sent.some((m) => m.text.includes('Approved'))).toBe(true);
   });
 
+  it('round-trips the recorded payload back to the proposer on approval', async () => {
+    const a = seedApproval('alice');
+    writeSenderContext('approval-test-main', { user_id: 'bob' });
+    await processTaskIpc(
+      { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    // The proposing agent can't execute a gated action without seeing back
+    // what it proposed — the approval notification must carry the payload.
+    const note = sent.find(
+      (m) => m.jid === 'other@g.us' && m.text.includes('Approved'),
+    );
+    expect(note).toBeTruthy();
+    expect(note!.text).toContain(JSON.stringify({ pr: 99 }));
+  });
+
   it('reject carries the reason back to the requesting chat', async () => {
     const a = seedApproval('alice');
-    writeSenderContext('whatsapp_main', { user_id: 'bob' });
+    writeSenderContext('approval-test-main', { user_id: 'bob' });
     await processTaskIpc(
       {
         type: 'resolve_approval',
@@ -231,7 +249,7 @@ describe('resolve_approval lifecycle', () => {
         decision: 'reject',
         reason: 'wrong branch',
       },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -244,7 +262,7 @@ describe('resolve_approval lifecycle', () => {
 
   it('revise records revise status + notes', async () => {
     const a = seedApproval('alice');
-    writeSenderContext('whatsapp_main', { user_id: 'bob' });
+    writeSenderContext('approval-test-main', { user_id: 'bob' });
     await processTaskIpc(
       {
         type: 'resolve_approval',
@@ -252,7 +270,7 @@ describe('resolve_approval lifecycle', () => {
         decision: 'revise',
         reason: 'tighten the summary',
       },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -263,10 +281,10 @@ describe('resolve_approval lifecycle', () => {
 
   it('rejects an unauthorized approver (no sender_context) — row stays pending', async () => {
     const a = seedApproval('alice');
-    clearSenderContext('whatsapp_main'); // no allowlisted identity
+    clearSenderContext('approval-test-main'); // no allowlisted identity
     await processTaskIpc(
       { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
-      'whatsapp_main',
+      'approval-test-main',
       true, // isMain alone is NOT enough — fail closed
       deps,
     );
@@ -276,10 +294,10 @@ describe('resolve_approval lifecycle', () => {
 
   it('rejects self-approval by the original requester', async () => {
     const a = seedApproval('alice');
-    writeSenderContext('whatsapp_main', { user_id: 'alice' });
+    writeSenderContext('approval-test-main', { user_id: 'alice' });
     await processTaskIpc(
       { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -291,7 +309,7 @@ describe('resolve_approval lifecycle', () => {
 
   it('the requester may still reject/withdraw their own request', async () => {
     const a = seedApproval('alice');
-    writeSenderContext('whatsapp_main', { user_id: 'alice' });
+    writeSenderContext('approval-test-main', { user_id: 'alice' });
     await processTaskIpc(
       {
         type: 'resolve_approval',
@@ -299,7 +317,7 @@ describe('resolve_approval lifecycle', () => {
         decision: 'reject',
         reason: 'never mind',
       },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -308,17 +326,17 @@ describe('resolve_approval lifecycle', () => {
 
   it('guards against double-resolution (already resolved)', async () => {
     const a = seedApproval('alice');
-    writeSenderContext('whatsapp_main', { user_id: 'bob' });
+    writeSenderContext('approval-test-main', { user_id: 'bob' });
     await processTaskIpc(
       { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
     sent = [];
     await processTaskIpc(
       { type: 'resolve_approval', approval_id: a.id, decision: 'reject' },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -328,10 +346,10 @@ describe('resolve_approval lifecycle', () => {
   });
 
   it('reports an unknown approval id', async () => {
-    writeSenderContext('whatsapp_main', { user_id: 'bob' });
+    writeSenderContext('approval-test-main', { user_id: 'bob' });
     await processTaskIpc(
       { type: 'resolve_approval', approval_id: 'AP-nope', decision: 'approve' },
-      'whatsapp_main',
+      'approval-test-main',
       true,
       deps,
     );
@@ -347,7 +365,7 @@ describe('approval expiry', () => {
       action_class: GATED,
       summary: 'x',
       chat_jid: 'other@g.us',
-      group_folder: 'other-group',
+      group_folder: 'approval-test-other',
       requested_by_user_id: 'alice',
       ttl_minutes: 60,
     });
@@ -360,7 +378,7 @@ describe('approval expiry', () => {
       action_class: GATED,
       summary: 'stale one',
       chat_jid: 'other@g.us',
-      group_folder: 'other-group',
+      group_folder: 'approval-test-other',
       requested_by_user_id: 'alice',
       ttl_minutes: 60,
     });
@@ -376,7 +394,7 @@ describe('approval expiry', () => {
       action_class: GATED,
       summary: 'fresh',
       chat_jid: 'other@g.us',
-      group_folder: 'other-group',
+      group_folder: 'approval-test-other',
       requested_by_user_id: 'alice',
       ttl_minutes: 60,
     });
@@ -395,11 +413,13 @@ describe('approval expiry', () => {
       action_class: GATED,
       summary: 'expired then approved?',
       chat_jid: 'other@g.us',
-      group_folder: 'other-group',
+      group_folder: 'approval-test-other',
       requested_by_user_id: 'alice',
       ttl_minutes: 60,
     });
-    expireStalePendingApprovals(new Date(Date.now() + 2 * 3600_000).toISOString());
+    expireStalePendingApprovals(
+      new Date(Date.now() + 2 * 3600_000).toISOString(),
+    );
     // resolvePendingApproval only moves 'pending' rows.
     const result = resolvePendingApproval(a.id, 'approved', 'bob');
     expect(result).toBeUndefined();

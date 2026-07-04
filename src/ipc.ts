@@ -2710,13 +2710,18 @@ export async function processTaskIpc(
 
       // Notify the requesting chat so the proposing agent (and humans) see the
       // outcome. Reject/revise carry the notes back so the agent can act on
-      // them; approve tells the agent to proceed with the recorded payload.
+      // them; approve round-trips the recorded payload so the agent knows
+      // exactly what it proposed and can now execute (the host never executes
+      // gated actions itself — see request_approval).
       const notifyJid = resolved.chat_jid || mainGroupJid;
       if (notifyJid) {
         const notesSuffix = data.reason ? ` — ${data.reason}` : '';
+        const payloadSuffix = resolved.payload
+          ? `\nPayload: ${resolved.payload}`
+          : '';
         const verb =
           decision === 'approve'
-            ? `✅ Approved (${resolved.action_class}). Proceeding${resolved.payload ? '' : ''}.`
+            ? `✅ Approved (${resolved.action_class}). Proceeding.${payloadSuffix}`
             : decision === 'reject'
               ? `🚫 Rejected (${resolved.action_class}). The action will NOT be taken${notesSuffix}.`
               : `✏️ Revision requested (${resolved.action_class})${notesSuffix}.`;

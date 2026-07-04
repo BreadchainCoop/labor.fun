@@ -161,7 +161,10 @@ export const APPROVAL_TIMEOUT_MINUTES: number = (() => {
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) return Math.floor(n);
   }
-  if (PROFILE.approvals && typeof PROFILE.approvals.timeoutMinutes === 'number') {
+  if (
+    PROFILE.approvals &&
+    typeof PROFILE.approvals.timeoutMinutes === 'number'
+  ) {
     return Math.max(0, Math.floor(PROFILE.approvals.timeoutMinutes));
   }
   // Present-but-unset block, or no block at all → 24h default.

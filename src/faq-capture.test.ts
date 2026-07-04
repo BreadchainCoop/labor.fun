@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   FAQ_DIR,
+  FAQ_GAPS_PATH,
   faqSlug,
   faqCardPath,
   renderFaqCard,
@@ -42,6 +43,13 @@ describe('faqCardPath', () => {
     expect(faqCardPath('How do I deploy?')).toBe(
       `${FAQ_DIR}/how-do-i-deploy.md`,
     );
+  });
+});
+
+describe('FAQ_GAPS_PATH', () => {
+  it('lives under the FAQ dir, distinct from any card path', () => {
+    expect(FAQ_GAPS_PATH).toBe(`${FAQ_DIR}/_gaps.md`);
+    expect(FAQ_GAPS_PATH).not.toBe(faqCardPath('_gaps'));
   });
 });
 
@@ -115,9 +123,9 @@ describe('isFaqCardUnchanged (update-not-duplicate)', () => {
 
   it('ignores a created_at change (same content, different day)', () => {
     const existing = renderFaqCard({ ...base, createdAt: '2026-06-01' });
-    expect(isFaqCardUnchanged(existing, { ...base, createdAt: '2026-07-04' })).toBe(
-      true,
-    );
+    expect(
+      isFaqCardUnchanged(existing, { ...base, createdAt: '2026-07-04' }),
+    ).toBe(true);
   });
 
   it('detects a changed answer (should update the card)', () => {

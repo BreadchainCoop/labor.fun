@@ -251,6 +251,30 @@ Action items extracted from meeting transcripts that need coordinator approval b
 | resulting_task_id | TEXT    | TASK-NNN id created on approval                        |
 | rejection_reason  | TEXT    | Optional reason given by coordinator                   |
 
+### pending_approvals
+
+The reusable human-in-the-loop approval primitive (`rules/approvals/README.md`). A container agent proposes a consequential action `{action_class, summary, payload}` via `request_approval`; if the class is gated (config-driven, see `GATED_ACTION_CLASSES`), one row is recorded here and an approve/reject prompt is posted to chat. An allowlisted human's reply resolves it via `resolve_approval`. **Not** used by `safe_payouts` (that approval is the on-chain Safe threshold, not a chat reply) — see `rules/finance/safe-payouts.md`.
+
+| Column               | Type    | Notes                                                          |
+| -------------------- | ------- | --------------------------------------------------------------- |
+| **id**               | TEXT PK | Generated ID (AP-{timestamp}-{random})                          |
+| action_class         | TEXT    | Free-form tag, e.g. `github_write`, `kb_write`, `payout`         |
+| summary              | TEXT    | One-line human-readable description shown to the approver       |
+| payload              | TEXT    | Opaque JSON the proposer round-trips back on approval            |
+| dedupe_key           | TEXT    | Optional idempotency key; a live pending row with the same key is reused |
+| chat_jid             | TEXT    | Chat the requesting agent is attached to (notified on resolution) |
+| group_folder         | TEXT    | Source group folder                                             |
+| requested_by_user_id | TEXT    | KB person id of the requester (nullable)                        |
+| approver_hint        | TEXT    | Optional suggested approver name                                 |
+| status               | TEXT    | `pending` → `approved` / `rejected` / `revise` / `expired`        |
+| created_at           | TEXT    | ISO timestamp                                                    |
+| expires_at           | TEXT    | ISO deadline from `APPROVAL_TIMEOUT_MINUTES`; null = never expires |
+| resolved_by_user_id  | TEXT    | KB person id of the approver (nullable)                          |
+| resolved_at          | TEXT    | ISO timestamp of resolution                                       |
+| revision_notes       | TEXT    | Reject/revise reason, carried back to the requesting chat          |
+
+Only a still-`pending` row transitions (guards double-resolution/races). A dedicated background sweep (`src/integrations/approval-expiry.ts`) flips stale pending rows past `expires_at` to `expired` and notifies the requesting chat once.
+
 ### reminder_log
 
 Idempotency ledger for the escalating-deadline reminder engine (`src/reminder-engine.ts`). One row per (item, ladder rung) that has already fired, so the periodic sweep sends each rung at most once.
