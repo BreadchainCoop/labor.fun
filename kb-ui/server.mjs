@@ -1632,11 +1632,11 @@ app.get('/logs', (req, res) => {
     }
 
     let userStatsRows = byUser.map(r =>
-      `<tr><td style="color:#ddd">${r.sender_name}</td><td style="color:#999">${r.c}</td></tr>`
+      `<tr><td style="color:#ddd">${esc(r.sender_name)}</td><td style="color:#999">${r.c}</td></tr>`
     ).join('');
 
     let channelStatsRows = byChannel.map(r =>
-      `<tr><td style="color:#ddd">${channelNames[r.chat_jid] || r.chat_jid}</td><td style="color:#999">${r.c}</td></tr>`
+      `<tr><td style="color:#ddd">${esc(channelNames[r.chat_jid] || r.chat_jid)}</td><td style="color:#999">${r.c}</td></tr>`
     ).join('');
 
     let recentRows = recentMessages.map(r => {
@@ -1645,8 +1645,7 @@ app.get('/logs', (req, res) => {
       const timeStr = date.toISOString().slice(11, 16);
       const channel = channelNames[r.chat_jid] || r.chat_jid;
       const summary = r.content.length > 80 ? r.content.slice(0, 80) + '...' : r.content;
-      const escapedSummary = summary.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<tr><td style="color:#999;font-size:12px">${dateStr}</td><td style="color:#999;font-size:12px">${timeStr}</td><td style="color:#ddd">${r.sender_name}</td><td style="color:#999;font-size:12px">${channel}</td><td style="color:#888;font-size:12px">${escapedSummary}</td></tr>`;
+      return `<tr><td style="color:#999;font-size:12px">${dateStr}</td><td style="color:#999;font-size:12px">${timeStr}</td><td style="color:#ddd">${esc(r.sender_name)}</td><td style="color:#999;font-size:12px">${esc(channel)}</td><td style="color:#888;font-size:12px">${esc(summary)}</td></tr>`;
     }).join('');
 
     dbStats = `
