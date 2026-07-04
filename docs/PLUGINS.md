@@ -73,7 +73,9 @@ Each pairs with a container skill under
 ## 1. Channels
 
 A channel is an I/O adapter (Slack, Telegram, Discord, …). Implement the
-`Channel` interface (`src/types.ts`) and self-register a factory:
+`Channel` interface (`src/types.ts`) and self-register a factory. See also
+[`docs/WEB-WIDGET.md`](WEB-WIDGET.md) for the browser-embeddable web chat widget
+channel — a fuller worked example of a channel that opens its own HTTP server.
 
 ```ts
 // src/channels/mychannel.ts
