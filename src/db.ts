@@ -236,6 +236,47 @@ function createSchema(database: Database.Database): void {
       ON safe_payouts(safe_tx_hash) WHERE safe_tx_hash IS NOT NULL;
   `);
 
+  // --- Human-in-the-loop approvals (reusable primitive) ---
+  // A generic, action-class-agnostic gate. A container agent proposes a
+  // consequential action via the `request_approval` IPC op; the orchestrator
+  // records one row here and posts an approve/reject prompt to the control
+  // channel. An allowlisted human's reply resolves the row (approved / rejected
+  // / revise). This is the generalization of the bespoke proposed-task and
+  // expense approval queues — same shape (pending row + chat prompt + resolve),
+  // but the { action_class, summary, payload } triplet makes it reusable for
+  // any consequential action (outbound message, GitHub/Linear write, KB delete,
+  // payout, …). Which classes are *gated* is declared in config, not here.
+  //
+  // NOTE: this is a chat-reply gate, distinct from safe_payouts whose "approval"
+  // is the on-chain Safe threshold (signers confirming in their wallet). The two
+  // are complementary and do not conflict — see rules/approvals/README.md.
+  //   payload      : opaque JSON the proposer round-trips back on approval.
+  //   dedupe_key   : optional idempotency key; a live (pending) row with the
+  //                  same key is reused instead of creating a duplicate.
+  //   expires_at   : ISO deadline; a pending row past it resolves to 'expired'.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS pending_approvals (
+      id TEXT PRIMARY KEY,
+      action_class TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload TEXT,
+      dedupe_key TEXT,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      requested_by_user_id TEXT,
+      approver_hint TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT,
+      resolved_by_user_id TEXT,
+      resolved_at TEXT,
+      revision_notes TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_approvals_dedupe
+      ON pending_approvals(dedupe_key) WHERE dedupe_key IS NOT NULL AND status = 'pending';
+  `);
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -1945,6 +1986,164 @@ export function decideProposalApproval(
     notes ?? null,
     approvalId,
   );
+}
+
+// --- Pending approvals (reusable human-in-the-loop primitive) ---
+
+export type PendingApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'revise'
+  | 'expired';
+
+export interface PendingApproval {
+  id: string;
+  action_class: string;
+  summary: string;
+  payload: string | null;
+  dedupe_key: string | null;
+  chat_jid: string;
+  group_folder: string;
+  requested_by_user_id: string | null;
+  approver_hint: string | null;
+  status: PendingApprovalStatus;
+  created_at: string;
+  expires_at: string | null;
+  resolved_by_user_id: string | null;
+  resolved_at: string | null;
+  revision_notes: string | null;
+}
+
+export interface PendingApprovalInput {
+  action_class: string;
+  summary: string;
+  payload?: string | null;
+  dedupe_key?: string | null;
+  chat_jid: string;
+  group_folder: string;
+  requested_by_user_id?: string | null;
+  approver_hint?: string | null;
+  /** Minutes until a still-pending row auto-expires. Omit/0 → no expiry. */
+  ttl_minutes?: number;
+}
+
+function nextApprovalId(): string {
+  return `AP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Create a pending-approval row. Idempotent on `dedupe_key`: if a still-pending
+ * row exists with the same key, that row is returned unchanged rather than
+ * creating a duplicate (mirrors the partial-unique index).
+ */
+export function createPendingApproval(
+  input: PendingApprovalInput,
+): PendingApproval {
+  if (input.dedupe_key) {
+    const existing = getPendingApprovalByDedupeKey(input.dedupe_key);
+    if (existing) return existing;
+  }
+  const id = nextApprovalId();
+  const now = new Date().toISOString();
+  const expiresAt =
+    input.ttl_minutes && input.ttl_minutes > 0
+      ? new Date(Date.now() + input.ttl_minutes * 60_000).toISOString()
+      : null;
+  db.prepare(
+    `INSERT INTO pending_approvals
+       (id, action_class, summary, payload, dedupe_key, chat_jid, group_folder,
+        requested_by_user_id, approver_hint, status, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+  ).run(
+    id,
+    input.action_class,
+    input.summary,
+    input.payload ?? null,
+    input.dedupe_key ?? null,
+    input.chat_jid,
+    input.group_folder,
+    input.requested_by_user_id ?? null,
+    input.approver_hint ?? null,
+    now,
+    expiresAt,
+  );
+  return getPendingApproval(id)!;
+}
+
+export function getPendingApproval(id: string): PendingApproval | undefined {
+  return db.prepare('SELECT * FROM pending_approvals WHERE id = ?').get(id) as
+    | PendingApproval
+    | undefined;
+}
+
+export function getPendingApprovalByDedupeKey(
+  dedupeKey: string,
+): PendingApproval | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM pending_approvals WHERE dedupe_key = ? AND status = 'pending'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(dedupeKey) as PendingApproval | undefined;
+}
+
+export function getPendingApprovals(): PendingApproval[] {
+  return db
+    .prepare(
+      `SELECT * FROM pending_approvals WHERE status = 'pending' ORDER BY created_at`,
+    )
+    .all() as PendingApproval[];
+}
+
+/**
+ * Resolve a pending row. Only a still-`pending` row transitions (guards against
+ * double-decision / races); returns the resulting row, or undefined if the row
+ * is absent or already terminal. `revision_notes` carries reject/revise reasons
+ * back to the proposing agent.
+ */
+export function resolvePendingApproval(
+  id: string,
+  status: Exclude<PendingApprovalStatus, 'pending'>,
+  resolvedByUserId: string | null,
+  revisionNotes?: string | null,
+): PendingApproval | undefined {
+  const now = new Date().toISOString();
+  const info = db
+    .prepare(
+      `UPDATE pending_approvals
+         SET status = ?, resolved_by_user_id = ?, resolved_at = ?, revision_notes = ?
+       WHERE id = ? AND status = 'pending'`,
+    )
+    .run(status, resolvedByUserId, now, revisionNotes ?? null, id);
+  if (info.changes === 0) return undefined;
+  return getPendingApproval(id);
+}
+
+/**
+ * Sweep still-pending rows whose `expires_at` is in the past to `expired`.
+ * Returns the rows that were expired (for one-shot "your request expired"
+ * notifications). Idempotent — an already-expired row is not re-swept.
+ */
+export function expireStalePendingApprovals(
+  nowIso: string = new Date().toISOString(),
+): PendingApproval[] {
+  const stale = db
+    .prepare(
+      `SELECT * FROM pending_approvals
+       WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?`,
+    )
+    .all(nowIso) as PendingApproval[];
+  if (stale.length === 0) return stale;
+  const mark = db.prepare(
+    `UPDATE pending_approvals SET status = 'expired', resolved_at = ?
+     WHERE id = ? AND status = 'pending'`,
+  );
+  const tx = db.transaction((rows: PendingApproval[]) => {
+    for (const r of rows) mark.run(nowIso, r.id);
+  });
+  tx(stale);
+  return stale.map((r) => ({ ...r, status: 'expired' as const }));
 }
 
 // --- JSON migration ---

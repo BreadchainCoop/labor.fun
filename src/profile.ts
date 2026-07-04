@@ -68,6 +68,31 @@ export interface ProfileConfig {
    */
   enabledSkills?: string[];
   /**
+   * Human-in-the-loop approval gate (reusable primitive). Which *classes* of
+   * consequential action must be approved by a human before the agent may
+   * proceed is declared here — never hardcoded in `src/`. When a proposed
+   * action's class is in `gatedActionClasses`, the orchestrator records a
+   * pending-approval row and waits for an allowlisted human's approve/reject.
+   * When absent, a conservative default set is used (see config.ts
+   * `DEFAULT_GATED_ACTION_CLASSES`). The `ENABLED_ACTION_GATING`-style merge
+   * lives in config.ts. See rules/approvals/README.md.
+   */
+  gatedActionClasses?: string[];
+  approvals?: {
+    /**
+     * KB people-slugs allowed to approve gated actions. Empty/omitted → ANY
+     * allowlisted sender may approve (matches today's flat access model). When
+     * set, approval is narrowed to these slugs (a stricter approver tier).
+     */
+    approverSlugs?: string[];
+    /**
+     * Minutes a pending approval stays open before it auto-expires. Omit/0 →
+     * approvals never expire on their own. Default when the block is present
+     * but the field is absent: 1440 (24h).
+     */
+    timeoutMinutes?: number;
+  };
+  /**
    * On-chain reimbursement via a Safe{Wallet} multisig (issue #108). Absent →
    * the safe-payouts integration stays dormant (no-op). Org-agnostic: the
    * concrete Safe/token addresses live here, never in `src/`. The proposer

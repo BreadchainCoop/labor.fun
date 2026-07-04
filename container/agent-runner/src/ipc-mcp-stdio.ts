@@ -1129,6 +1129,102 @@ server.tool(
   },
 );
 
+// --- Human-in-the-loop approval primitive ---
+
+server.tool(
+  'request_approval',
+  `Propose a CONSEQUENTIAL action for human sign-off before you take it. Use this whenever you are about to do something gated: sending a message/DM/email OUTSIDE the org (action_class "outbound_external_message"), a GitHub write like opening/merging a PR ("github_write"), a Linear write ("linear_write"), DELETING a knowledge-base document ("kb_delete"), or moving money/on-chain value ("payout"). The orchestrator decides — based on org config — whether that class is gated: if it is, it records the request and posts an approve/reject prompt to the control channel, and you should STOP and wait; a human's reply resolves it and you'll be told the outcome. If the class is NOT gated, the orchestrator replies immediately telling you to proceed. Do NOT perform the action before you see approval.`,
+  {
+    action_class: z
+      .string()
+      .describe(
+        'Stable class of the action, e.g. "outbound_external_message", "github_write", "linear_write", "kb_delete", "payout".',
+      ),
+    summary: z
+      .string()
+      .min(3)
+      .describe(
+        'One-line human-readable description of exactly what you want to do (the approver reads this).',
+      ),
+    payload: z
+      .any()
+      .optional()
+      .describe(
+        'Optional structured details of the action (round-tripped back to you on approval) — e.g. the recipient + message text, the PR title + body, the file path to delete.',
+      ),
+    dedupe_key: z
+      .string()
+      .optional()
+      .describe(
+        'Optional idempotency key. If a pending approval already exists with this key, it is reused instead of creating a duplicate.',
+      ),
+    approver_hint: z
+      .string()
+      .optional()
+      .describe('Optional suggestion of who should approve (a person/name).'),
+  },
+  async (args) => {
+    const data = {
+      type: 'request_approval',
+      action_class: args.action_class,
+      summary: args.summary,
+      payload: args.payload ?? null,
+      dedupe_key: args.dedupe_key ?? null,
+      approver_hint: args.approver_hint ?? null,
+      chatJid,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Approval requested for a ${args.action_class} action. If this class is gated, wait for a human's approve/reject before proceeding; if not, the orchestrator will tell you to proceed.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'resolve_approval',
+  `Record a human's decision on a PENDING approval request (created earlier by request_approval). Call this ONLY when an allowlisted person in the chat clearly approved, rejected, or asked to revise a specific approval id. The orchestrator enforces that the caller is an allowlisted approver and rejects self-approval by the original requester. Pass a short reason for rejections/revisions so the proposing agent can act on it.`,
+  {
+    approval_id: z
+      .string()
+      .describe('The approval id from the prompt, e.g. AP-1714060800000-ab12cd.'),
+    decision: z
+      .enum(['approve', 'reject', 'revise'])
+      .describe(
+        '"approve" to proceed, "reject" to cancel the action, "revise" to send it back with change notes.',
+      ),
+    reason: z
+      .string()
+      .optional()
+      .describe('Short reason/notes (required in spirit for reject/revise).'),
+  },
+  async (args) => {
+    const data = {
+      type: 'resolve_approval',
+      approval_id: args.approval_id,
+      decision: args.decision,
+      reason: args.reason ?? null,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Decision "${args.decision}" submitted for ${args.approval_id}. The host will validate the approver and notify the requesting chat.`,
+        },
+      ],
+    };
+  },
+);
+
 // --- Expense tools ---
 
 server.tool(

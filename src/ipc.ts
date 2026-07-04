@@ -8,6 +8,8 @@ import matter from 'gray-matter';
 import nodemailer from 'nodemailer';
 
 import {
+  APPROVAL_TIMEOUT_MINUTES,
+  APPROVER_SLUGS,
   DATA_DIR,
   FLAT_ACCESS,
   GROUPS_DIR,
@@ -18,6 +20,7 @@ import {
   SERVICE_USER,
   SHARED_KB_GROUP,
   TIMEZONE,
+  isGatedActionClass,
 } from './config.js';
 import { findChatFlow } from './chat-flows/registry.js';
 import { PersonCandidate, resolveDmTarget } from './integrations/dm-resolve.js';
@@ -46,6 +49,9 @@ import {
   isBotMessage,
   getRecentBotMessages,
   logKbAudit,
+  createPendingApproval,
+  getPendingApproval,
+  resolvePendingApproval,
 } from './db.js';
 import { parseAmount, formatAmount, validateAddress } from './safe/payout.js';
 import { resolveRecipient } from './safe/recipient.js';
@@ -1277,6 +1283,13 @@ export async function processTaskIpc(
     target?: string;
     text?: string;
     sourceJid?: string;
+    // For the reusable human-in-the-loop approval primitive.
+    action_class?: string;
+    summary?: string;
+    payload?: unknown;
+    dedupe_key?: string | null;
+    approver_hint?: string | null;
+    approval_id?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -2484,6 +2497,239 @@ export async function processTaskIpc(
       logger.info(
         { payoutId, requester: requesterUserId, amountRaw },
         'safe_payout_request: recorded',
+      );
+      break;
+    }
+
+    case 'request_approval': {
+      // Reusable human-in-the-loop gate. The agent proposes a consequential
+      // action { action_class, summary, payload }. If the class is gated, we
+      // record a pending row and post an approve/reject prompt to the control
+      // channel; an allowlisted human's reply later resolves it. If the class
+      // is NOT gated, we record nothing and tell the agent to proceed.
+      const actionClass = (data.action_class || '').trim();
+      const summary = (data.summary || '').trim();
+      if (!actionClass || !summary) {
+        logger.warn(
+          { sourceGroup, actionClass },
+          'request_approval: missing action_class or summary',
+        );
+        break;
+      }
+
+      const requesterCtx = readSenderContext(sourceGroup);
+      const requesterUserId = requesterCtx?.user_id ?? null;
+      const chatJid =
+        data.chatJid ||
+        findChatJidForGroup(registeredGroups, sourceGroup) ||
+        findMainGroupJid(registeredGroups) ||
+        '';
+
+      if (!isGatedActionClass(actionClass)) {
+        // Not gated → no approval needed. Echo an explicit "proceed" so the
+        // agent doesn't block; nothing is persisted.
+        if (chatJid) {
+          await deps.sendMessage(
+            chatJid,
+            `✅ No approval required for a ${actionClass} action — proceeding.`,
+          );
+        }
+        logger.info(
+          { actionClass, sourceGroup },
+          'request_approval: action class not gated — auto-proceed',
+        );
+        break;
+      }
+
+      const payloadJson =
+        data.payload === undefined || data.payload === null
+          ? null
+          : typeof data.payload === 'string'
+            ? data.payload
+            : JSON.stringify(data.payload);
+
+      const approval = createPendingApproval({
+        action_class: actionClass,
+        summary,
+        payload: payloadJson,
+        dedupe_key: data.dedupe_key ?? null,
+        chat_jid: chatJid,
+        group_folder: sourceGroup,
+        requested_by_user_id: requesterUserId,
+        approver_hint: data.approver_hint ?? null,
+        ttl_minutes: APPROVAL_TIMEOUT_MINUTES,
+      });
+
+      // Post the prompt to the control channel (or the requesting chat as a
+      // fallback when there's no registered main group, e.g. in tests).
+      const promptJid = findMainGroupJid(registeredGroups) || chatJid;
+      if (promptJid) {
+        const approverLine = data.approver_hint
+          ? `\nSuggested approver: ${data.approver_hint}`
+          : '';
+        const expiryLine = approval.expires_at
+          ? `\nExpires: ${approval.expires_at}`
+          : '';
+        await deps.sendMessage(
+          promptJid,
+          `🔐 *Approval needed* (\`${actionClass}\`)\n\n${summary}${approverLine}${expiryLine}\n\n` +
+            `Reply "approve ${approval.id}" or "reject ${approval.id} <reason>" ` +
+            `(or "revise ${approval.id} <notes>" to send it back with changes).`,
+        );
+      }
+      logger.info(
+        {
+          approvalId: approval.id,
+          actionClass,
+          requester: requesterUserId,
+          sourceGroup,
+          reused: approval.status === 'pending' && !!data.dedupe_key,
+        },
+        'request_approval: pending approval recorded, reviewers notified',
+      );
+      break;
+    }
+
+    case 'resolve_approval': {
+      // An allowlisted human's decision on a pending approval. `decision` is
+      // one of approve / reject / revise. Mirrors expense_decision: requires a
+      // real sender_context, enforces the (optional) narrower approver tier,
+      // rejects self-approval, and guards against double-resolution.
+      const approvalId = (data.approval_id || '').trim();
+      const decision = (data.decision || '').trim();
+      if (!approvalId || !['approve', 'reject', 'revise'].includes(decision)) {
+        logger.warn(
+          { sourceGroup, approvalId, decision },
+          'resolve_approval: missing/invalid approval_id or decision',
+        );
+        break;
+      }
+
+      const approval = getPendingApproval(approvalId);
+      const mainGroupJid = findMainGroupJid(registeredGroups);
+      if (!approval) {
+        logger.warn({ approvalId, sourceGroup }, 'resolve_approval: not found');
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `⚠️ No approval found with id ${approvalId}.`,
+          );
+        }
+        break;
+      }
+      if (approval.status !== 'pending') {
+        logger.warn(
+          { approvalId, status: approval.status },
+          'resolve_approval: already resolved',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `⚠️ Approval ${approvalId} is already ${approval.status}.`,
+          );
+        }
+        break;
+      }
+
+      // Fail closed: an approval decision must be traceable to a real
+      // allowlisted user (same reasoning as expense_decision / approve tasks).
+      const approverCtx = readSenderContext(sourceGroup);
+      if (!approverCtx) {
+        logger.warn(
+          { approvalId, sourceGroup },
+          'resolve_approval: rejected — no allowlisted sender identity',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            '⚠️ Resolving an approval requires an allowlisted sender.',
+          );
+        }
+        break;
+      }
+
+      // Optional narrower approver tier: when APPROVER_SLUGS is configured,
+      // only those KB people may approve. Empty → any allowlisted sender.
+      if (
+        APPROVER_SLUGS.length > 0 &&
+        !APPROVER_SLUGS.includes(approverCtx.user_id)
+      ) {
+        logger.warn(
+          { approvalId, user: approverCtx.user_id },
+          'resolve_approval: sender not in approver allowlist',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `⚠️ ${approverCtx.display_name || approverCtx.user_id} is not an approver for gated actions.`,
+          );
+        }
+        break;
+      }
+
+      // Self-approval guard: the proposer cannot approve their own request.
+      // (Reject / revise are allowed — a requester may withdraw or revise.)
+      if (
+        decision === 'approve' &&
+        approval.requested_by_user_id &&
+        approverCtx.user_id === approval.requested_by_user_id
+      ) {
+        logger.warn(
+          { approvalId, user: approverCtx.user_id },
+          'resolve_approval: requester cannot approve own request',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `You cannot approve your own request ${approvalId}. Another approver must review it.`,
+          );
+        }
+        break;
+      }
+
+      const nextStatus =
+        decision === 'approve'
+          ? 'approved'
+          : decision === 'reject'
+            ? 'rejected'
+            : 'revise';
+      const resolved = resolvePendingApproval(
+        approvalId,
+        nextStatus,
+        approverCtx.user_id,
+        data.reason ?? null,
+      );
+      if (!resolved) {
+        // Lost a race — another resolution landed first.
+        logger.warn(
+          { approvalId },
+          'resolve_approval: row no longer pending (race)',
+        );
+        break;
+      }
+
+      // Notify the requesting chat so the proposing agent (and humans) see the
+      // outcome. Reject/revise carry the notes back so the agent can act on
+      // them; approve tells the agent to proceed with the recorded payload.
+      const notifyJid = resolved.chat_jid || mainGroupJid;
+      if (notifyJid) {
+        const notesSuffix = data.reason ? ` — ${data.reason}` : '';
+        const verb =
+          decision === 'approve'
+            ? `✅ Approved (${resolved.action_class}). Proceeding${resolved.payload ? '' : ''}.`
+            : decision === 'reject'
+              ? `🚫 Rejected (${resolved.action_class}). The action will NOT be taken${notesSuffix}.`
+              : `✏️ Revision requested (${resolved.action_class})${notesSuffix}.`;
+        await deps.sendMessage(notifyJid, `${verb} [${approvalId}]`);
+      }
+      logger.info(
+        {
+          approvalId,
+          decision,
+          approver: approverCtx.user_id,
+          actionClass: resolved.action_class,
+        },
+        'resolve_approval: pending approval resolved',
       );
       break;
     }
