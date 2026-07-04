@@ -15,6 +15,7 @@ import {
   ENABLED_SKILLS,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  KB_DASHBOARD_URL,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
   PROFILE_DIR,
@@ -529,6 +530,14 @@ function buildContainerArgs(
   }
   if (NANOCLAW_SUBAGENT_MODEL) {
     args.push('-e', `NANOCLAW_SUBAGENT_MODEL=${NANOCLAW_SUBAGENT_MODEL}`);
+  }
+
+  // KB dashboard base URL (non-secret, from profile.config.json). The agent
+  // reads $KB_DASHBOARD_URL to render internal-doc citations as deep-links into
+  // the dashboard (`/doc/:category/:file`). See the `citations` container skill.
+  // Safe to pass by value — it's a public URL, not a credential.
+  if (KB_DASHBOARD_URL) {
+    args.push('-e', `KB_DASHBOARD_URL=${KB_DASHBOARD_URL}`);
   }
 
   // GitHub MCP server: enable the env passthrough WITHOUT putting the

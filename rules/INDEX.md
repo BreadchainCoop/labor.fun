@@ -8,6 +8,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 - **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md), [Voice & Register](identity/voice.md)
 - **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
 - **Cross-channel requests**: [Messaging](messaging/README.md)
+- **Answering from a specific doc/page/item**: [Citations](messaging/citations.md) — append a Sources block
 - **Task scheduling**: [Scheduling](scheduling/README.md)
 - **Identity questions**: [Identity & RBAC](identity/README.md)
 - **Transcript processing**: [Transcripts](transcripts/transcripts.md)
@@ -33,6 +34,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Close the Loop](knowledge-base/close-the-loop.md) | `rules/knowledge-base/close-the-loop.md` | Every reply — ensure actionable info is written to KB |
 | [Messaging](messaging/README.md) | `rules/messaging/` | Formatting output, cross-channel sends |
 | [Channel Formatting](messaging/channel-formatting.md) | `rules/messaging/channel-formatting.md` | Before sending any message |
+| [Citations](messaging/citations.md) | `rules/messaging/citations.md` | Any answer drawn from a specific KB doc, web page, or GitHub/Linear item — cite the source |
 | [Cross-Channel Send](messaging/cross-channel.md) | `rules/messaging/cross-channel.md` | When asked to message someone on another platform |
 | [Scheduling](scheduling/README.md) | `rules/scheduling/` | Task scheduling, scripts, cron |
 | [Escalation](escalation.md) | `rules/escalation.md` | A request needs deploy/operator access or a human decision the assistant can't make |

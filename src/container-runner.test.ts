@@ -15,6 +15,7 @@ vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  KB_DASHBOARD_URL: 'https://kb.test.example',
   NANOCLAW_MODEL: undefined,
   NANOCLAW_SUBAGENT_MODEL: undefined,
   PROFILE_DIR: '/tmp/nanoclaw-test-profile',
@@ -333,6 +334,16 @@ describe('container-runner GitHub PAT injection', () => {
     expect(args).not.toContain('GITHUB_PERSONAL_ACCESS_TOKEN');
     // No env override is applied at all when the token is absent
     expect(opts.env).toBeUndefined();
+  });
+
+  it('passes KB_DASHBOARD_URL by value in argv (non-secret, for citations)', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+
+    // Mocked config sets KB_DASHBOARD_URL — it should reach the container so the
+    // agent can deep-link internal-doc citations into the dashboard.
+    expect(args).toContain('KB_DASHBOARD_URL=https://kb.test.example');
   });
 });
 
