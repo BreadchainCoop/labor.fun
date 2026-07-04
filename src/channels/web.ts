@@ -27,9 +27,14 @@
  * and the visitor's jid is always built server-side from a validated siteId +
  * a regex-validated sessionId, so a client can never inject an arbitrary jid or
  * path.
+ *
+ * ANTI-ABUSE: a visitor picks their own sessionId, so a per-session rate
+ * limiter alone is trivially bypassed (mint a new sessionId every request).
+ * Two additional layers close that gap — see checkIpRateLimit() and
+ * registerSessionGroup() below for the detailed rationale.
  */
 import { createServer, Server, IncomingMessage } from 'http';
-import { randomUUID } from 'crypto';
+import { randomUUID, timingSafeEqual } from 'crypto';
 
 import { ASSISTANT_NAME } from '../config.js';
 import { storeOutboundMessage } from '../db.js';
@@ -51,6 +56,24 @@ const MAX_BODY_BYTES = 32 * 1024;
  * so the counter map can't grow unboundedly across many visitors. */
 const RATE_LIMIT_SESSIONS_MAX = 10_000;
 
+/** Cap on the number of tracked per-IP rate-limit buckets, LRU-evicted for the
+ * same reason as RATE_LIMIT_SESSIONS_MAX above. */
+const RATE_LIMIT_IPS_MAX = 10_000;
+
+/** Cap on the number of auto-registered web-visitor session groups kept alive
+ * at once. Forging fresh sessionIds is otherwise a free way to grow
+ * `registeredGroups` (in-memory) and the `registered_groups` SQLite table
+ * without bound, and each newly-registered jid also triggers a full container
+ * agent spawn on its first message. We cap it here and LRU-evict the oldest
+ * session — via opts.deregisterGroup(), which removes both the in-memory
+ * entry and the persisted row (folder/data untouched) — so an attacker can
+ * never accumulate more than this many registrations no matter how many
+ * distinct sessionIds they mint. This mirrors THREAD_ID_BY_ID_MAX /
+ * INBOUND_BY_ID_MAX, but additionally has to reach into the shared
+ * registeredGroups store (not just an in-module Map), since that's the
+ * resource actually being exhausted. */
+const RATE_LIMIT_SESSIONS_MAX_GROUPS = RATE_LIMIT_SESSIONS_MAX;
+
 /** SSE heartbeat interval — keeps idle streams alive through proxies/LBs. */
 const HEARTBEAT_MS = 25_000;
 
@@ -64,11 +87,24 @@ export interface WebChannelConfig {
   defaultGroup: string;
   rateLimitPerMin: number;
   maxMessageLength: number;
+  /** Requests/minute allowed from a single client IP, across ALL sessionIds.
+   * This is what actually stops a forged-session flood: a per-session limiter
+   * never engages if the attacker mints a fresh sessionId every request, but
+   * every request still comes from a finite number of source IPs. */
+  ipRateLimitPerMin: number;
+  /** Only honor X-Forwarded-For when explicitly told to trust the proxy in
+   * front of this server. Blindly trusting XFF lets any client self-report an
+   * arbitrary IP and bypass the per-IP limiter entirely. Off by default. */
+  trustProxy: boolean;
 }
 
 /** Minimal shape we need off an inbound request — duck-typed so tests can pass
- * a plain object without a real socket. */
-type ReqLike = Pick<IncomingMessage, 'method' | 'url' | 'headers' | 'on'>;
+ * a plain object without a real socket. `socket` is optional (and only the
+ * `remoteAddress` field is required) so tests can supply a fake socket, or
+ * omit it entirely for paths that don't exercise IP derivation. */
+type ReqLike = Pick<IncomingMessage, 'method' | 'url' | 'headers' | 'on'> & {
+  socket?: { remoteAddress?: string | null };
+};
 
 /** Minimal shape we need off a response — duck-typed for the same reason. */
 interface ResLike {
@@ -101,6 +137,22 @@ export class WebChannel implements Channel {
     string,
     { windowStart: number; count: number }
   >();
+
+  /** Per-IP fixed-window rate-limit counters — see WebChannelConfig.
+   * ipRateLimitPerMin for why this exists alongside the per-session limiter.
+   * Same fixed-window tradeoffs as rateWindows above, LRU-capped the same
+   * way. */
+  private ipRateWindows = new Map<
+    string,
+    { windowStart: number; count: number }
+  >();
+
+  /** Insertion-ordered set of auto-registered web-visitor session jids, used
+   * purely as an LRU index so we know which jid to evict (via
+   * opts.deregisterGroup) once RATE_LIMIT_SESSIONS_MAX_GROUPS is exceeded.
+   * The Map value is unused (Map preserves insertion order and gives O(1)
+   * delete+re-insert, which a Set doesn't expose as cleanly for reordering). */
+  private sessionJidOrder = new Map<string, true>();
 
   constructor(opts: ChannelOpts, cfg: WebChannelConfig) {
     this.opts = opts;
@@ -208,6 +260,8 @@ export class WebChannel implements Channel {
     }
     this.streams.clear();
     this.rateWindows.clear();
+    this.ipRateWindows.clear();
+    this.sessionJidOrder.clear();
     const server = this.server;
     this.server = null;
     if (server) {
@@ -277,15 +331,32 @@ export class WebChannel implements Channel {
       return;
     }
 
-    // 2. Site-key check. Never log the key value itself.
+    // 2. Per-IP rate limit. This runs before the site-key check, body
+    // parsing, group registration, or agent spawn: a per-session limiter
+    // alone never engages against an attacker who mints a fresh sessionId
+    // every request, but the source IP is much harder to launder at scale.
+    // Rejecting here means a forged-session flood gets a cheap 429 and never
+    // reaches registerSessionGroup() or onMessage().
+    const clientIp = this.resolveClientIp(req);
+    if (!this.checkIpRateLimit(clientIp)) {
+      logger.debug({ origin }, 'Web widget: per-IP rate limit exceeded');
+      this.sendJson(res, 429, { error: 'rate limit exceeded' }, origin);
+      return;
+    }
+
+    // 3. Site-key check. Never log the key value itself. Constant-time
+    // comparison: the key is a PUBLIC widget credential (embedded in the
+    // customer's page source), so a timing side-channel has no real payoff
+    // here — but we still compare it the same defensive way we'd compare any
+    // secret, rather than special-casing "this one doesn't need it".
     const siteKey = this.headerStr(req.headers['x-site-key']);
-    if (siteKey !== this.cfg.siteKey) {
+    if (!timingSafeEqualStr(siteKey, this.cfg.siteKey)) {
       logger.warn({ origin }, 'Web widget: invalid site key');
       this.sendJson(res, 401, { error: 'invalid site key' }, origin);
       return;
     }
 
-    // 3. Read + parse the (size-capped) JSON body.
+    // 4. Read + parse the (size-capped) JSON body.
     let body: unknown;
     try {
       body = await this.readJsonBody(req);
@@ -301,7 +372,7 @@ export class WebChannel implements Channel {
     }
     const parsed = (body ?? {}) as { sessionId?: unknown; text?: unknown };
 
-    // 4. Validate text.
+    // 5. Validate text.
     if (typeof parsed.text !== 'string') {
       this.sendJson(res, 400, { error: 'text is required' }, origin);
       return;
@@ -312,7 +383,7 @@ export class WebChannel implements Channel {
       return;
     }
 
-    // 5. Enforce max length — reject, never silently truncate.
+    // 6. Enforce max length — reject, never silently truncate.
     if (text.length > this.cfg.maxMessageLength) {
       this.sendJson(
         res,
@@ -326,7 +397,7 @@ export class WebChannel implements Channel {
       return;
     }
 
-    // 6. Resolve/validate the session id. A client-supplied id is untrusted:
+    // 7. Resolve/validate the session id. A client-supplied id is untrusted:
     // it must match the opaque-token shape or we mint a fresh one. Never used
     // to build a filesystem path — only the jid (via the fixed prefix + siteId).
     let sessionId: string;
@@ -340,13 +411,16 @@ export class WebChannel implements Channel {
       sessionId = randomUUID().replace(/-/g, '');
     }
 
-    // 7. Build the jid. NOTE: we deliberately use the NON-SECRET siteId here,
+    // 8. Build the jid. NOTE: we deliberately use the NON-SECRET siteId here,
     // never WEB_WIDGET_SITE_KEY — embedding the secret key in the jid would
     // leak it into logs, the DB, and KB folder names. The jid shape is
     // `web:<siteId>:<sessionId>`.
     const jid = `web:${this.cfg.siteId}:${sessionId}`;
 
-    // 8. Rate limit (fixed 60s window, per session).
+    // 9. Per-session rate limit (fixed 60s window). Kept in addition to the
+    // per-IP limit above: it still usefully throttles a single legitimate
+    // (or lazily-forged, reused-sessionId) visitor, while the per-IP check
+    // is what stops the "mint a new sessionId every request" bypass.
     if (!this.checkRateLimit(sessionId)) {
       logger.debug({ jid }, 'Web widget: rate limit exceeded');
       this.sendJson(res, 429, { error: 'rate limit exceeded' }, origin);
@@ -355,24 +429,11 @@ export class WebChannel implements Channel {
 
     const timestamp = new Date().toISOString();
 
-    // 9. Auto-register a group for a new visitor jid. All web sessions share
-    // ONE folder (WEB_WIDGET_DEFAULT_GROUP) — sessions are ephemeral/numerous
-    // and we don't want to spam GROUPS_DIR. registerGroup is keyed by jid, so
-    // each session jid gets its own registry entry all pointing at the same
-    // folder. requiresTrigger:false because talking to the widget is inherently
-    // a 1:1 conversation with the assistant (no @-mention needed).
-    if (!this.opts.registeredGroups()[jid]) {
-      const newGroup: RegisteredGroup = {
-        name: `Web visitor ${sessionId.slice(0, 8)}`,
-        folder: this.cfg.defaultGroup,
-        trigger: `@${ASSISTANT_NAME}`,
-        added_at: new Date().toISOString(),
-        requiresTrigger: false,
-      };
-      this.opts.registerGroup(jid, newGroup);
-    }
+    // 10. Auto-register a group for a new visitor jid, LRU-bounded — see
+    // registerSessionGroup() for why this can't grow unboundedly.
+    this.registerSessionGroup(jid, sessionId);
 
-    // 10. Deliver. onChatMetadata records discovery; onMessage feeds the loop.
+    // 11. Deliver. onChatMetadata records discovery; onMessage feeds the loop.
     this.opts.onChatMetadata(jid, timestamp, 'Web visitor', 'web', false);
     this.opts.onMessage(jid, {
       id: randomUUID(),
@@ -384,9 +445,13 @@ export class WebChannel implements Channel {
       is_from_me: false,
     });
 
-    logger.info({ jid, origin }, 'Web widget message received');
+    // Downgraded from info to debug: the jid embeds the session id, and the
+    // SSE path already treats jids as debug-only for the same reason (see
+    // handleStream below) — this brings the POST path in line with that
+    // stated policy.
+    logger.debug({ jid, origin }, 'Web widget message received');
 
-    // 11. Respond with the resolved session id (so a fresh client persists it)
+    // 12. Respond with the resolved session id (so a fresh client persists it)
     // and a message id. Plain JSON string fields only — never pre-rendered HTML.
     this.sendJson(res, 200, { sessionId, messageId: randomUUID() }, origin);
   }
@@ -403,12 +468,13 @@ export class WebChannel implements Channel {
     // headers, so for the GET stream we accept the site key via the
     // `siteKey` query param (falling back to the X-Site-Key header for
     // non-browser clients / proxies that can inject it). The site key is a
-    // shared PUBLIC widget key, not a user secret — but we still never log its
-    // value, and only ever compare it.
+    // shared PUBLIC widget key, not a user secret, so a timing side-channel
+    // has no real payoff here — but we still never log its value, and compare
+    // it the same defensive constant-time way as the POST path.
     const siteKey =
       this.parseQueryParam(req.url || '', 'siteKey') ||
       this.headerStr(req.headers['x-site-key']);
-    if (siteKey !== this.cfg.siteKey) {
+    if (!timingSafeEqualStr(siteKey, this.cfg.siteKey)) {
       logger.warn({ origin }, 'Web widget: invalid site key on stream');
       this.sendJson(res, 401, { error: 'invalid site key' }, origin);
       return;
@@ -481,28 +547,103 @@ export class WebChannel implements Channel {
   /** Fixed-window rate limiter. Returns true if the message is allowed.
    * Opportunistically evicts expired windows and LRU-caps the map size. */
   private checkRateLimit(sessionId: string): boolean {
-    const now = Date.now();
-    const windowMs = 60_000;
-    const existing = this.rateWindows.get(sessionId);
+    return checkFixedWindowLimit(
+      this.rateWindows,
+      sessionId,
+      this.cfg.rateLimitPerMin,
+      RATE_LIMIT_SESSIONS_MAX,
+    );
+  }
 
-    if (existing && now - existing.windowStart < windowMs) {
-      if (existing.count >= this.cfg.rateLimitPerMin) return false;
-      existing.count += 1;
-      // Refresh LRU position.
-      this.rateWindows.delete(sessionId);
-      this.rateWindows.set(sessionId, existing);
-      return true;
+  /** Per-IP fixed-window rate limiter — the layer that actually stops a
+   * forged-session flood, since it doesn't matter how many distinct
+   * sessionIds an attacker mints, they all still come from a finite set of
+   * source IPs. Same fixed-window mechanics and LRU cap as checkRateLimit. */
+  private checkIpRateLimit(ip: string): boolean {
+    return checkFixedWindowLimit(
+      this.ipRateWindows,
+      ip,
+      this.cfg.ipRateLimitPerMin,
+      RATE_LIMIT_IPS_MAX,
+    );
+  }
+
+  /** Derive the client IP for rate-limiting. By default this is the raw
+   * socket's remote address — the one thing a client cannot forge, since it's
+   * the actual TCP peer. X-Forwarded-For is only honored when
+   * WEB_WIDGET_TRUST_PROXY is explicitly set, because otherwise any client can
+   * set that header themselves and claim to be a different IP than they
+   * actually are, trivially defeating the limiter. When trusted, we take the
+   * FIRST entry (the original client, per the standard left-to-right
+   * append convention), not the last (which would be the nearest hop, e.g.
+   * our own trusted proxy). Falls back to the socket address if the header is
+   * absent even when trust-proxy is on (e.g. a direct health check). */
+  private resolveClientIp(req: ReqLike): string {
+    const socketAddr = req.socket?.remoteAddress || 'unknown';
+    if (!this.cfg.trustProxy) return socketAddr;
+    const xff = this.headerStr(req.headers['x-forwarded-for']);
+    if (!xff) return socketAddr;
+    const first = xff.split(',')[0]?.trim();
+    return first || socketAddr;
+  }
+
+  /** Auto-register a group for a new visitor jid, LRU-bounded to
+   * RATE_LIMIT_SESSIONS_MAX_GROUPS entries.
+   *
+   * DESIGN NOTE (Fix 1, part 2): before this change, EVERY novel jid — trivial
+   * to mint by forging a fresh sessionId — grew `registeredGroups` (in-memory)
+   * and inserted a permanent `registered_groups` SQLite row, neither capped,
+   * plus triggered a full container agent spawn on delivery. We keep
+   * per-session registration (rather than collapsing all visitors onto one
+   * shared jid) because that's what keeps SSE routing and per-visitor rate
+   * limiting working correctly — routing and checkRateLimit are keyed by jid/
+   * sessionId, and merging visitors onto one jid would cross-wire their
+   * conversations and rate-limit buckets. Instead we bound the *count* of
+   * live registrations: sessionJidOrder tracks insertion order, and once we
+   * exceed the cap we evict the single oldest entry via
+   * opts.deregisterGroup(), which removes BOTH the in-memory
+   * `registeredGroups` entry and the persisted `registered_groups` row
+   * (the shared folder/data itself is untouched, matching the "symmetric
+   * removal" contract deregisterGroup already documents and that
+   * discord.ts's DM-role-revocation path relies on). An evicted session's
+   * NEXT message simply re-registers it (paying one extra registration), so
+   * this cannot wedge a legitimate returning visitor — it only bounds how
+   * many can be live at once, which is exactly what stops unbounded growth
+   * from forged sessions. Because eviction runs synchronously before
+   * onMessage() below, an evicted-then-reused jid never spawns an agent
+   * without a corresponding live registration. */
+  private registerSessionGroup(jid: string, sessionId: string): void {
+    if (this.opts.registeredGroups()[jid]) {
+      // Already registered — refresh its LRU position so an active visitor
+      // isn't evicted ahead of idle ones.
+      if (this.sessionJidOrder.has(jid)) {
+        this.sessionJidOrder.delete(jid);
+        this.sessionJidOrder.set(jid, true);
+      }
+      return;
     }
 
-    // New or expired window.
-    this.rateWindows.delete(sessionId);
-    this.rateWindows.set(sessionId, { windowStart: now, count: 1 });
+    const newGroup: RegisteredGroup = {
+      name: `Web visitor ${sessionId.slice(0, 8)}`,
+      folder: this.cfg.defaultGroup,
+      trigger: `@${ASSISTANT_NAME}`,
+      added_at: new Date().toISOString(),
+      requiresTrigger: false,
+    };
+    this.opts.registerGroup(jid, newGroup);
+    this.sessionJidOrder.set(jid, true);
 
-    if (this.rateWindows.size > RATE_LIMIT_SESSIONS_MAX) {
-      const oldest = this.rateWindows.keys().next().value;
-      if (oldest !== undefined) this.rateWindows.delete(oldest);
+    if (this.sessionJidOrder.size > RATE_LIMIT_SESSIONS_MAX_GROUPS) {
+      const oldestJid = this.sessionJidOrder.keys().next().value;
+      if (oldestJid !== undefined) {
+        this.sessionJidOrder.delete(oldestJid);
+        this.opts.deregisterGroup(oldestJid);
+        logger.debug(
+          { evictedJid: oldestJid },
+          'Web widget: evicted oldest session registration (cap reached)',
+        );
+      }
     }
-    return true;
   }
 
   /** Read the request body with a hard size cap, then JSON.parse it. Rejects
@@ -581,6 +722,63 @@ function splitList(raw: string): string[] {
     .filter(Boolean);
 }
 
+/** Constant-time string comparison, length-guarded. `crypto.timingSafeEqual`
+ * throws if the two buffers differ in length, so we short-circuit that case
+ * ourselves rather than let it throw — a length mismatch is just "not equal",
+ * not an error. Also treats `undefined` (header/param absent) as "not equal"
+ * without ever comparing against `undefined` directly. Used for the site-key
+ * checks: the key is a PUBLIC widget credential (shipped in the customer's
+ * page source), so a timing side-channel has no real payoff today — but
+ * comparing it the same defensive, timing-safe way as any secret costs
+ * nothing and keeps the pattern safe-by-default if that ever changes. */
+function timingSafeEqualStr(
+  input: string | undefined,
+  expected: string,
+): boolean {
+  if (typeof input !== 'string') return false;
+  const a = Buffer.from(input, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/** Shared fixed-window rate limiter used for both per-session and per-IP
+ * limits. Fixed window (reset every 60s) is simpler than a sliding window;
+ * the tradeoff is it permits up to ~2x the nominal rate across a window
+ * boundary, which is fine for abuse control on a chat widget. `windows` is an
+ * insertion-ordered Map used as an LRU: `maxEntries` caps its size so an
+ * unbounded number of distinct keys (sessions OR forged IPs) can't grow it
+ * forever. */
+function checkFixedWindowLimit(
+  windows: Map<string, { windowStart: number; count: number }>,
+  key: string,
+  limitPerMin: number,
+  maxEntries: number,
+): boolean {
+  const now = Date.now();
+  const windowMs = 60_000;
+  const existing = windows.get(key);
+
+  if (existing && now - existing.windowStart < windowMs) {
+    if (existing.count >= limitPerMin) return false;
+    existing.count += 1;
+    // Refresh LRU position.
+    windows.delete(key);
+    windows.set(key, existing);
+    return true;
+  }
+
+  // New or expired window.
+  windows.delete(key);
+  windows.set(key, { windowStart: now, count: 1 });
+
+  if (windows.size > maxEntries) {
+    const oldest = windows.keys().next().value;
+    if (oldest !== undefined) windows.delete(oldest);
+  }
+  return true;
+}
+
 registerChannel('web', (opts: ChannelOpts) => {
   const env = readEnvFile([
     'WEB_WIDGET_ENABLED',
@@ -592,6 +790,8 @@ registerChannel('web', (opts: ChannelOpts) => {
     'WEB_WIDGET_RATE_LIMIT_PER_MIN',
     'WEB_WIDGET_MAX_MESSAGE_LENGTH',
     'WEB_WIDGET_HOST',
+    'WEB_WIDGET_IP_RATE_LIMIT_PER_MIN',
+    'WEB_WIDGET_TRUST_PROXY',
   ]);
   const get = (k: string): string => process.env[k] || env[k] || '';
 
@@ -626,6 +826,12 @@ registerChannel('web', (opts: ChannelOpts) => {
     defaultGroup: get('WEB_WIDGET_DEFAULT_GROUP') || 'web-visitors',
     rateLimitPerMin: Number(get('WEB_WIDGET_RATE_LIMIT_PER_MIN') || 20),
     maxMessageLength: Number(get('WEB_WIDGET_MAX_MESSAGE_LENGTH') || 4000),
+    ipRateLimitPerMin: Number(get('WEB_WIDGET_IP_RATE_LIMIT_PER_MIN') || 60),
+    // Off by default: X-Forwarded-For is only meaningful (and safe) when a
+    // trusted reverse proxy is known to set it, overwriting any client-
+    // supplied value. Without a trusted proxy in front, honoring it would let
+    // any client forge an arbitrary "source IP" and bypass the per-IP limiter.
+    trustProxy: get('WEB_WIDGET_TRUST_PROXY') === 'true',
   };
 
   return new WebChannel(opts, cfg);
