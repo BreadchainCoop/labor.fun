@@ -29,6 +29,7 @@ function setupTestKB() {
 title: Alice Adams
 visibility: private
 tags: [leadership]
+github_username: alice-gh
 ---
 
 # Alice Adams
@@ -138,6 +139,18 @@ describe('Allowlist Checks (flat model)', () => {
     expect(ctx!.user_id).toBe('alice');
     expect(ctx!.display_name).toBe('Alice Adams');
     expect(ctx!.tags).toEqual(['leadership']);
+  });
+
+  it('getSenderContext surfaces github_username when the KB file declares it', () => {
+    addIdentity('U_ALEX', 'slack', 'alice');
+    expect(getSenderContext('U_ALEX', 'slack')!.github_username).toBe(
+      'alice-gh',
+    );
+  });
+
+  it('getSenderContext omits github_username when the KB file has none', () => {
+    addIdentity('U_OPS', 'slack', 'ops');
+    expect(getSenderContext('U_OPS', 'slack')!.github_username).toBeUndefined();
   });
 
   it('getSenderContext returns undefined for unknown sender', () => {
