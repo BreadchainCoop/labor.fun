@@ -147,6 +147,87 @@ import {
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
 
+/**
+ * One resolved human sender in a processed batch, carrying the platform id the
+ * orchestrator used to resolve them. This platform id is the TRUSTED handle the
+ * host verifies an agent's per-decision claim against (see
+ * `resolveActorFromSenderContext` in ipc.ts) — the agent never gets to assert an
+ * approver identity by string; it can only point at a message/sender that the
+ * orchestrator already resolved from real platform data.
+ */
+export interface BatchSender {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+  platform_sender_id: string;
+}
+
+/**
+ * The sender_context.json payload written per run. The top-level
+ * `user_id`/`display_name`/`tags` preserve the historical single-sender shape
+ * (equal to the LAST resolved sender in the batch) so existing consumers that
+ * only need "some allowlisted human triggered this" (flat KB write allowlist,
+ * add_kb_user, etc.) keep working unchanged. `senders` is the full distinct
+ * roster used to disambiguate WHO issued a specific gated decision.
+ */
+export interface BatchSenderContext {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+  senders: BatchSender[];
+}
+
+/** Map a chat JID prefix to the platform key used in `user_identities`. */
+export function platformForChatJid(chatJid: string): string {
+  if (chatJid.startsWith('tg:')) return 'telegram';
+  if (chatJid.startsWith('slack:')) return 'slack';
+  return 'unknown';
+}
+
+/**
+ * Build the per-run sender context from the processed message batch. Resolves
+ * EACH distinct inbound sender (deduped by platform id, first-seen wins for
+ * display info) against the KB; unresolved (unknown/unallowlisted) senders are
+ * dropped exactly as the previous single-sender path dropped a null resolution.
+ * Returns null when nothing resolves (caller unlinks the file — fail closed).
+ *
+ * Pure and injectable (`resolve`) so it can be unit-tested without the KB.
+ */
+export function buildBatchSenderContext(
+  messages: NewMessage[],
+  platform: string,
+  resolve: (
+    platformId: string,
+    platform: string,
+  ) => { user_id: string; display_name: string; tags: string[] } | undefined,
+): BatchSenderContext | null {
+  const seen = new Set<string>();
+  const senders: BatchSender[] = [];
+  for (const m of messages) {
+    if (m.is_from_me || !m.sender || seen.has(m.sender)) continue;
+    const ctx = resolve(m.sender, platform);
+    if (!ctx) continue;
+    seen.add(m.sender);
+    senders.push({
+      user_id: ctx.user_id,
+      display_name: ctx.display_name,
+      tags: ctx.tags,
+      platform_sender_id: m.sender,
+    });
+  }
+  if (senders.length === 0) return null;
+  // Back-compat top-level identity == the LAST resolved sender in the batch,
+  // matching the previous "last message's sender" behavior for single-sender
+  // batches (the overwhelmingly common case).
+  const last = senders[senders.length - 1];
+  return {
+    user_id: last.user_id,
+    display_name: last.display_name,
+    tags: last.tags,
+    senders,
+  };
+}
+
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
@@ -548,17 +629,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // inherit that identity and pass allowlist gates (e.g. fetch_discord_history,
   // modify_kb_file). Fail closed: write when present, unlink when absent.
   const lastMsg = missedMessages[missedMessages.length - 1];
-  const senderCtx =
-    lastMsg && !lastMsg.is_from_me
-      ? getSenderContext(
-          lastMsg.sender,
-          chatJid.startsWith('tg:')
-            ? 'telegram'
-            : chatJid.startsWith('slack:')
-              ? 'slack'
-              : 'unknown',
-        )
-      : null;
+  // Resolve EVERY distinct sender in the batch, not just the last message's —
+  // otherwise an approve/decision command from one sender could be attributed
+  // to whoever happened to speak last, defeating the self-approval guard and
+  // the approver-tier check (see resolveActorFromSenderContext in ipc.ts).
+  const senderCtx = buildBatchSenderContext(
+    missedMessages,
+    platformForChatJid(chatJid),
+    getSenderContext,
+  );
   {
     const ipcInputDir = resolveGroupIpcPath(group.folder) + '/input';
     const senderCtxPath = path.join(ipcInputDir, 'sender_context.json');

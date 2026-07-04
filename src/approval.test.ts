@@ -17,6 +17,9 @@ import {
   resolvePendingApproval,
   expireStalePendingApprovals,
   setRegisteredGroup,
+  createExpense,
+  getExpense,
+  storeChatMetadata,
 } from './db.js';
 import { processTaskIpc, IpcDeps } from './ipc.js';
 import { RegisteredGroup } from './types.js';
@@ -48,6 +51,42 @@ function clearSenderContext(sourceGroup: string): void {
     'sender_context.json',
   );
   if (fs.existsSync(ctxPath)) fs.unlinkSync(ctxPath);
+}
+
+/**
+ * Write a MULTI-sender batch sender_context (the shape the orchestrator now
+ * produces when several people spoke in one run). Each entry carries the
+ * platform id the host verifies an `actor_sender_id` against. The top-level
+ * identity is the last roster entry (back-compat), matching the batch-last
+ * behavior that the finding-1 exploit abused.
+ */
+function writeBatchSenderContext(
+  sourceGroup: string,
+  senders: Array<{
+    user_id: string;
+    platform_sender_id: string;
+    display_name?: string;
+    tags?: string[];
+  }>,
+): void {
+  const inputDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'input');
+  fs.mkdirSync(inputDir, { recursive: true });
+  const norm = senders.map((s) => ({
+    user_id: s.user_id,
+    display_name: s.display_name ?? s.user_id,
+    tags: s.tags ?? [],
+    platform_sender_id: s.platform_sender_id,
+  }));
+  const last = norm[norm.length - 1];
+  fs.writeFileSync(
+    path.join(inputDir, 'sender_context.json'),
+    JSON.stringify({
+      user_id: last.user_id,
+      display_name: last.display_name,
+      tags: last.tags,
+      senders: norm,
+    }),
+  );
 }
 
 const MAIN_GROUP: RegisteredGroup = {
@@ -354,6 +393,216 @@ describe('resolve_approval lifecycle', () => {
       deps,
     );
     expect(sent.some((m) => m.text.includes('No approval found'))).toBe(true);
+  });
+});
+
+// --- Finding 1 (HIGH): approver identity must be verified against the batch
+// roster, not the batch-last sender. ---
+
+describe('resolve_approval — multi-sender batch identity verification', () => {
+  function seedApproval(requester = 'alice') {
+    return createPendingApproval({
+      action_class: GATED,
+      summary: 'merge PR #99',
+      payload: JSON.stringify({ pr: 99 }),
+      chat_jid: 'other@g.us',
+      group_folder: 'approval-test-other',
+      requested_by_user_id: requester,
+    });
+  }
+
+  it('EXPLOIT BLOCKED: proposer self-approves in a two-sender batch → rejected (no actor_sender_id)', async () => {
+    // Batch: Alice (proposer) spoke, then Bob (an approver) spoke last. The old
+    // code derived the approver from the batch-LAST sender (Bob), so Alice's
+    // self-approval of her OWN request passed the guard and was recorded as Bob.
+    const a = seedApproval('alice');
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    // Agent forwards the decision without disambiguating who approved.
+    await processTaskIpc(
+      { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    // Fail closed: ambiguous → still pending, nothing attributed to Bob.
+    expect(getPendingApproval(a.id)!.status).toBe('pending');
+    expect(getPendingApproval(a.id)!.resolved_by_user_id).toBeNull();
+    expect(sent.some((m) => m.text.includes("Couldn't tell who approved"))).toBe(
+      true,
+    );
+  });
+
+  it('EXPLOIT BLOCKED: even when actor_sender_id points at the proposer, self-approval is refused', async () => {
+    const a = seedApproval('alice');
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    // Agent (honestly or maliciously) names Alice as the approver — she IS the
+    // requester, so the self-approval guard must fire against the verified id.
+    await processTaskIpc(
+      {
+        type: 'resolve_approval',
+        approval_id: a.id,
+        decision: 'approve',
+        actor_sender_id: 'U_ALICE',
+      },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    expect(getPendingApproval(a.id)!.status).toBe('pending');
+    expect(sent.some((m) => m.text.includes('cannot approve your own'))).toBe(
+      true,
+    );
+  });
+
+  it('HAPPY PATH: actor_sender_id identifies the real third-party approver → approved and attributed to them', async () => {
+    const a = seedApproval('alice');
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    await processTaskIpc(
+      {
+        type: 'resolve_approval',
+        approval_id: a.id,
+        decision: 'approve',
+        actor_sender_id: 'U_BOB',
+      },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    const row = getPendingApproval(a.id)!;
+    expect(row.status).toBe('approved');
+    // Attributed to the VERIFIED approver (Bob), regardless of batch order.
+    expect(row.resolved_by_user_id).toBe('bob');
+  });
+
+  it('a non-matching actor_sender_id in a multi-sender batch fails closed', async () => {
+    const a = seedApproval('alice');
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    await processTaskIpc(
+      {
+        type: 'resolve_approval',
+        approval_id: a.id,
+        decision: 'approve',
+        actor_sender_id: 'U_SOMEONE_ELSE',
+      },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    expect(getPendingApproval(a.id)!.status).toBe('pending');
+  });
+
+  it('single-sender batch: actor_sender_id is unnecessary and approval works (back-compat)', async () => {
+    const a = seedApproval('alice');
+    // Only Bob spoke this batch → unambiguous, no actor_sender_id needed.
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    await processTaskIpc(
+      { type: 'resolve_approval', approval_id: a.id, decision: 'approve' },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    const row = getPendingApproval(a.id)!;
+    expect(row.status).toBe('approved');
+    expect(row.resolved_by_user_id).toBe('bob');
+  });
+});
+
+// The same misattribution defense applies to the pre-existing expense
+// self-approval guard (`expense_decision`).
+describe('expense_decision — multi-sender batch identity verification', () => {
+  function seedExpense(requester = 'alice') {
+    const id = 'exp-test-1';
+    // expenses.chat_jid has a FK to chats(jid) — seed the chat row first.
+    storeChatMetadata('other@g.us', '2024-01-01T00:00:00.000Z', 'Other');
+    createExpense({
+      id,
+      chat_jid: 'other@g.us',
+      requester_user_id: requester,
+      request_type: 'prospective',
+      amount_cents: 5000,
+      description: 'coffee for the offsite',
+      status: 'pending_approval',
+      created_at: '2024-01-01T00:00:00.000Z',
+    });
+    return id;
+  }
+
+  it('EXPLOIT BLOCKED: requester self-approves in a two-sender batch → refused', async () => {
+    const id = seedExpense('alice');
+    // Alice (requester) then Bob spoke; batch-last is Bob. Agent forwards the
+    // approve without an actor id → ambiguous → refused, expense unchanged.
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    await processTaskIpc(
+      { type: 'expense_decision', expense_id: id, decision: 'approve' },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    expect(getExpense(id)!.status).toBe('pending_approval');
+    expect(getExpense(id)!.approver_user_id).toBeNull();
+  });
+
+  it('EXPLOIT BLOCKED: actor_sender_id pointing at the requester still hits the self-approval guard', async () => {
+    const id = seedExpense('alice');
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    await processTaskIpc(
+      {
+        type: 'expense_decision',
+        expense_id: id,
+        decision: 'approve',
+        actor_sender_id: 'U_ALICE',
+      },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    expect(getExpense(id)!.status).toBe('pending_approval');
+    expect(
+      sent.some((m) => m.text.includes('cannot approve your own expense')),
+    ).toBe(true);
+  });
+
+  it('HAPPY PATH: a verified third-party approver decides → expense advances', async () => {
+    const id = seedExpense('alice');
+    writeBatchSenderContext('approval-test-main', [
+      { user_id: 'alice', platform_sender_id: 'U_ALICE' },
+      { user_id: 'bob', platform_sender_id: 'U_BOB' },
+    ]);
+    await processTaskIpc(
+      {
+        type: 'expense_decision',
+        expense_id: id,
+        decision: 'approve',
+        actor_sender_id: 'U_BOB',
+      },
+      'approval-test-main',
+      true,
+      deps,
+    );
+    const exp = getExpense(id)!;
+    // prospective + approve → receipt_pending, attributed to Bob.
+    expect(exp.status).toBe('receipt_pending');
+    expect(exp.approver_user_id).toBe('bob');
   });
 });
 
