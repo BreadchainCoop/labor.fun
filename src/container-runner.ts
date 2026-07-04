@@ -201,9 +201,26 @@ function buildVolumeMounts(
     // system" (code 125) and every message is dropped. Ensure an empty stub
     // mountpoint exists so the writable store bind can mount over it.
     // Idempotent, and a no-op in the legacy root layout (STORE_DIR == stub).
-    const storeMountpoint = path.join(projectRoot, 'store');
-    if (!fs.existsSync(storeMountpoint)) {
-      fs.mkdirSync(storeMountpoint, { recursive: true });
+    //
+    // This stub is a Docker nested-bind-mount workaround only. Under
+    // CONTAINER_RUNTIME=kubernetes the store is a separate volumeMount (no
+    // nesting), so no stub is needed — and projectRoot is the read-only image
+    // dir (/app), NOT writable by the non-root orchestrator user, so creating
+    // it would throw EACCES and drop every run. Skip it under kubernetes, and
+    // treat a failure elsewhere as non-fatal (best-effort) rather than
+    // crashing the run.
+    if (CONTAINER_RUNTIME !== 'kubernetes') {
+      const storeMountpoint = path.join(projectRoot, 'store');
+      if (!fs.existsSync(storeMountpoint)) {
+        try {
+          fs.mkdirSync(storeMountpoint, { recursive: true });
+        } catch (err) {
+          logger.warn(
+            { storeMountpoint, err },
+            'Could not create project-root store stub mountpoint (continuing)',
+          );
+        }
+      }
     }
     mounts.push({
       hostPath: STORE_DIR,
