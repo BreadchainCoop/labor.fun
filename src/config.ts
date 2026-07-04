@@ -3,11 +3,22 @@ import path from 'path';
 
 import { readEnvFile } from './env.js';
 import {
+  type McpServerConfig,
+  validateMcpServerConfigs,
+} from './mcp-servers.js';
+import {
   PROJECT_ROOT,
   loadProfileConfig,
   resolveProfileDir,
 } from './profile.js';
 import { isValidTimezone } from './timezone.js';
+
+export type {
+  McpServerConfig,
+  McpServerHttpConfig,
+  McpServerStdioConfig,
+} from './mcp-servers.js';
+export { mcpServerEnvVarNames } from './mcp-servers.js';
 
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
@@ -80,6 +91,11 @@ const envConfig = readEnvFile([
   'NOTION_ROOT_PAGE_IDS',
   'NOTION_DATABASE_IDS',
   'GOOGLE_DRIVE_FOLDER_IDS',
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md). A JSON array of MCP
+  // server configs, additive to the active profile's `mcpServers`. Lets a
+  // hosted/multi-tenant install inject servers without editing profile files.
+  // Holds only NAMES of env vars for secrets, never secret values.
+  'MCP_SERVERS',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -121,6 +137,41 @@ export const ENABLED_SKILLS: string[] = (() => {
     : [];
   return Array.from(new Set([...fromProfile, ...fromEnv]));
 })();
+
+// --- Generic remote-MCP bridge (docs/MCP-SERVERS.md) ---
+// The configured MCP servers (remote/HTTP or local/stdio) to wire into every
+// agent container, beyond the built-ins (nanoclaw, gws, github, linear).
+// Merged from the active profile's `mcpServers` and the `MCP_SERVERS` env var
+// (a JSON array, appended after the profile's list — for hosted/multi-tenant
+// injection). Validated loudly at startup: a bad name / shape / reserved
+// collision throws rather than silently disabling the integration. The
+// non-secret shape (name/type/url/command/args + env var NAMES) is threaded to
+// the container via ContainerInput; secret VALUES flow only through the
+// container's env (see container-runner.ts). See src/mcp-servers.ts.
+export const MCP_SERVERS: McpServerConfig[] = (() => {
+  const fromProfile = Array.isArray(PROFILE.mcpServers)
+    ? PROFILE.mcpServers
+    : [];
+  const envRaw = envVal('MCP_SERVERS');
+  let fromEnv: unknown[] = [];
+  if (envRaw && envRaw.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(envRaw);
+    } catch (err) {
+      throw new Error(
+        `MCP_SERVERS env var is not valid JSON: ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error('MCP_SERVERS env var must be a JSON array.');
+    }
+    fromEnv = parsed;
+  }
+  return validateMcpServerConfigs([...fromProfile, ...fromEnv]);
+})();
+
 // --- Human-in-the-loop approval gate (reusable primitive) ---
 // Which classes of consequential action require a human approval before the
 // agent proceeds. Declared in config/rules, never hardcoded per-op. Merged from

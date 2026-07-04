@@ -25,6 +25,8 @@ import {
   K8S_VOLUME_MODE,
   K8S_DATA_PVC_NAME,
   KB_DASHBOARD_URL,
+  MCP_SERVERS,
+  mcpServerEnvVarNames,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
   PROFILE_DIR,
@@ -51,6 +53,7 @@ import {
 } from './container-runtime-k8s.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
+import type { McpServerConfig } from './mcp-servers.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -142,6 +145,15 @@ export interface ContainerInput {
    * usual 'Container exited with error'. Unset = current behavior.
    */
   expectExternalStop?: boolean;
+  /**
+   * Config-driven MCP servers (generic remote-MCP bridge). The NON-SECRET
+   * shape (name/type/url/command/args + env var NAMES) is threaded to the
+   * container via this stdin-JSON payload; the referenced secret VALUES flow
+   * separately through the container's env (docker `-e NAME` passthrough /
+   * kubernetes resolved pod env — see buildContainerArgs / buildK8sEnvVars).
+   * Sourced from MCP_SERVERS in config.ts. See docs/MCP-SERVERS.md.
+   */
+  mcpServers?: McpServerConfig[];
 }
 
 export interface ContainerOutput {
@@ -458,6 +470,31 @@ function getLinearApiKey(): string | undefined {
 }
 
 /**
+ * Resolve the env vars referenced by the configured generic MCP servers
+ * (bearerEnvVar / headerEnvVars / stdio envVars — see docs/MCP-SERVERS.md) to
+ * their real values, reading from .env (with process.env fallback) exactly like
+ * getGithubToken()/getLinearApiKey(). Only NAMES that resolve to a non-empty
+ * value are returned; unset ones are omitted (the corresponding server then
+ * stays unloaded inside the container, same gating as hasLinear).
+ *
+ * Same docker-vs-kubernetes distinction as the other secret getters: the docker
+ * path passes only the NAME (`-e NAME`) so values stay out of argv; the
+ * kubernetes path embeds the resolved value in the pod spec (redacted from the
+ * debug log by redactSecretsInArgs).
+ */
+function getMcpServerEnvVars(): Record<string, string> {
+  const names = mcpServerEnvVarNames(MCP_SERVERS);
+  if (names.length === 0) return {};
+  const fromFile = readEnvFile(names);
+  const out: Record<string, string> = {};
+  for (const name of names) {
+    const value = fromFile[name] || process.env[name];
+    if (value) out[name] = value;
+  }
+  return out;
+}
+
+/**
  * Redacts known secret values (GitHub PAT, Linear API key) out of a joined
  * argv string before it's written to the debug log. No-op for the docker
  * backend (those values never appear in argv there); needed for the
@@ -473,6 +510,12 @@ function redactSecretsInArgs(joined: string): string {
   const linearApiKey = getLinearApiKey();
   if (linearApiKey) {
     result = result.split(linearApiKey).join('***REDACTED***');
+  }
+  // Generic remote-MCP bridge: the kubernetes pod spec embeds every configured
+  // MCP server's referenced secret value (docs/MCP-SERVERS.md) — scrub them all
+  // out of the logged argv, same as the github/linear tokens above.
+  for (const value of Object.values(getMcpServerEnvVars())) {
+    result = result.split(value).join('***REDACTED***');
   }
   // The kubernetes pod spec embeds the run-tagged auth placeholder, which
   // carries CREDENTIAL_PROXY_AUTH_TOKEN when set — see composeAuthPlaceholder.
@@ -661,6 +704,14 @@ function buildContainerArgs(
     args.push('-e', 'LINEAR_API_KEY');
   }
 
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md): pass through, by NAME
+  // only, every env var referenced by a configured MCP server whose value is
+  // set. Same secret-safe pattern as Linear/GitHub — the value comes from the
+  // spawned runtime's process env (populated in runContainerAgent), never argv.
+  for (const name of Object.keys(getMcpServerEnvVars())) {
+    args.push('-e', name);
+  }
+
   // Google Workspace MCP: only the in-container path goes in argv (not a
   // secret); actual credentials live in the read-only mounted file. The
   // env var presence is what flips hasGoogleWorkspace inside agent-runner.
@@ -770,6 +821,13 @@ function buildK8sEnvVars(
   if (linearApiKey) {
     env.push({ name: 'LINEAR_API_KEY', value: linearApiKey });
   }
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md): resolve each configured
+  // server's referenced secret into the pod spec's env list (kubectl run has no
+  // name-only passthrough). redactSecretsInArgs strips these values back out
+  // before the argv is logged.
+  for (const [name, value] of Object.entries(getMcpServerEnvVars())) {
+    env.push({ name, value });
+  }
   if (resolveGoogleWorkspaceCredsPath()) {
     env.push({
       name: 'GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE',
@@ -862,6 +920,14 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md): thread the configured MCP
+  // servers' NON-SECRET shape into the container via the stdin-JSON payload so
+  // agent-runner can build the SDK `mcpServers` map + allowlist. The referenced
+  // secret VALUES travel separately through the container env (see
+  // buildContainerArgs / buildK8sEnvVars / extraEnv below). Injected here from
+  // config so no call site can forget it; an explicit input.mcpServers wins.
+  input = { ...input, mcpServers: input.mcpServers ?? MCP_SERVERS };
+
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
@@ -927,6 +993,12 @@ export async function runContainerAgent(
       }
       if (linearApiKey) {
         extraEnv.LINEAR_API_KEY = linearApiKey;
+      }
+      // Generic remote-MCP bridge (docs/MCP-SERVERS.md): inject each configured
+      // server's referenced secret VALUE into the runtime's process env,
+      // matching the bare `-e NAME` passthrough flags in buildContainerArgs.
+      for (const [name, value] of Object.entries(getMcpServerEnvVars())) {
+        extraEnv[name] = value;
       }
     }
     const container = spawn(runtimeBin, containerArgs, {

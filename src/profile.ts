@@ -21,6 +21,56 @@ import { logger } from './logger.js';
  * `LABOR_PROFILE`, else the single non-example profile present, else the repo
  * root itself (legacy/test layout with groups/ store/ data/ at the root).
  */
+
+/**
+ * A remote/HTTP MCP server (e.g. Zapier, Jira, Confluence, Stripe, Notion,
+ * PagerDuty official hosted MCP servers). Connected over streamable HTTP; no
+ * package is bundled into the container. Auth is a Bearer token and/or custom
+ * headers, each sourced from a NAMED environment variable at request time —
+ * the secret value NEVER appears in this config, only the env var's name.
+ */
+export interface McpServerHttpConfig {
+  /**
+   * Object key in the SDK `mcpServers` map AND the `mcp__<name>__*` tool
+   * allowlist token. Must match /^[a-z0-9_-]+$/ and not collide with a
+   * built-in (nanoclaw, gws, github, linear).
+   */
+  name: string;
+  type: 'http';
+  /** Streamable-HTTP endpoint, e.g. https://mcp.zapier.com/api/mcp/... */
+  url: string;
+  /** Env var name whose value is sent as `Authorization: Bearer <value>`. */
+  bearerEnvVar?: string;
+  /**
+   * Custom headers: map of header name -> env var NAME whose value becomes
+   * that header. Values are resolved from the env at request time, never here.
+   */
+  headerEnvVars?: Record<string, string>;
+}
+
+/**
+ * A local/stdio MCP server: a command the container spawns and speaks MCP to
+ * over stdio. Use for MCP servers distributed as a CLI/package rather than a
+ * hosted endpoint.
+ */
+export interface McpServerStdioConfig {
+  /** Same rules as the HTTP variant's `name`. */
+  name: string;
+  type: 'stdio';
+  /** Executable to spawn (must be present in the container image/PATH). */
+  command: string;
+  /** Arguments passed to the command. */
+  args?: string[];
+  /**
+   * Env var NAMES (not values) to pass through to this server's process. The
+   * server is only loaded when EVERY listed var is set; omit/empty for a
+   * server that needs no secret.
+   */
+  envVars?: string[];
+}
+
+export type McpServerConfig = McpServerHttpConfig | McpServerStdioConfig;
+
 export interface ProfileConfig {
   /** Display name the agent answers to (e.g. "Breadbrich Engels"). */
   assistantName: string;
@@ -119,6 +169,22 @@ export interface ProfileConfig {
     /** Safe{Wallet} UI base, used to build a "confirm in your wallet" link. */
     safeWalletBaseUrl?: string;
   };
+  /**
+   * Additional MCP servers to wire into every agent container, beyond the
+   * built-in ones (nanoclaw, gws, github, linear). Config-driven so an org can
+   * add Zapier (30k+ actions across 9k apps), Jira/Confluence, Stripe, Notion,
+   * PagerDuty, etc. with ZERO framework code changes. Each entry is either a
+   * remote/HTTP server or a local/stdio server. See docs/MCP-SERVERS.md.
+   *
+   * `name` becomes both the `mcpServers` object key and the `mcp__<name>__*`
+   * tool-allowlist token — must match /^[a-z0-9_-]+$/. Secret values are NEVER
+   * placed here; only the NAME of an env var to read at request time
+   * (bearerEnvVar / headerEnvVars / envVars). Invalid entries are rejected
+   * loudly at startup (see validateMcpServerConfigs in config.ts) rather than
+   * silently dropped — a silently-dropped entry looks like a working
+   * integration that mysteriously exposes no tools.
+   */
+  mcpServers?: McpServerConfig[];
 }
 
 const DEFAULTS: ProfileConfig = {

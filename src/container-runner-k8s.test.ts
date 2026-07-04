@@ -10,31 +10,51 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 // 'kubernetes' — this file exercises the k8s dispatch branch of
 // buildSpawnCommand (container-runner.ts) end to end via runContainerAgent,
 // without a live cluster (spawn itself is mocked).
-vi.mock('./config.js', () => ({
-  AGENT_CONTAINER_CPUS: '2',
-  AGENT_CONTAINER_MEMORY: '2g',
-  AGENT_CONTAINER_PIDS_LIMIT: '',
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
-  CONTAINER_MAX_OUTPUT_SIZE: 10485760,
-  CONTAINER_RUNTIME: 'kubernetes',
-  CONTAINER_TIMEOUT: 1800000,
-  CREDENTIAL_PROXY_PORT: 3001,
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
-  IDLE_TIMEOUT: 1800000,
-  K8S_DATA_PVC_NAME: 'nanoclaw-data',
-  K8S_NAMESPACE: 'tenant-acme',
-  K8S_NODE_NAME: 'node-1',
-  K8S_POD_IP: '10.0.0.5',
-  K8S_VOLUME_MODE: 'hostPath',
-  KB_DASHBOARD_URL: '',
-  NANOCLAW_MODEL: undefined,
-  NANOCLAW_SUBAGENT_MODEL: undefined,
-  PROFILE_DIR: '/tmp/nanoclaw-test-profile',
-  SHARED_KB_GROUP: 'slack_main',
-  STORE_DIR: '/tmp/nanoclaw-test-profile/store',
-  TIMEZONE: 'America/Los_Angeles',
-}));
+vi.mock('./config.js', async () => {
+  // Real (deps-free) env-var-name resolver so container-runner's MCP env
+  // plumbing runs its actual logic; MCP_SERVERS defaults to [] and is
+  // overridden per-test via setMcpServers() for the generic-bridge cases.
+  const { mcpServerEnvVarNames } =
+    await vi.importActual<typeof import('./mcp-servers.js')>(
+      './mcp-servers.js',
+    );
+  return {
+    AGENT_CONTAINER_CPUS: '2',
+    AGENT_CONTAINER_MEMORY: '2g',
+    AGENT_CONTAINER_PIDS_LIMIT: '',
+    CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+    CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+    CONTAINER_RUNTIME: 'kubernetes',
+    CONTAINER_TIMEOUT: 1800000,
+    CREDENTIAL_PROXY_PORT: 3001,
+    DATA_DIR: '/tmp/nanoclaw-test-data',
+    GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+    IDLE_TIMEOUT: 1800000,
+    K8S_DATA_PVC_NAME: 'nanoclaw-data',
+    K8S_NAMESPACE: 'tenant-acme',
+    K8S_NODE_NAME: 'node-1',
+    K8S_POD_IP: '10.0.0.5',
+    K8S_VOLUME_MODE: 'hostPath',
+    KB_DASHBOARD_URL: '',
+    NANOCLAW_MODEL: undefined,
+    NANOCLAW_SUBAGENT_MODEL: undefined,
+    PROFILE_DIR: '/tmp/nanoclaw-test-profile',
+    SHARED_KB_GROUP: 'slack_main',
+    STORE_DIR: '/tmp/nanoclaw-test-profile/store',
+    TIMEZONE: 'America/Los_Angeles',
+    get MCP_SERVERS() {
+      return mockMcpServers;
+    },
+    mcpServerEnvVarNames,
+  };
+});
+
+// Mutable holder so individual tests can inject configured MCP servers into the
+// mocked config without re-mocking the module. Reset in beforeEach.
+let mockMcpServers: unknown[] = [];
+function setMcpServers(servers: unknown[]): void {
+  mockMcpServers = servers;
+}
 
 vi.mock('./logger.js', () => ({
   logger: {
@@ -161,10 +181,12 @@ describe('container-runner Kubernetes dispatch (CONTAINER_RUNTIME=kubernetes)', 
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
     vi.mocked(spawn).mockClear();
+    setMcpServers([]);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.ZAPIER_MCP_TOKEN;
   });
 
   it('spawns kubectl instead of docker', async () => {
@@ -232,5 +254,71 @@ describe('container-runner Kubernetes dispatch (CONTAINER_RUNTIME=kubernetes)', 
     } finally {
       delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
     }
+  });
+
+  describe('generic remote-MCP bridge', () => {
+    it('resolves a configured MCP server env var into the pod spec env, and redacts it from the logged argv', async () => {
+      setMcpServers([
+        {
+          name: 'zapier',
+          type: 'http',
+          url: 'https://mcp.zapier.com/api/mcp/abc',
+          bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+        },
+      ]);
+      process.env.ZAPIER_MCP_TOKEN = 'zapier-secret-value';
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const [, args] = lastSpawnCall();
+      const overrides = JSON.parse(args[args.indexOf('--overrides') + 1]);
+      const env = overrides.spec.containers[0].env as Array<{
+        name: string;
+        value: string;
+      }>;
+      const tokenEnv = env.find((e) => e.name === 'ZAPIER_MCP_TOKEN');
+      expect(tokenEnv?.value).toBe('zapier-secret-value');
+
+      // The logged (debug) argv is a separate, redacted rendering built by
+      // redactSecretsInArgs — assert the secret value never lands there.
+      const { logger } = await import('./logger.js');
+      const debugCalls = vi.mocked(logger.debug).mock.calls;
+      const loggedText = JSON.stringify(debugCalls);
+      expect(loggedText).not.toContain('zapier-secret-value');
+    });
+
+    it('omits the server from the pod env and passes no --overrides env entry when its env var is unset', async () => {
+      setMcpServers([
+        {
+          name: 'zapier',
+          type: 'http',
+          url: 'https://mcp.zapier.com/api/mcp/abc',
+          bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+        },
+      ]);
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const [, args] = lastSpawnCall();
+      const overrides = JSON.parse(args[args.indexOf('--overrides') + 1]);
+      const env = overrides.spec.containers[0].env as Array<{
+        name: string;
+        value: string;
+      }>;
+      expect(env.find((e) => e.name === 'ZAPIER_MCP_TOKEN')).toBeUndefined();
+    });
+
+    it('injects mcpServers into the stdin-JSON payload written to the container process', async () => {
+      const configured = [
+        {
+          name: 'zapier',
+          type: 'http' as const,
+          url: 'https://mcp.zapier.com/api/mcp/abc',
+          bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+        },
+      ];
+      setMcpServers(configured);
+      const writeSpy = vi.spyOn(fakeProc.stdin, 'write');
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const written = writeSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(written);
+      expect(parsed.mcpServers).toEqual(configured);
+    });
   });
 });
