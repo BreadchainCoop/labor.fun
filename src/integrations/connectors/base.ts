@@ -32,6 +32,22 @@ import { GROUPS_DIR, SHARED_KB_GROUP } from '../../config.js';
 import { getRouterState, setRouterState } from '../../db.js';
 import { logger } from '../../logger.js';
 
+/** The KB's document-visibility levels (see rules/access-control/privacy-policy.md). */
+export type ConnectorVisibility = 'open' | 'restricted' | 'private';
+
+/**
+ * Default visibility for connector-synced docs when a connector doesn't set
+ * one explicitly. Synced docs mirror an EXTERNAL source (Notion, Drive, …)
+ * whose own access controls the KB cannot see or enforce — defaulting to
+ * `open` would flatten whatever confidentiality the upstream doc had and
+ * expose it to every allowlisted user and to citations. `restricted` is the
+ * least-private KB level that is still NOT world-open: per
+ * rules/access-control/privacy-policy.md it is surfaced only on direct
+ * request, never folded into summaries/channel-wide updates, which is the
+ * right default for "we don't actually know how sensitive this is."
+ */
+export const DEFAULT_CONNECTOR_VISIBILITY: ConnectorVisibility = 'restricted';
+
 /** A single document pulled from an external source, ready to write to the KB. */
 export interface ConnectorDoc {
   /**
@@ -55,8 +71,14 @@ export interface ConnectorDoc {
   updatedAt?: string;
   /** Extra source-specific frontmatter (e.g. notion_id, drive_folder). */
   extraFrontmatter?: Record<string, unknown>;
-  /** Default `open`; a connector may down-scope a doc to `restricted`/`private`. */
-  visibility?: 'open' | 'restricted' | 'private';
+  /**
+   * Defaults to `restricted` (see `DEFAULT_CONNECTOR_VISIBILITY`) — synced
+   * docs come from an external source whose own ACLs the KB has no visibility
+   * into, so they must NOT be flattened to world-`open` by default. A
+   * connector may override its default (typically via an env var read with
+   * `readEnvFile` inside the connector module) or set this per-doc.
+   */
+  visibility?: ConnectorVisibility;
   /** Extra tags to add alongside the automatic `connector`/`<source>-synced`. */
   tags?: string[];
 }
@@ -236,7 +258,10 @@ export function connectorFrontmatter(
     // Standard KB frontmatter so RBAC + the doc-format rules apply uniformly.
     created_by: `${source}-connector`,
     created_at: (doc.updatedAt ?? syncedAt).slice(0, 10),
-    visibility: doc.visibility ?? 'open',
+    // Not-world-open by default — see DEFAULT_CONNECTOR_VISIBILITY. A
+    // connector sets `doc.visibility` explicitly (its own env-configurable
+    // default, or a per-doc value); this fallback only fires if it didn't.
+    visibility: doc.visibility ?? DEFAULT_CONNECTOR_VISIBILITY,
     editable_by: 'admins',
     tags: [...new Set(baseTags)],
     // Reconcile marker — files older than the run's syncStart are swept.

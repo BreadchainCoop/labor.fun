@@ -32,19 +32,44 @@ import {
 import { readEnvFile } from '../../env.js';
 import { logger } from '../../logger.js';
 
-import { escapeHtml } from './base.js';
-import type { Connector, ConnectorContext, ConnectorDoc } from './base.js';
+import { DEFAULT_CONNECTOR_VISIBILITY, escapeHtml } from './base.js';
+import type {
+  Connector,
+  ConnectorContext,
+  ConnectorDoc,
+  ConnectorVisibility,
+} from './base.js';
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 /** Max depth we recurse into block children (toggles / list items). */
 const MAX_BLOCK_DEPTH = 3;
 
-const envCache = readEnvFile(['NOTION_API_KEY']);
+const envCache = readEnvFile(['NOTION_API_KEY', 'NOTION_DEFAULT_VISIBILITY']);
 
 /** Read the Notion integration token (process.env wins over .env). Never log it. */
 export function getNotionToken(): string | null {
   return process.env.NOTION_API_KEY || envCache.NOTION_API_KEY || null;
+}
+
+const VALID_VISIBILITIES: ConnectorVisibility[] = [
+  'open',
+  'restricted',
+  'private',
+];
+
+/**
+ * Default visibility for docs this connector syncs. Overridable via
+ * `NOTION_DEFAULT_VISIBILITY` (process.env wins over `.env`); falls back to
+ * the framework default (`restricted`, see base.ts) when unset or set to an
+ * unrecognized value — never silently widens access on a typo.
+ */
+export function getNotionDefaultVisibility(): ConnectorVisibility {
+  const raw =
+    process.env.NOTION_DEFAULT_VISIBILITY || envCache.NOTION_DEFAULT_VISIBILITY;
+  return VALID_VISIBILITIES.includes(raw as ConnectorVisibility)
+    ? (raw as ConnectorVisibility)
+    : DEFAULT_CONNECTOR_VISIBILITY;
 }
 
 /** Thrown on a non-2xx Notion API response. Mirrors `GitHubProjectsError`. */
@@ -393,6 +418,9 @@ export function pageToDoc(
     sourceUrl: page.url ?? `https://www.notion.so/${page.id.replace(/-/g, '')}`,
     markdown,
     updatedAt: page.last_edited_time,
+    // Not-world-open by default (see base.ts); overridable via
+    // NOTION_DEFAULT_VISIBILITY.
+    visibility: getNotionDefaultVisibility(),
     extraFrontmatter: {
       notion_id: page.id,
       notion_parent: parentId,

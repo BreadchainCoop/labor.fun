@@ -35,6 +35,7 @@ import {
   loadGoogleAccessToken,
   GoogleDriveError,
   googleDriveConnector,
+  getGoogleDriveDefaultVisibility,
   type DocsDocument,
 } from './google-drive.js';
 import type { ConnectorContext } from './base.js';
@@ -210,7 +211,9 @@ describe('googleDocToMarkdown', () => {
     const md = googleDocToMarkdown({
       body: {
         content: [
-          { paragraph: { elements: [{ textRun: { content: 'a<b && c>d\n' } }] } },
+          {
+            paragraph: { elements: [{ textRun: { content: 'a<b && c>d\n' } }] },
+          },
         ],
       },
     });
@@ -285,6 +288,55 @@ describe('driveFileToConnectorDoc', () => {
     const doc = driveFileToConnectorDoc({ id: 'X9', name: '' }, 'F1', '');
     expect(doc.title).toBe('(untitled)');
     expect(doc.sourceUrl).toBe('https://docs.google.com/document/d/X9/edit');
+  });
+
+  it('defaults synced docs to a non-open visibility', () => {
+    const doc = driveFileToConnectorDoc({ id: 'X9', name: 'n' }, 'F1', '');
+    expect(doc.visibility).toBe('restricted');
+    expect(doc.visibility).not.toBe('open');
+  });
+});
+
+// --- Default visibility (Fix 2: don't flatten upstream ACLs to open) ---
+
+describe('getGoogleDriveDefaultVisibility', () => {
+  afterEach(() => {
+    delete process.env.GOOGLE_DRIVE_DEFAULT_VISIBILITY;
+    readEnvFileMock.mockReturnValue({});
+  });
+
+  it('defaults to restricted when unset', () => {
+    expect(getGoogleDriveDefaultVisibility()).toBe('restricted');
+  });
+
+  it('is overridable via GOOGLE_DRIVE_DEFAULT_VISIBILITY in .env', () => {
+    readEnvFileMock.mockReturnValue({
+      GOOGLE_DRIVE_DEFAULT_VISIBILITY: 'private',
+    });
+    expect(getGoogleDriveDefaultVisibility()).toBe('private');
+  });
+
+  it('process.env takes precedence over .env', () => {
+    readEnvFileMock.mockReturnValue({
+      GOOGLE_DRIVE_DEFAULT_VISIBILITY: 'private',
+    });
+    process.env.GOOGLE_DRIVE_DEFAULT_VISIBILITY = 'open';
+    expect(getGoogleDriveDefaultVisibility()).toBe('open');
+  });
+
+  it('falls back to restricted on an unrecognized value (never silently widens access)', () => {
+    readEnvFileMock.mockReturnValue({
+      GOOGLE_DRIVE_DEFAULT_VISIBILITY: 'public', // not a valid KB visibility level
+    });
+    expect(getGoogleDriveDefaultVisibility()).toBe('restricted');
+  });
+
+  it('flows through to driveFileToConnectorDoc', () => {
+    readEnvFileMock.mockReturnValue({
+      GOOGLE_DRIVE_DEFAULT_VISIBILITY: 'private',
+    });
+    const doc = driveFileToConnectorDoc({ id: 'X9', name: 'n' }, 'F1', '');
+    expect(doc.visibility).toBe('private');
   });
 });
 

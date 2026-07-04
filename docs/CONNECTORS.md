@@ -40,7 +40,7 @@ source_url: https://…            # citation target (the origin doc URL)
 source_updated_at: 2026-06-01T…  # upstream last-edited time
 created_by: notion-connector
 created_at: 2026-06-01
-visibility: open                 # RBAC — a connector may down-scope this
+visibility: restricted            # RBAC — defaults NOT world-open; overridable (see below)
 editable_by: admins
 tags: [connector, notion-synced]
 synced_at: 2026-06-02T…          # reconcile marker (see "Deletion" below)
@@ -73,6 +73,7 @@ Shared knob for all connectors:
 | `NOTION_API_KEY` | yes | Notion **internal integration** token. Create an integration at notion.so/my-integrations and **share** the pages/databases you want synced with it. Read-only content scope is enough. |
 | `NOTION_DATABASE_IDS` | one of these | Comma-separated Notion **database** ids. Every page (row) in the database is synced as one doc. |
 | `NOTION_ROOT_PAGE_IDS` | one of these | Comma-separated Notion **page** ids. The page (and its direct child pages) are synced. |
+| `NOTION_DEFAULT_VISIBILITY` | no | Overrides the default `visibility` frontmatter for every doc this connector syncs (default `restricted` — see "Visibility defaults" below). One of `open` / `restricted` / `private`; an unrecognized value is ignored and the safe default is kept. |
 
 The connector converts Notion blocks → markdown (headings, lists, to-dos,
 quotes, code, callouts, toggles, inline bold/italic/code/links) and preserves
@@ -97,6 +98,7 @@ Google auth.
 |---|---|---|
 | `GOOGLE_WORKSPACE_CREDENTIALS_FILE` | yes | Path to the Google Workspace OAuth credentials JSON (already used for the `gws` MCP). The connector mints/uses an access token from it to call the Drive + Docs REST APIs. The token needs Drive **read** + Docs **read** scope. |
 | `GOOGLE_DRIVE_FOLDER_IDS` | yes | Comma-separated Drive **folder** ids. Every Google Doc in each folder (and one level of subfolders) is synced as one doc. |
+| `GOOGLE_DRIVE_DEFAULT_VISIBILITY` | no | Overrides the default `visibility` frontmatter for every doc this connector syncs (default `restricted` — see "Visibility defaults" below). One of `open` / `restricted` / `private`; an unrecognized value is ignored and the safe default is kept. |
 
 The connector lists Google Docs via the Drive API, exports each via the Docs
 API, and converts the structured document → markdown (heading styles → `#`,
@@ -185,9 +187,37 @@ plugin and call `startConnectorLoop(...)`.
   never written to logs, never placed in frontmatter, and never committed.
 - Synced ids are sanitized so a hostile/malformed source id can never write
   outside `context/connectors/<source>/` (path-safety is unit-tested).
-- Synced docs default to `visibility: open`; a connector may down-scope a doc to
-  `restricted`/`private`, and the KB access-control rules then govern who can
-  read it.
+- Source text is HTML-escaped before it's woven into the converted markdown
+  (`escapeHtml` in `base.ts`, applied to raw rich-text/run content in
+  `notionBlocksToMarkdown`/`richTextToMarkdown` and `googleDocToMarkdown`), so
+  a literal `<img src=x onerror=...>` in an upstream doc can never execute as
+  HTML/script when the KB dashboard renders the synced markdown. Only the
+  converter's own markdown control characters (headings, lists, links, …) are
+  left unescaped.
+
+### Visibility defaults
+
+Synced docs mirror an **external** source whose own access controls the KB has
+no visibility into — a Notion page or Drive doc might be confidential even
+though nothing in its content says so. Defaulting to `visibility: open` would
+flatten that and expose it to every allowlisted user and to citations.
+Instead:
+
+- Every connector defaults new docs to **`restricted`**
+  (`DEFAULT_CONNECTOR_VISIBILITY` in `base.ts`) — per
+  [privacy-policy.md](../rules/access-control/privacy-policy.md) that means
+  "surfaced only on direct request, never folded into summaries."
+- Each connector can override its own default via an env var read with
+  `readEnvFile` **inside the connector module** (not `config.ts`):
+  `NOTION_DEFAULT_VISIBILITY` / `GOOGLE_DRIVE_DEFAULT_VISIBILITY`. Set one of
+  these to `open` if you've vetted that connector's scope (e.g. a
+  company-wide-readable wiki) and want synced docs to behave like the rest of
+  the open KB.
+- An unrecognized value (typo, unsupported level) is ignored in favor of the
+  safe default — misconfiguration can only make a doc *more* private, never
+  silently widen access.
+- A connector may still set a **per-doc** `visibility` (e.g. flag one
+  Notion database as `private`) regardless of the connector-wide default.
 
 ## Related
 

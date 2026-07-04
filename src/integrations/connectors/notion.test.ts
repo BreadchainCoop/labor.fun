@@ -29,6 +29,7 @@ import {
   pageToDoc,
   pageTitle,
   getNotionToken,
+  getNotionDefaultVisibility,
   NotionError,
 } from './notion.js';
 import type { ConnectorContext } from './base.js';
@@ -366,6 +367,45 @@ describe('pageToDoc', () => {
   it('synthesizes a notion.so url when the page has none', () => {
     const doc = pageToDoc({ id: 'aaa-bbb' } as any, '', 'root');
     expect(doc.sourceUrl).toBe('https://www.notion.so/aaabbb');
+  });
+
+  it('defaults synced docs to a non-open visibility', () => {
+    const doc = pageToDoc({ id: 'p1' } as any, '', 'root');
+    expect(doc.visibility).toBe('restricted');
+    expect(doc.visibility).not.toBe('open');
+  });
+});
+
+// --- Default visibility (Fix 2: don't flatten upstream ACLs to open) ---
+
+describe('getNotionDefaultVisibility', () => {
+  afterEach(() => {
+    delete process.env.NOTION_DEFAULT_VISIBILITY;
+  });
+
+  it('defaults to restricted when unset', () => {
+    expect(getNotionDefaultVisibility()).toBe('restricted');
+  });
+
+  it('is overridable via NOTION_DEFAULT_VISIBILITY', () => {
+    process.env.NOTION_DEFAULT_VISIBILITY = 'private';
+    expect(getNotionDefaultVisibility()).toBe('private');
+  });
+
+  it('honors an explicit open override', () => {
+    process.env.NOTION_DEFAULT_VISIBILITY = 'open';
+    expect(getNotionDefaultVisibility()).toBe('open');
+  });
+
+  it('falls back to restricted on an unrecognized value (never silently widens access)', () => {
+    process.env.NOTION_DEFAULT_VISIBILITY = 'public'; // not a valid KB visibility level
+    expect(getNotionDefaultVisibility()).toBe('restricted');
+  });
+
+  it('flows through to pageToDoc', () => {
+    process.env.NOTION_DEFAULT_VISIBILITY = 'private';
+    const doc = pageToDoc({ id: 'p1' } as any, '', 'root');
+    expect(doc.visibility).toBe('private');
   });
 });
 

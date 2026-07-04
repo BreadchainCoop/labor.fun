@@ -34,8 +34,13 @@ import {
   GOOGLE_DRIVE_FOLDER_IDS,
 } from '../../config.js';
 import { readEnvFile } from '../../env.js';
-import { escapeHtml } from './base.js';
-import type { Connector, ConnectorContext, ConnectorDoc } from './base.js';
+import { DEFAULT_CONNECTOR_VISIBILITY, escapeHtml } from './base.js';
+import type {
+  Connector,
+  ConnectorContext,
+  ConnectorDoc,
+  ConnectorVisibility,
+} from './base.js';
 
 const DRIVE_FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const DOCS_API = 'https://docs.googleapis.com/v1/documents';
@@ -84,6 +89,28 @@ export function resolveGoogleWorkspaceCredsPath(): string | undefined {
     return undefined;
   }
   return realPath;
+}
+
+const VALID_VISIBILITIES: ConnectorVisibility[] = [
+  'open',
+  'restricted',
+  'private',
+];
+
+/**
+ * Default visibility for docs this connector syncs. Overridable via
+ * `GOOGLE_DRIVE_DEFAULT_VISIBILITY` (process.env wins over `.env`); falls back
+ * to the framework default (`restricted`, see base.ts) when unset or set to an
+ * unrecognized value — never silently widens access on a typo.
+ */
+export function getGoogleDriveDefaultVisibility(): ConnectorVisibility {
+  const raw =
+    process.env.GOOGLE_DRIVE_DEFAULT_VISIBILITY ||
+    readEnvFile(['GOOGLE_DRIVE_DEFAULT_VISIBILITY'])
+      .GOOGLE_DRIVE_DEFAULT_VISIBILITY;
+  return VALID_VISIBILITIES.includes(raw as ConnectorVisibility)
+    ? (raw as ConnectorVisibility)
+    : DEFAULT_CONNECTOR_VISIBILITY;
 }
 
 // --- Access token loading ---------------------------------------------------
@@ -514,6 +541,9 @@ export function driveFileToConnectorDoc(
       file.webViewLink || `https://docs.google.com/document/d/${file.id}/edit`,
     markdown,
     updatedAt: file.modifiedTime,
+    // Not-world-open by default (see base.ts); overridable via
+    // GOOGLE_DRIVE_DEFAULT_VISIBILITY.
+    visibility: getGoogleDriveDefaultVisibility(),
     extraFrontmatter: { drive_id: file.id, drive_folder: folderId },
   };
 }
