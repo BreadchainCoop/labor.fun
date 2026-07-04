@@ -121,6 +121,35 @@ export interface Connector {
   ) => Promise<{ docs: ConnectorDoc[]; complete: boolean }>;
 }
 
+// --- HTML escaping (stored-XSS defense) -------------------------------------
+
+/**
+ * Escape HTML-significant characters in untrusted plain text pulled from a
+ * source document (Notion rich-text runs, Google Doc text runs, …) BEFORE it
+ * is woven into the markdown a connector emits.
+ *
+ * Synced docs are written verbatim into KB markdown files that the dashboard
+ * (`kb-ui/server.mjs`) later renders with `marked()` and no output sanitizer.
+ * Markdown itself doesn't escape raw `<...>` — it passes inline HTML through
+ * untouched — so a source doc containing literal `<img src=x onerror=...>`
+ * would become live, executable HTML/script for anyone viewing the rendered
+ * doc. Escaping at the connector boundary (the untrusted-input side) means
+ * every connector and every future renderer is protected, rather than relying
+ * on the dashboard to sanitize on the way out.
+ *
+ * Only call this on raw source TEXT, never on markdown control characters a
+ * converter itself emits (`#`, `-`, `` ` ``, `[...]`, etc.) — those must stay
+ * intact for headings/lists/links/code to render. `&` is escaped first so a
+ * literal `&` in the source doesn't accidentally form an entity with
+ * characters escaped afterward.
+ */
+export function escapeHtml(text: string): string {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // --- Path safety -----------------------------------------------------------
 
 /**

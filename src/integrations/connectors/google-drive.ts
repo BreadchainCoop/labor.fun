@@ -34,6 +34,7 @@ import {
   GOOGLE_DRIVE_FOLDER_IDS,
 } from '../../config.js';
 import { readEnvFile } from '../../env.js';
+import { escapeHtml } from './base.js';
 import type { Connector, ConnectorContext, ConnectorDoc } from './base.js';
 
 const DRIVE_FILES_API = 'https://www.googleapis.com/drive/v3/files';
@@ -305,11 +306,20 @@ const HEADING_PREFIX: Record<string, string> = {
   HEADING_6: '###### ',
 };
 
-/** Convert one text run to inline markdown (bold/italic/link). */
+/**
+ * Convert one text run to inline markdown (bold/italic/link).
+ *
+ * The raw run `content` is HTML-escaped (`escapeHtml`, base.ts) BEFORE any
+ * markdown styling is applied, so untrusted source text (e.g. a Google Doc
+ * run containing literal `<img src=x onerror=...>`) can never inject live
+ * HTML into the markdown the dashboard renders with `marked()`. The markdown
+ * markers added below (`**`, `[...]()`) are ours, not the source's, so they're
+ * left unescaped.
+ */
 function renderTextRun(run: DocsTextRun): string {
   // Docs runs include the trailing "\n"; strip it — line breaks are handled by
   // paragraph joining so styling markers don't wrap the newline.
-  let text = (run.content ?? '').replace(/\n$/, '');
+  let text = escapeHtml((run.content ?? '').replace(/\n$/, ''));
   if (!text) return '';
   const style = run.textStyle ?? {};
   // Preserve leading/trailing whitespace OUTSIDE the emphasis markers so

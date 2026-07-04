@@ -186,6 +186,75 @@ describe('googleDocToMarkdown', () => {
     expect(googleDocToMarkdown({})).toBe('');
     expect(googleDocToMarkdown({ body: { content: [] } })).toBe('');
   });
+
+  // --- stored-XSS defense: escape raw HTML in untrusted run content ---
+
+  it('escapes literal HTML in a run so a markdown renderer emits inert text', () => {
+    const md = googleDocToMarkdown({
+      body: {
+        content: [
+          {
+            paragraph: {
+              elements: [
+                { textRun: { content: '<img src=x onerror=alert(1)>\n' } },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(md).toBe('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('escapes stray angle brackets and ampersands mixed with normal text', () => {
+    const md = googleDocToMarkdown({
+      body: {
+        content: [
+          { paragraph: { elements: [{ textRun: { content: 'a<b && c>d\n' } }] } },
+        ],
+      },
+    });
+    expect(md).toBe('a&lt;b &amp;&amp; c&gt;d');
+  });
+
+  it('escapes source text even when bold/linked, without escaping our own markdown markers', () => {
+    const md = googleDocToMarkdown({
+      body: {
+        content: [
+          {
+            paragraph: {
+              elements: [
+                {
+                  textRun: {
+                    content: '<script>bad</script>',
+                    textStyle: { bold: true, link: { url: 'https://x.com' } },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(md).toBe('[**&lt;script&gt;bad&lt;/script&gt;**](https://x.com)');
+  });
+
+  it('normal text round-trips unescaped', () => {
+    const md = googleDocToMarkdown({
+      body: {
+        content: [
+          {
+            paragraph: {
+              elements: [
+                { textRun: { content: 'plain safe text, 100% fine\n' } },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(md).toBe('plain safe text, 100% fine');
+  });
 });
 
 // --- driveFileToConnectorDoc mapping ---

@@ -184,6 +184,34 @@ describe('richTextToMarkdown', () => {
     expect(richTextToMarkdown(undefined)).toBe('');
     expect(richTextToMarkdown([])).toBe('');
   });
+
+  // --- stored-XSS defense: escape raw HTML in untrusted source text ---
+
+  it('escapes literal HTML in plain text so a markdown renderer emits inert text', () => {
+    expect(richTextToMarkdown([rt('<img src=x onerror=alert(1)>')])).toBe(
+      '&lt;img src=x onerror=alert(1)&gt;',
+    );
+  });
+
+  it('escapes stray angle brackets and ampersands mixed with normal text', () => {
+    expect(richTextToMarkdown([rt('a<b && c>d')])).toBe(
+      'a&lt;b &amp;&amp; c&gt;d',
+    );
+  });
+
+  it('escapes source text even when annotated, without escaping our own markdown markers', () => {
+    // Source text containing a raw tag, made bold — the ** markers we add must
+    // stay intact while the source's <...> is neutralized.
+    expect(
+      richTextToMarkdown([rt('<script>alert(1)</script>', { bold: true })]),
+    ).toBe('**&lt;script&gt;alert(1)&lt;/script&gt;**');
+  });
+
+  it('normal text round-trips unescaped', () => {
+    expect(richTextToMarkdown([rt('plain safe text, 100% fine')])).toBe(
+      'plain safe text, 100% fine',
+    );
+  });
 });
 
 // --- notionBlocksToMarkdown ---

@@ -32,6 +32,7 @@ import {
 import { readEnvFile } from '../../env.js';
 import { logger } from '../../logger.js';
 
+import { escapeHtml } from './base.js';
 import type { Connector, ConnectorContext, ConnectorDoc } from './base.js';
 
 const NOTION_API = 'https://api.notion.com/v1';
@@ -99,6 +100,13 @@ interface NotionListResponse<T> {
  * Convert a Notion rich-text array to inline markdown. Applies annotations
  * (code → italic → bold → strikethrough, innermost-first) then wraps in a link
  * when `href` is set. Order matters so `**_x_**` nests correctly.
+ *
+ * The raw `plain_text` is HTML-escaped (`escapeHtml`, base.ts) BEFORE any
+ * markdown markers are applied, so untrusted source text (e.g. a Notion
+ * paragraph containing literal `<img src=x onerror=...>`) can never inject
+ * live HTML into the markdown the dashboard renders with `marked()`. The
+ * markdown control characters added below (`**`, `` ` ``, `[...]()`) are ours,
+ * not the source's, so they're left unescaped.
  */
 export function richTextToMarkdown(
   richText: NotionRichText[] | undefined,
@@ -106,7 +114,7 @@ export function richTextToMarkdown(
   if (!Array.isArray(richText)) return '';
   return richText
     .map((rt) => {
-      let text = rt.plain_text ?? '';
+      let text = escapeHtml(rt.plain_text ?? '');
       if (text === '') return '';
       const a = rt.annotations ?? {};
       // Code wraps closest to the text; escape backticks minimally by leaving
