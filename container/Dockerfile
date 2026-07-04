@@ -98,6 +98,16 @@ COPY agent-runner/ ./
 # Copy scripts (used as task script gates)
 COPY scripts/ /app/scripts/
 
+# Copy the git hooks (auto co-authorship). A container-global prepare-commit-msg
+# hook credits the human who triggered the turn on every commit the agent makes.
+COPY hooks/ /app/hooks/
+RUN chmod +x /app/hooks/prepare-commit-msg
+
+# HUSKY=0 so that when the agent clones a repo and runs `npm install`, husky
+# can't set a repo-local core.hooksPath that would shadow our global hook
+# (below). Applies at build and runtime.
+ENV HUSKY=0
+
 # Build TypeScript
 RUN npm run build
 
@@ -115,6 +125,12 @@ RUN chown -R node:node /workspace && chmod 777 /home/node
 
 # Switch to non-root user (required for --dangerously-skip-permissions)
 USER node
+
+# Make our co-author hook the global hook for every repo the agent clones.
+# Written to /home/node/.gitconfig (world-readable) so it applies regardless of
+# the (possibly arbitrary) runtime uid the container is launched with; HOME is
+# always /home/node at runtime.
+RUN HOME=/home/node git config --global core.hooksPath /app/hooks
 
 # Set working directory to group workspace
 WORKDIR /workspace/group

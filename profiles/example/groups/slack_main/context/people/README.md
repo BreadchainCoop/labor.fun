@@ -15,6 +15,8 @@ tags: [admin]
 platforms:
   slack: U01234567
   telegram: 123456789
+github_username: jane-doe    # optional — enables auto co-authoring commits the
+                             # assistant makes at this person's request
 # Optional capacity fields — used by the operational report (#34). All optional,
 # self-declared (we have no verified time tracking).
 team: Operations            # groups the member in the report's "by team" view

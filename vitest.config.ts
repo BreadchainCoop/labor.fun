@@ -21,6 +21,9 @@ export default defineConfig({
       // live beside them and import only the pure render fns, never serve.mjs
       // (which starts an HTTPS server on import).
       'tools/agenda-page/*.test.mjs',
+      // Container git hooks are plain .mjs run inside the agent image; their
+      // pure logic (coauthor.mjs) is unit-tested beside them.
+      'container/hooks/*.test.mjs',
     ],
   },
 });

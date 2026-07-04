@@ -1,0 +1,6 @@
+#!/bin/sh
+# Container-global prepare-commit-msg hook: auto-append the requesting human as
+# a Co-Authored-By trailer so agent commits credit them without relying on the
+# agent's memory. Logic lives in the tested Node module beside this file.
+# Never fail a commit over attribution.
+node /app/hooks/coauthor.mjs "$1" "$2" || true
