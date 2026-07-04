@@ -21,12 +21,17 @@ export interface Person {
   id: string; // filename without .md (e.g., 'jane-doe')
   displayName: string;
   tags: string[];
+  githubUsername?: string; // from `github_username:` frontmatter, if present
 }
 
 export interface SenderContext {
   user_id: string;
   display_name: string;
   tags: string[];
+  // GitHub handle of the requester, surfaced to the container so commits can be
+  // auto co-authored to them (see container prepare-commit-msg hook). Optional —
+  // only present when the person's KB file declares `github_username`.
+  github_username?: string;
 }
 
 // --- In-memory cache ---
@@ -42,6 +47,7 @@ let people: Map<string, Person> = new Map();
 function parseFrontmatter(content: string): {
   title?: string;
   tags?: string[];
+  githubUsername?: string;
 } {
   const match = content.match(/^---\n([\s\S]*?)\n---/);
   if (!match) return {};
@@ -55,8 +61,12 @@ function parseFrontmatter(content: string): {
         .map((t) => t.trim())
         .filter(Boolean)
     : [];
+  const githubUsername = yaml
+    .match(/^github_username:\s*(.+)$/m)?.[1]
+    ?.trim()
+    .replace(/^['"]|['"]$/g, '');
 
-  return { title, tags };
+  return { title, tags, githubUsername };
 }
 
 /**
@@ -80,9 +90,9 @@ export function loadPeopleFromKB(contextDir: string): void {
   for (const file of files) {
     const id = file.replace(/\.md$/, '');
     const content = fs.readFileSync(path.join(peopleDir, file), 'utf-8');
-    const { title, tags } = parseFrontmatter(content);
+    const { title, tags, githubUsername } = parseFrontmatter(content);
     const displayName = title || id;
-    newPeople.set(id, { id, displayName, tags: tags || [] });
+    newPeople.set(id, { id, displayName, tags: tags || [], githubUsername });
   }
 
   people = newPeople;
@@ -161,6 +171,7 @@ export function getSenderContext(
     user_id: person.id,
     display_name: person.displayName,
     tags: person.tags,
+    github_username: person.githubUsername,
   };
 }
 

@@ -27,6 +27,9 @@ export default defineConfig({
       // tested beside them; the repo's vitest can run these directly since
       // they have no runtime dependency on the container image.
       'container/agent-runner/src/**/*.test.ts',
+      // Container git hooks are plain .mjs run inside the agent image; their
+      // pure logic (coauthor.mjs) is unit-tested beside them.
+      'container/hooks/*.test.mjs',
     ],
   },
 });

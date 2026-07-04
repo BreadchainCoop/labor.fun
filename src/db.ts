@@ -956,15 +956,19 @@ export function getMessagesSince(
 }
 
 /**
- * Fetch the most recent `limit` messages for a chat, regardless of any cursor.
- * Used to backfill conversational context when starting a FRESH agent session
- * (which has no prior transcript) so the assistant remembers the recent thread
- * without the user having to reply to a specific message. Same bot-message
- * filter and chronological ordering as `getMessagesSince`.
+ * Fetch the most recent `limit` messages for a chat, regardless of any cursor,
+ * **including the assistant's own messages**. Used to backfill conversational
+ * context when starting a FRESH agent session (which has no prior transcript)
+ * so the assistant remembers the recent thread — crucially including reminders
+ * and questions IT posted that the user is now responding to.
+ *
+ * Unlike `getMessagesSince`, this deliberately keeps bot messages: on a fresh
+ * session there's no transcript that would otherwise carry the assistant's own
+ * turns, so excluding them would drop exactly the message a user is replying to
+ * (e.g. a scheduled reminder). Chronological ordering matches `getMessagesSince`.
  */
 export function getRecentMessages(
   chatJid: string,
-  botPrefix: string,
   limit: number = 40,
 ): NewMessage[] {
   const sql = `
@@ -974,13 +978,12 @@ export function getRecentMessages(
              is_reply_to_bot
       FROM messages
       WHERE chat_jid = ?
-        AND is_bot_message = 0 AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db.prepare(sql).all(chatJid, `${botPrefix}:%`, limit) as NewMessage[];
+  return db.prepare(sql).all(chatJid, limit) as NewMessage[];
 }
 
 export function getLastBotMessageTimestamp(

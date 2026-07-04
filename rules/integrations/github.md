@@ -64,6 +64,14 @@ When an **allowlisted user asks you to make a commit or PR**, credit them as a
 co-author on the commit(s) you create — in addition to your own trailer. It's
 their change; you're just the hands.
 
+> **This is now enforced automatically for local git commits.** A
+> container-global `prepare-commit-msg` hook (`container/hooks/`) appends the
+> requesting human's `Co-Authored-By:` trailer to every commit, sourced from the
+> per-turn sender context (`github_username`), and de-dupes so it's never doubled.
+> You don't have to remember it. The guidance below still matters for **commits
+> made via the GitHub API/MCP** (`create_or_update_file`, `push_files`), which
+> bypass local git and the hook — add the trailer in the message yourself there.
+
 - Resolve the requester's GitHub handle from their KB people file
   (`people/<slug>.md` frontmatter `github_username`).
 - Add a Git trailer at the very end of the commit message, after a blank line:

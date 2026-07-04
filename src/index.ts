@@ -470,11 +470,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const hasSession = Boolean(sessions[group.folder]);
     const recentHistory = hasSession
       ? []
-      : getRecentMessages(
-          chatJid,
-          ASSISTANT_NAME,
-          FRESH_SESSION_BACKFILL_MESSAGES,
-        );
+      : getRecentMessages(chatJid, FRESH_SESSION_BACKFILL_MESSAGES);
     const promptMessages = selectPromptMessages(
       hasSession,
       missedMessages,
