@@ -40,7 +40,7 @@ source_url: https://…            # citation target (the origin doc URL)
 source_updated_at: 2026-06-01T…  # upstream last-edited time
 created_by: notion-connector
 created_at: 2026-06-01
-visibility: open                 # RBAC — a connector may down-scope this
+visibility: restricted            # RBAC — defaults NOT world-open; overridable (see below)
 editable_by: admins
 tags: [connector, notion-synced]
 synced_at: 2026-06-02T…          # reconcile marker (see "Deletion" below)
@@ -73,11 +73,13 @@ Shared knob for all connectors:
 | `NOTION_API_KEY` | yes | Notion **internal integration** token. Create an integration at notion.so/my-integrations and **share** the pages/databases you want synced with it. Read-only content scope is enough. |
 | `NOTION_DATABASE_IDS` | one of these | Comma-separated Notion **database** ids. Every page (row) in the database is synced as one doc. |
 | `NOTION_ROOT_PAGE_IDS` | one of these | Comma-separated Notion **page** ids. The page (and its direct child pages) are synced. |
+| `NOTION_DEFAULT_VISIBILITY` | no | Overrides the default `visibility` frontmatter for every doc this connector syncs (default `restricted` — see "Visibility defaults" below). One of `open` / `restricted` / `private`; an unrecognized value is ignored and the safe default is kept. |
 
 The connector converts Notion blocks → markdown (headings, lists, to-dos,
 quotes, code, callouts, toggles, inline bold/italic/code/links) and preserves
-the Notion page URL as `source_url`. **Incremental**: it tracks the newest
-`last_edited_time` seen and, on later runs, only re-pulls pages edited since.
+the Notion page URL as `source_url`. **Full pull every run**: every configured
+database/root page is re-listed and every page's blocks re-fetched on each
+tick (see "How sync works" below for why).
 
 Enable example (`.env`):
 
@@ -97,12 +99,13 @@ Google auth.
 |---|---|---|
 | `GOOGLE_WORKSPACE_CREDENTIALS_FILE` | yes | Path to the Google Workspace OAuth credentials JSON (already used for the `gws` MCP). The connector mints/uses an access token from it to call the Drive + Docs REST APIs. The token needs Drive **read** + Docs **read** scope. |
 | `GOOGLE_DRIVE_FOLDER_IDS` | yes | Comma-separated Drive **folder** ids. Every Google Doc in each folder (and one level of subfolders) is synced as one doc. |
+| `GOOGLE_DRIVE_DEFAULT_VISIBILITY` | no | Overrides the default `visibility` frontmatter for every doc this connector syncs (default `restricted` — see "Visibility defaults" below). One of `open` / `restricted` / `private`; an unrecognized value is ignored and the safe default is kept. |
 
 The connector lists Google Docs via the Drive API, exports each via the Docs
 API, and converts the structured document → markdown (heading styles → `#`,
 bullets → lists, bold/italic/links inline). `source_url` is the Drive
-`webViewLink`. **Incremental**: it tracks the newest `modifiedTime` and only
-re-exports docs changed since.
+`webViewLink`. **Full pull every run**: every configured folder (and its
+immediate subfolders) is re-listed and every Doc re-exported on each tick.
 
 Enable example (`.env`):
 
@@ -123,26 +126,54 @@ Each connector's loop is registered as a background integration
    `context/connectors/<source>/<docId>.md` (atomic tmp+rename). Because the id
    is stable, a re-sync **updates the same file in place** — idempotent, no
    duplicates.
-3. **Reconcile (delete)** — **only when the pull was `complete`** (a full pull
-   from scratch that paginated to the end with no errors), the framework deletes
-   any file whose `synced_at` predates this run — i.e. docs that were removed
-   upstream and so weren't re-written. An **incremental** pull reports
-   `complete: false` and therefore never deletes (it didn't touch unchanged
-   files, so they'd look falsely stale). This mirrors the checkpointed
-   delete-reconcile in `github-project-sync.ts`.
+3. **Reconcile (delete)** — **only when the pull was `complete`** this run (see
+   below), the framework deletes any file whose `synced_at` predates this
+   run — i.e. docs that were removed upstream and so weren't re-written. This
+   mirrors the checkpointed delete-reconcile in `github-project-sync.ts`.
 
-### Incremental sync
+### Sync model: full pull every run
 
-Connectors track a per-connector cursor in the `router_state` table
-(`connector_cursor:<name>`), via `ctx.getCursor()` / `ctx.setCursor()`:
+The bundled connectors (Notion, Google Drive) do a **full pull every tick** —
+every configured database/root page/folder is re-listed and every
+page/doc's content re-fetched, on every run, not just the first. `complete`
+is computed fresh each run (true only when every listing and every
+page/doc fetch succeeded) and is **never persisted** — there is no
+incremental cursor.
 
-- **Notion** — cursor = newest `last_edited_time`; later runs skip pages not
-  edited since.
-- **Google Drive** — cursor = newest `modifiedTime`; later runs skip docs not
-  modified since.
+This is a deliberate choice over an incremental, cursor-persisted design
+(what these connectors originally shipped with), which had three related
+bugs:
 
-The first run (no cursor) is a full pull and may reconcile-delete; subsequent
-incremental runs only upsert changed docs.
+- **Reconcile only ran once, ever.** `complete` gated delete-reconcile, and
+  with a cursor persisted permanently, `complete` (`!cursor`) was only true
+  on the very first run — every later run was "incremental" and so never
+  reconciled. A page/doc deleted upstream would linger in the KB forever.
+- **The cursor could advance past a failed fetch.** The incremental cursor
+  advanced to the newest timestamp *seen* (listed), regardless of whether
+  that item's content fetch actually succeeded. A transient per-item error
+  meant the item was skipped forever afterward — its timestamp was already
+  behind the cursor.
+- **The `<=` timestamp boundary could drop same-timestamp edits.** Two
+  items sharing the exact cursor timestamp (minute-granularity in Notion's
+  case) would have one silently skipped.
+
+A full pull every tick removes the cursor entirely, so all three dissolve at
+once: reconcile runs on every fully-successful pass, nothing can be
+"advanced past," and there is no boundary to compare against. The cost is
+re-fetching unchanged content every tick — acceptable for a background KB
+sync on a multi-minute interval (`CONNECTOR_SYNC_INTERVAL_MS`, default 30
+min) against a bounded, admin-configured scope; upserts are idempotent by
+stable id, so re-writing unchanged content is a harmless no-op write.
+
+A connector you write doesn't have to follow this model — `ConnectorContext`
+still exposes `ctx.getCursor()` / `ctx.setCursor()` (backed by the
+`router_state` table, key `connector_cursor:<name>`) for a source where a
+full pull genuinely isn't affordable. If you do use a cursor, make sure (a)
+`complete` becomes true again periodically (not just on the very first run)
+so deletions still reconcile, (b) the cursor only advances past items whose
+fetch actually succeeded, and (c) the skip comparison doesn't drop
+same-timestamp items (e.g. dedupe by id at the boundary instead of a bare
+`<=`/`<` comparison).
 
 ## Writing a new connector
 
@@ -161,13 +192,21 @@ export interface Connector {
 Your `sync(ctx)` only has to:
 
 1. Talk to the external API using `ctx.fetchImpl` (so tests can inject a stub).
-2. Convert each source document to markdown.
+2. Convert each source document to markdown, escaping raw source text with
+   `escapeHtml` (base.ts) before any markdown styling is layered on it — see
+   "Security" below.
 3. Return `ConnectorDoc`s — each with a stable `id`, a `title`, a `sourceUrl`
-   (the citation target), the `markdown` body, and ideally an `updatedAt`.
-4. Read/advance the incremental cursor via `ctx.getCursor()` / `ctx.setCursor()`.
-5. Report `complete: true` only when you pulled the entire scope (so the
-   framework may reconcile-delete); report `complete: false` for incremental or
-   partial/errored pulls.
+   (the citation target), the `markdown` body, ideally an `updatedAt`, and a
+   `visibility` (default to `DEFAULT_CONNECTOR_VISIBILITY`, not `open` — see
+   "Visibility defaults" below).
+4. Prefer pulling the **entire** scope every run (see "Sync model" above) so
+   `complete` is simply "did every listing/fetch succeed this run" and
+   reconcile-delete stays correct on every run, not just the first. Only reach
+   for `ctx.getCursor()` / `ctx.setCursor()` if a full pull genuinely isn't
+   affordable, and if so mind the three pitfalls called out above.
+5. Report `complete: true` only when you pulled the entire scope with no
+   errors (so the framework may reconcile-delete this run); report
+   `complete: false` for any partial/errored pull.
 
 The framework handles KB paths, path-safety, frontmatter (including the citable
 `title` + `source_url`), atomic writes, upsert idempotency, deletion-on-removal,
@@ -185,9 +224,37 @@ plugin and call `startConnectorLoop(...)`.
   never written to logs, never placed in frontmatter, and never committed.
 - Synced ids are sanitized so a hostile/malformed source id can never write
   outside `context/connectors/<source>/` (path-safety is unit-tested).
-- Synced docs default to `visibility: open`; a connector may down-scope a doc to
-  `restricted`/`private`, and the KB access-control rules then govern who can
-  read it.
+- Source text is HTML-escaped before it's woven into the converted markdown
+  (`escapeHtml` in `base.ts`, applied to raw rich-text/run content in
+  `notionBlocksToMarkdown`/`richTextToMarkdown` and `googleDocToMarkdown`), so
+  a literal `<img src=x onerror=...>` in an upstream doc can never execute as
+  HTML/script when the KB dashboard renders the synced markdown. Only the
+  converter's own markdown control characters (headings, lists, links, …) are
+  left unescaped.
+
+### Visibility defaults
+
+Synced docs mirror an **external** source whose own access controls the KB has
+no visibility into — a Notion page or Drive doc might be confidential even
+though nothing in its content says so. Defaulting to `visibility: open` would
+flatten that and expose it to every allowlisted user and to citations.
+Instead:
+
+- Every connector defaults new docs to **`restricted`**
+  (`DEFAULT_CONNECTOR_VISIBILITY` in `base.ts`) — per
+  [privacy-policy.md](../rules/access-control/privacy-policy.md) that means
+  "surfaced only on direct request, never folded into summaries."
+- Each connector can override its own default via an env var read with
+  `readEnvFile` **inside the connector module** (not `config.ts`):
+  `NOTION_DEFAULT_VISIBILITY` / `GOOGLE_DRIVE_DEFAULT_VISIBILITY`. Set one of
+  these to `open` if you've vetted that connector's scope (e.g. a
+  company-wide-readable wiki) and want synced docs to behave like the rest of
+  the open KB.
+- An unrecognized value (typo, unsupported level) is ignored in favor of the
+  safe default — misconfiguration can only make a doc *more* private, never
+  silently widen access.
+- A connector may still set a **per-doc** `visibility` (e.g. flag one
+  Notion database as `private`) regardless of the connector-wide default.
 
 ## Related
 

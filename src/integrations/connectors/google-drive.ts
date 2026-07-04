@@ -22,6 +22,11 @@
  *  - Subfolder recursion is bounded to ONE level below each configured folder
  *    (configured folder + its immediate subfolders) to stay predictable and
  *    avoid unbounded traversal / cycles.
+ *  - Sync model: a FULL pull every run (see `sync()`'s doc comment for why) —
+ *    every configured folder is re-listed and every Doc re-exported on each
+ *    tick, so `complete` is a per-run flag (never a persisted cursor) and a
+ *    fully-successful run always reconciles (deletes) docs removed upstream,
+ *    not just the first one ever.
  *
  * Convention reference: `src/integrations/github-projects.ts` (fetch-based
  * client, typed errors, no client lib).
@@ -34,7 +39,13 @@ import {
   GOOGLE_DRIVE_FOLDER_IDS,
 } from '../../config.js';
 import { readEnvFile } from '../../env.js';
-import type { Connector, ConnectorContext, ConnectorDoc } from './base.js';
+import { DEFAULT_CONNECTOR_VISIBILITY, escapeHtml } from './base.js';
+import type {
+  Connector,
+  ConnectorContext,
+  ConnectorDoc,
+  ConnectorVisibility,
+} from './base.js';
 
 const DRIVE_FILES_API = 'https://www.googleapis.com/drive/v3/files';
 const DOCS_API = 'https://docs.googleapis.com/v1/documents';
@@ -83,6 +94,28 @@ export function resolveGoogleWorkspaceCredsPath(): string | undefined {
     return undefined;
   }
   return realPath;
+}
+
+const VALID_VISIBILITIES: ConnectorVisibility[] = [
+  'open',
+  'restricted',
+  'private',
+];
+
+/**
+ * Default visibility for docs this connector syncs. Overridable via
+ * `GOOGLE_DRIVE_DEFAULT_VISIBILITY` (process.env wins over `.env`); falls back
+ * to the framework default (`restricted`, see base.ts) when unset or set to an
+ * unrecognized value — never silently widens access on a typo.
+ */
+export function getGoogleDriveDefaultVisibility(): ConnectorVisibility {
+  const raw =
+    process.env.GOOGLE_DRIVE_DEFAULT_VISIBILITY ||
+    readEnvFile(['GOOGLE_DRIVE_DEFAULT_VISIBILITY'])
+      .GOOGLE_DRIVE_DEFAULT_VISIBILITY;
+  return VALID_VISIBILITIES.includes(raw as ConnectorVisibility)
+    ? (raw as ConnectorVisibility)
+    : DEFAULT_CONNECTOR_VISIBILITY;
 }
 
 // --- Access token loading ---------------------------------------------------
@@ -305,11 +338,20 @@ const HEADING_PREFIX: Record<string, string> = {
   HEADING_6: '###### ',
 };
 
-/** Convert one text run to inline markdown (bold/italic/link). */
+/**
+ * Convert one text run to inline markdown (bold/italic/link).
+ *
+ * The raw run `content` is HTML-escaped (`escapeHtml`, base.ts) BEFORE any
+ * markdown styling is applied, so untrusted source text (e.g. a Google Doc
+ * run containing literal `<img src=x onerror=...>`) can never inject live
+ * HTML into the markdown the dashboard renders with `marked()`. The markdown
+ * markers added below (`**`, `[...]()`) are ours, not the source's, so they're
+ * left unescaped.
+ */
 function renderTextRun(run: DocsTextRun): string {
   // Docs runs include the trailing "\n"; strip it — line breaks are handled by
   // paragraph joining so styling markers don't wrap the newline.
-  let text = (run.content ?? '').replace(/\n$/, '');
+  let text = escapeHtml((run.content ?? '').replace(/\n$/, ''));
   if (!text) return '';
   const style = run.textStyle ?? {};
   // Preserve leading/trailing whitespace OUTSIDE the emphasis markers so
@@ -504,6 +546,9 @@ export function driveFileToConnectorDoc(
       file.webViewLink || `https://docs.google.com/document/d/${file.id}/edit`,
     markdown,
     updatedAt: file.modifiedTime,
+    // Not-world-open by default (see base.ts); overridable via
+    // GOOGLE_DRIVE_DEFAULT_VISIBILITY.
+    visibility: getGoogleDriveDefaultVisibility(),
     extraFrontmatter: { drive_id: file.id, drive_folder: folderId },
   };
 }
@@ -565,34 +610,49 @@ async function collectDocs(
 }
 
 /**
- * Sync implementation. Incremental via `modifiedTime`:
- *  - Files with `modifiedTime <= cursor` are skipped (not exported).
- *  - After the run, the cursor advances to the max `modifiedTime` seen.
+ * Sync implementation: a FULL pull every run — every configured folder (and
+ * its immediate subfolders) is re-listed and every Doc re-exported on each
+ * tick. No incremental cursor.
  *
- * `complete` semantics (drives base.ts's delete-reconcile): we report
- * `complete: true` ONLY when there was NO cursor (a full pull from scratch)
- * AND every folder listing + doc export succeeded. Any incremental run (cursor
- * present) reports `complete: false` so the framework does NOT delete unchanged
- * files that this run intentionally skipped. Per-file export failures also
- * force `complete: false` (that file wasn't refreshed, so it must not be swept).
+ * This mirrors the notion.ts connector's model (see its `sync()` doc comment
+ * for the full rationale) and fixes the same three bugs an incremental,
+ * cursor-persisted design had here:
+ *   - `complete` gated delete-reconcile (base.ts) but was only ever true on
+ *     the very first run (`!cursor`), since the cursor persists forever —
+ *     every later run was incremental and so NEVER reconciled, meaning a
+ *     file deleted upstream lingered in the KB forever.
+ *   - `maxModified` advanced for every LISTED file regardless of whether its
+ *     export actually succeeded, and was persisted unconditionally — a file
+ *     whose export threw got skipped forever on the next incremental run
+ *     (the cursor had already moved past its `modifiedTime`).
+ *   - The `modified <= cursor` boundary check could drop a file sharing the
+ *     cursor's exact timestamp with another file synced in the same run.
+ * A full pull every tick removes the cursor entirely, so all three dissolve:
+ * `complete` is computed fresh each run (never persisted), nothing can be
+ * "advanced past," and there is no boundary to compare against. The cost is
+ * re-exporting unchanged Docs every tick, which is acceptable for a
+ * background KB sync on a multi-minute interval (default 30 min,
+ * `CONNECTOR_SYNC_INTERVAL_MS`) against a bounded, admin-configured folder
+ * scope; `writeConnectorDoc` upserts are idempotent by stable file id, so
+ * re-writing an unchanged file is a harmless no-op write.
+ *
+ * `complete` is true only when every folder listing succeeded AND every
+ * discovered Doc exported successfully this run — any failure forces
+ * `complete: false` so the framework does not reconcile (delete) based on a
+ * partial pull. A fatal auth error (401/403) aborts the whole run instead of
+ * being swallowed per-file.
  */
 async function sync(
   ctx: ConnectorContext,
 ): Promise<{ docs: ConnectorDoc[]; complete: boolean }> {
-  const cursor = ctx.getCursor();
   const token = await loadGoogleAccessToken(ctx.fetchImpl);
 
   const { files, listedOk } = await collectDocs(token, ctx.fetchImpl);
 
   const docs: ConnectorDoc[] = [];
-  let maxModified = cursor ?? '';
   let allExportsOk = true;
 
   for (const { file, folderId } of files) {
-    const modified = file.modifiedTime ?? '';
-    if (modified > maxModified) maxModified = modified;
-    // Incremental skip: unchanged since the last cursor.
-    if (cursor && modified && modified <= cursor) continue;
     try {
       const markdown = await fetchDocMarkdown(file.id, token, ctx.fetchImpl);
       docs.push(driveFileToConnectorDoc(file, folderId, markdown));
@@ -616,10 +676,9 @@ async function sync(
     }
   }
 
-  if (maxModified) ctx.setCursor(maxModified);
-
-  // Only a from-scratch, fully-successful pull may trigger deletes.
-  const complete = !cursor && listedOk && allExportsOk;
+  // Only a fully-successful pull may trigger deletes. Purely in-run — never
+  // persisted — so every successful run reconciles, not just the first.
+  const complete = listedOk && allExportsOk;
   return { docs, complete };
 }
 

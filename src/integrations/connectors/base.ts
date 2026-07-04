@@ -32,6 +32,22 @@ import { GROUPS_DIR, SHARED_KB_GROUP } from '../../config.js';
 import { getRouterState, setRouterState } from '../../db.js';
 import { logger } from '../../logger.js';
 
+/** The KB's document-visibility levels (see rules/access-control/privacy-policy.md). */
+export type ConnectorVisibility = 'open' | 'restricted' | 'private';
+
+/**
+ * Default visibility for connector-synced docs when a connector doesn't set
+ * one explicitly. Synced docs mirror an EXTERNAL source (Notion, Drive, …)
+ * whose own access controls the KB cannot see or enforce — defaulting to
+ * `open` would flatten whatever confidentiality the upstream doc had and
+ * expose it to every allowlisted user and to citations. `restricted` is the
+ * least-private KB level that is still NOT world-open: per
+ * rules/access-control/privacy-policy.md it is surfaced only on direct
+ * request, never folded into summaries/channel-wide updates, which is the
+ * right default for "we don't actually know how sensitive this is."
+ */
+export const DEFAULT_CONNECTOR_VISIBILITY: ConnectorVisibility = 'restricted';
+
 /** A single document pulled from an external source, ready to write to the KB. */
 export interface ConnectorDoc {
   /**
@@ -55,8 +71,14 @@ export interface ConnectorDoc {
   updatedAt?: string;
   /** Extra source-specific frontmatter (e.g. notion_id, drive_folder). */
   extraFrontmatter?: Record<string, unknown>;
-  /** Default `open`; a connector may down-scope a doc to `restricted`/`private`. */
-  visibility?: 'open' | 'restricted' | 'private';
+  /**
+   * Defaults to `restricted` (see `DEFAULT_CONNECTOR_VISIBILITY`) — synced
+   * docs come from an external source whose own ACLs the KB has no visibility
+   * into, so they must NOT be flattened to world-`open` by default. A
+   * connector may override its default (typically via an env var read with
+   * `readEnvFile` inside the connector module) or set this per-doc.
+   */
+  visibility?: ConnectorVisibility;
   /** Extra tags to add alongside the automatic `connector`/`<source>-synced`. */
   tags?: string[];
 }
@@ -119,6 +141,35 @@ export interface Connector {
   sync: (
     ctx: ConnectorContext,
   ) => Promise<{ docs: ConnectorDoc[]; complete: boolean }>;
+}
+
+// --- HTML escaping (stored-XSS defense) -------------------------------------
+
+/**
+ * Escape HTML-significant characters in untrusted plain text pulled from a
+ * source document (Notion rich-text runs, Google Doc text runs, …) BEFORE it
+ * is woven into the markdown a connector emits.
+ *
+ * Synced docs are written verbatim into KB markdown files that the dashboard
+ * (`kb-ui/server.mjs`) later renders with `marked()` and no output sanitizer.
+ * Markdown itself doesn't escape raw `<...>` — it passes inline HTML through
+ * untouched — so a source doc containing literal `<img src=x onerror=...>`
+ * would become live, executable HTML/script for anyone viewing the rendered
+ * doc. Escaping at the connector boundary (the untrusted-input side) means
+ * every connector and every future renderer is protected, rather than relying
+ * on the dashboard to sanitize on the way out.
+ *
+ * Only call this on raw source TEXT, never on markdown control characters a
+ * converter itself emits (`#`, `-`, `` ` ``, `[...]`, etc.) — those must stay
+ * intact for headings/lists/links/code to render. `&` is escaped first so a
+ * literal `&` in the source doesn't accidentally form an entity with
+ * characters escaped afterward.
+ */
+export function escapeHtml(text: string): string {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // --- Path safety -----------------------------------------------------------
@@ -207,7 +258,10 @@ export function connectorFrontmatter(
     // Standard KB frontmatter so RBAC + the doc-format rules apply uniformly.
     created_by: `${source}-connector`,
     created_at: (doc.updatedAt ?? syncedAt).slice(0, 10),
-    visibility: doc.visibility ?? 'open',
+    // Not-world-open by default — see DEFAULT_CONNECTOR_VISIBILITY. A
+    // connector sets `doc.visibility` explicitly (its own env-configurable
+    // default, or a per-doc value); this fallback only fires if it didn't.
+    visibility: doc.visibility ?? DEFAULT_CONNECTOR_VISIBILITY,
     editable_by: 'admins',
     tags: [...new Set(baseTags)],
     // Reconcile marker — files older than the run's syncStart are swept.

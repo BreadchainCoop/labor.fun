@@ -22,6 +22,12 @@
  * API client is plain `fetch` (via `ctx.fetchImpl` so tests inject a stub) —
  * no `@notionhq/client`. Mirrors the fetch/error-handling style of
  * `github-projects.ts`.
+ *
+ * Sync model: a FULL pull every run (see the `sync()` doc comment for why) —
+ * every configured database/root page is re-listed and every page's blocks
+ * re-fetched on each tick, so `complete` is a per-run flag (never a persisted
+ * cursor) and a fully-successful run always reconciles (deletes) pages
+ * removed upstream, not just the first one ever.
  */
 
 import {
@@ -32,18 +38,44 @@ import {
 import { readEnvFile } from '../../env.js';
 import { logger } from '../../logger.js';
 
-import type { Connector, ConnectorContext, ConnectorDoc } from './base.js';
+import { DEFAULT_CONNECTOR_VISIBILITY, escapeHtml } from './base.js';
+import type {
+  Connector,
+  ConnectorContext,
+  ConnectorDoc,
+  ConnectorVisibility,
+} from './base.js';
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 /** Max depth we recurse into block children (toggles / list items). */
 const MAX_BLOCK_DEPTH = 3;
 
-const envCache = readEnvFile(['NOTION_API_KEY']);
+const envCache = readEnvFile(['NOTION_API_KEY', 'NOTION_DEFAULT_VISIBILITY']);
 
 /** Read the Notion integration token (process.env wins over .env). Never log it. */
 export function getNotionToken(): string | null {
   return process.env.NOTION_API_KEY || envCache.NOTION_API_KEY || null;
+}
+
+const VALID_VISIBILITIES: ConnectorVisibility[] = [
+  'open',
+  'restricted',
+  'private',
+];
+
+/**
+ * Default visibility for docs this connector syncs. Overridable via
+ * `NOTION_DEFAULT_VISIBILITY` (process.env wins over `.env`); falls back to
+ * the framework default (`restricted`, see base.ts) when unset or set to an
+ * unrecognized value — never silently widens access on a typo.
+ */
+export function getNotionDefaultVisibility(): ConnectorVisibility {
+  const raw =
+    process.env.NOTION_DEFAULT_VISIBILITY || envCache.NOTION_DEFAULT_VISIBILITY;
+  return VALID_VISIBILITIES.includes(raw as ConnectorVisibility)
+    ? (raw as ConnectorVisibility)
+    : DEFAULT_CONNECTOR_VISIBILITY;
 }
 
 /** Thrown on a non-2xx Notion API response. Mirrors `GitHubProjectsError`. */
@@ -99,6 +131,13 @@ interface NotionListResponse<T> {
  * Convert a Notion rich-text array to inline markdown. Applies annotations
  * (code → italic → bold → strikethrough, innermost-first) then wraps in a link
  * when `href` is set. Order matters so `**_x_**` nests correctly.
+ *
+ * The raw `plain_text` is HTML-escaped (`escapeHtml`, base.ts) BEFORE any
+ * markdown markers are applied, so untrusted source text (e.g. a Notion
+ * paragraph containing literal `<img src=x onerror=...>`) can never inject
+ * live HTML into the markdown the dashboard renders with `marked()`. The
+ * markdown control characters added below (`**`, `` ` ``, `[...]()`) are ours,
+ * not the source's, so they're left unescaped.
  */
 export function richTextToMarkdown(
   richText: NotionRichText[] | undefined,
@@ -106,7 +145,7 @@ export function richTextToMarkdown(
   if (!Array.isArray(richText)) return '';
   return richText
     .map((rt) => {
-      let text = rt.plain_text ?? '';
+      let text = escapeHtml(rt.plain_text ?? '');
       if (text === '') return '';
       const a = rt.annotations ?? {};
       // Code wraps closest to the text; escape backticks minimally by leaving
@@ -385,6 +424,9 @@ export function pageToDoc(
     sourceUrl: page.url ?? `https://www.notion.so/${page.id.replace(/-/g, '')}`,
     markdown,
     updatedAt: page.last_edited_time,
+    // Not-world-open by default (see base.ts); overridable via
+    // NOTION_DEFAULT_VISIBILITY.
+    visibility: getNotionDefaultVisibility(),
     extraFrontmatter: {
       notion_id: page.id,
       notion_parent: parentId,
@@ -405,23 +447,42 @@ export const notionConnector: Connector = {
   },
 
   /**
-   * Pull changed Notion pages.
+   * Pull every in-scope Notion page, EVERY run — a full pull, not an
+   * incremental one.
    *
-   * Incremental via `last_edited_time`:
-   *   - `ctx.getCursor()` is the newest `last_edited_time` seen last run.
-   *   - Pages with `last_edited_time <= cursor` are skipped (blocks not
-   *     refetched) — only changed pages come back.
-   *   - After the run, the cursor advances to the max `last_edited_time` seen.
+   * Why full-pull-every-run instead of a persisted `last_edited_time` cursor
+   * (this connector's original design): `complete` gates the framework's
+   * delete-reconcile pass (base.ts), and with a cursor persisted forever,
+   * `complete` (`!cursor`) is only ever true on the very first run — every
+   * run after that is incremental and so NEVER reconciles, meaning a page
+   * deleted upstream lingers in the KB forever (violates base.ts's stated
+   * contract that a complete pull reconciles deletions). It also meant the
+   * cursor advanced for pages regardless of whether their block-fetch
+   * actually succeeded, so a transient per-page failure could get silently
+   * skipped forever on the next run, and the `edited <= cursor` boundary
+   * check dropped same-timestamp edits at minute-granularity.
    *
-   * Complete-flag semantics (gates the framework's delete-reconcile):
-   *   - `complete: true` ONLY when there was NO cursor (a full pull from
-   *     scratch) AND every database/page/block query paginated to the end with
-   *     no per-page error. Only then may the framework delete files it didn't
-   *     re-write this run.
-   *   - Any incremental run (cursor present) reports `complete: false`: it
-   *     intentionally skips unchanged pages, so those files are untouched and
-   *     must NOT be swept as stale.
-   *   - A partial/errored full pull also reports `complete: false`.
+   * Doing a full listing + full block-fetch every tick instead means:
+   *   - `complete` is a purely in-run flag (never persisted) — every fully-
+   *     successful run reconciles deletions, not just the first (fixes the
+   *     "only once ever" bug).
+   *   - There's no cursor to advance past a failed fetch, so nothing can be
+   *     skipped forever because of a transient error (dissolves the cursor-
+   *     advance-past-failure bug).
+   *   - There's no timestamp boundary to compare against, so same-timestamp
+   *     edits can't be dropped (dissolves the boundary-drop bug).
+   * The cost is re-fetching unchanged pages' blocks every tick. Acceptable
+   * here: this is a background KB sync on a multi-minute interval (default
+   * 30 min, `CONNECTOR_SYNC_INTERVAL_MS`), not a hot path, and Notion's API
+   * rate limits comfortably accommodate re-listing a bounded, admin-
+   * configured scope (a handful of databases/root pages) on that cadence.
+   * `writeConnectorDoc` upserts are idempotent by stable page id, so re-
+   * writing an unchanged page is a harmless no-op write.
+   *
+   * `complete` is true only when every configured database/root-page query
+   * AND every page's block-fetch succeeded this run — a single failure
+   * anywhere forces `complete: false` so the framework does not reconcile
+   * (delete) based on a partial listing.
    */
   async sync(
     ctx: ConnectorContext,
@@ -429,14 +490,11 @@ export const notionConnector: Connector = {
     const token = getNotionToken();
     if (!token) return { docs: [], complete: false };
 
-    const cursor = ctx.getCursor();
-    const isFullPull = !cursor;
     const fetchImpl = ctx.fetchImpl;
-
     const docs: ConnectorDoc[] = [];
-    let maxEdited = cursor ?? '';
-    // Only a from-scratch pull with zero errors may be complete.
-    let complete = isFullPull;
+    // In-run only — never persisted. Any fetch failure below flips this to
+    // false, which gates the framework's delete-reconcile for this run.
+    let complete = true;
 
     // Collect (page, parentId) targets from databases and root pages.
     const targets: Array<{ page: NotionPage; parentId: string }> = [];
@@ -482,15 +540,10 @@ export const notionConnector: Connector = {
     }
 
     for (const { page, parentId } of targets) {
-      const edited = page.last_edited_time ?? '';
-      // Skip unchanged pages on an incremental run (don't refetch their blocks).
-      if (cursor && edited && edited <= cursor) continue;
-
       try {
         const blocks = await fetchBlockChildren(fetchImpl, token, page.id);
         const markdown = notionBlocksToMarkdown(blocks);
         docs.push(pageToDoc(page, markdown, parentId));
-        if (edited > maxEdited) maxEdited = edited;
       } catch (err) {
         // A partial pull must not trigger deletes.
         complete = false;
@@ -505,10 +558,8 @@ export const notionConnector: Connector = {
       }
     }
 
-    if (maxEdited && maxEdited !== cursor) ctx.setCursor(maxEdited);
-
     logger.debug(
-      { source: 'notion', docs: docs.length, complete, isFullPull },
+      { source: 'notion', docs: docs.length, complete },
       'notion connector: sync pass complete',
     );
 
