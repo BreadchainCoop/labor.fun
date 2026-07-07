@@ -40,11 +40,7 @@ export interface TelegramSender {
 export interface AllowlistSeedDeps {
   peopleDir: () => string;
   resolveUser: (platformId: string, platform: string) => string | undefined;
-  addIdentity: (
-    platformId: string,
-    platform: string,
-    kbPerson: string,
-  ) => void;
+  addIdentity: (platformId: string, platform: string, kbPerson: string) => void;
   reloadPeople: () => void;
 }
 
@@ -119,7 +115,9 @@ export function ensureTelegramSenderAllowlisted(
   // file, just restore the identity mapping below.
   if (!fs.existsSync(file)) {
     const displayName =
-      sender.firstName || sender.username || `Telegram user ${sender.telegramId}`;
+      sender.firstName ||
+      sender.username ||
+      `Telegram user ${sender.telegramId}`;
     const frontmatter: Record<string, unknown> = {
       title: displayName,
       created_by: 'telegram-auto-allowlist',

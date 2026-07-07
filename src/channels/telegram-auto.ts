@@ -42,10 +42,8 @@ export function deriveTelegramGroupFolder(
   const base = (slug ? `telegram_${slug}` : `telegram_${idPart}`).slice(0, 64);
   if (!existingFolders.has(base)) return base;
 
-  const withId = `telegram_${slug ? `${slug.slice(0, 40)}_` : ''}${idPart}`.slice(
-    0,
-    64,
-  );
+  const withId =
+    `telegram_${slug ? `${slug.slice(0, 40)}_` : ''}${idPart}`.slice(0, 64);
   if (!existingFolders.has(withId)) return withId;
 
   let n = 2;

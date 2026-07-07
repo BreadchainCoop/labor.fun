@@ -1329,7 +1329,10 @@ describe('TelegramChannel', () => {
       await channel.connect();
 
       await triggerChatMember(
-        createChatMemberCtx({ oldStatus: 'member', newStatus: 'administrator' }),
+        createChatMemberCtx({
+          oldStatus: 'member',
+          newStatus: 'administrator',
+        }),
       );
 
       expect(registerGroup).not.toHaveBeenCalled();

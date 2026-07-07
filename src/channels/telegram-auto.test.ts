@@ -39,9 +39,9 @@ describe('deriveTelegramGroupFolder', () => {
     expect(deriveTelegramGroupFolder(-1001234567890, '🤔🚀', new Set())).toBe(
       'telegram_1001234567890',
     );
-    expect(deriveTelegramGroupFolder(-1001234567890, undefined, new Set())).toBe(
-      'telegram_1001234567890',
-    );
+    expect(
+      deriveTelegramGroupFolder(-1001234567890, undefined, new Set()),
+    ).toBe('telegram_1001234567890');
   });
 
   it('deconflicts a taken folder with the chat id', () => {
