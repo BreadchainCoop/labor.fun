@@ -44,7 +44,11 @@ All Docs writes target a specific tab: in `documents.batchUpdate`, every
 Given a build task for `<week>` (a `YYYY-MM-DD` meeting date):
 
 1. **Read config** and resolve `doc_id`, the two tab IDs, the `owners` map
-   (project → person), and the `facilitators[<week>]` slug (may be empty).
+   (project → person), and this week's facilitator. The facilitator is resolved
+   by the plugin: an explicit `facilitators[<week>]` entry (manual override) wins;
+   otherwise, if a `facilitator_pool` is configured, the chair auto-rotates
+   through that pool (deterministic by week); otherwise it's empty. Whatever the
+   plugin passes in as the facilitator is authoritative — just render it.
 2. **Archive last week.** Read the current text of the **This Week** tab. If it
    has real content (more than the bare skeleton), prepend it to the **Archive**
    tab under a `### <previous date>` heading — insert at the Archive tab's start
