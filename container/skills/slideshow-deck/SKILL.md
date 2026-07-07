@@ -36,6 +36,18 @@ ships in a public repo):
 - the KB config `decks/config.md` (`password:` frontmatter), or
 - ask the user if neither is set.
 
+**The password is quarter-scoped and rotates every quarter.** The
+`decks/config.md` `password:` is the single source of truth for the *current*
+quarter — always read it fresh; never reuse a password you remember from a prior
+quarter. Every deck published in a given quarter MUST use that quarter's
+password.
+
+**On quarter rotation** (when someone sets a new password): (1) update
+`password:` + `quarter:` in `decks/config.md`, (2) **re-encrypt every existing
+deck** in the `decks` repo with the new password so the old one stops working,
+and push, (3) announce the new password in the core channel — never commit it to
+a repo.
+
 ```bash
 cd /tmp
 npx staticrypt deck.html -p "$DECK_PASSWORD" --short -d out   # → out/deck.html
