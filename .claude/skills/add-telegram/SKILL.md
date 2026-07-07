@@ -147,6 +147,33 @@ For additional chats (trigger-only):
 npx tsx setup/index.ts --step register -- --jid "tg:<chat-id>" --name "<chat-name>" --folder "telegram_<group-name>" --trigger "@${ASSISTANT_NAME}" --channel telegram
 ```
 
+### Optional: auto-registration (skip the manual steps)
+
+Two opt-in env flags (both default OFF — nothing changes unless set):
+
+```bash
+# .env
+# Adding the bot to a group registers it automatically (and the bot posts a
+# short greeting). Messages from groups the bot joined BEFORE this flag was
+# set also self-heal-register on first contact instead of being dropped.
+TELEGRAM_AUTO_REGISTER_GROUPS=true
+
+# Auto-allowlist senders: 'all' (every registered Telegram group) or a
+# comma-separated list of chat JIDs. Unknown senders in matching groups get
+# a KB people file + identity row seeded the first time they speak.
+TELEGRAM_AUTO_ALLOWLIST_GROUPS=tg:-1001234567890,tg:-1005678901234
+```
+
+> **Security warning:** `TELEGRAM_AUTO_ALLOWLIST_GROUPS` grants **full
+> access** — anyone who can post in a matching group becomes a fully trusted,
+> allowlisted sender. Only enable it for groups whose entire membership you
+> trust, and prefer an explicit JID list over `all`.
+
+Note: if the bot's Telegram privacy mode is on (the BotFather default), it
+only receives /commands, @-mentions, and replies in groups until it is
+promoted to group admin or privacy mode is disabled — the auto-registration
+greeting says so when applicable.
+
 ## Phase 5: Verify
 
 ### Test the connection
