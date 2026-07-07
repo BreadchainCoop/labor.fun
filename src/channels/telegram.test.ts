@@ -12,6 +12,15 @@ vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Breadbrich Engels',
   TRIGGER_PATTERN: /^@Breadbrich Engels\b/i,
+  TELEGRAM_AUTO_REGISTER_GROUPS: false,
+  TELEGRAM_AUTO_ALLOWLIST_GROUPS: '',
+}));
+
+// Mock the auto-allowlist seeding module (fs + db side effects live there);
+// the channel only needs to call it at the right times.
+const ensureAllowlistedMock = vi.hoisted(() => vi.fn());
+vi.mock('./telegram-allowlist.js', () => ({
+  ensureTelegramSenderAllowlisted: ensureAllowlistedMock,
 }));
 
 // Mock logger
@@ -170,8 +179,74 @@ function createMediaCtx(overrides: {
   };
 }
 
+/**
+ * Opts with a live registry map + a registerGroup that mutates it (mirrors
+ * the orchestrator, where registerGroup writes into the same object that
+ * registeredGroups() returns).
+ */
+function createAutoRegisterOpts(overrides?: Partial<TelegramChannelOpts>): {
+  opts: TelegramChannelOpts;
+  groups: Record<string, any>;
+  registerGroup: ReturnType<typeof vi.fn>;
+} {
+  const groups: Record<string, any> = {};
+  const registerGroup = vi.fn((jid: string, group: any) => {
+    groups[jid] = group;
+  });
+  return {
+    opts: {
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: vi.fn(() => groups),
+      registerGroup,
+      autoRegisterGroups: true,
+      ...overrides,
+    },
+    groups,
+    registerGroup,
+  };
+}
+
+function createChatMemberCtx(overrides?: {
+  chatId?: number;
+  chatType?: string;
+  chatTitle?: string;
+  newStatus?: string;
+  oldStatus?: string;
+  newMemberUserId?: number;
+  canReadAll?: boolean;
+}) {
+  return {
+    chat: {
+      id: overrides?.chatId ?? -1001234,
+      type: overrides?.chatType ?? 'supergroup',
+      title: overrides?.chatTitle ?? 'Project Team',
+    },
+    myChatMember: {
+      new_chat_member: {
+        user: { id: overrides?.newMemberUserId ?? 12345, is_bot: true },
+        status: overrides?.newStatus ?? 'member',
+      },
+      old_chat_member: {
+        user: { id: overrides?.newMemberUserId ?? 12345, is_bot: true },
+        status: overrides?.oldStatus ?? 'left',
+      },
+    },
+    me: {
+      id: 12345,
+      username: 'andy_ai_bot',
+      can_read_all_group_messages: overrides?.canReadAll,
+    },
+  };
+}
+
 function currentBot() {
   return botRef.current;
+}
+
+async function triggerChatMember(ctx: ReturnType<typeof createChatMemberCtx>) {
+  const handlers = currentBot().filterHandlers.get('my_chat_member') || [];
+  for (const h of handlers) await h(ctx);
 }
 
 async function triggerTextMessage(ctx: ReturnType<typeof createTextCtx>) {
@@ -1154,6 +1229,330 @@ describe('TelegramChannel', () => {
     it('has name "telegram"', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       expect(channel.name).toBe('telegram');
+    });
+  });
+
+  // --- Auto-registration (TELEGRAM_AUTO_REGISTER_GROUPS) ---
+
+  describe('auto-registration', () => {
+    it('flag off (default): my_chat_member neither registers nor greets', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts({
+        autoRegisterGroups: false,
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(createChatMemberCtx());
+
+      expect(registerGroup).not.toHaveBeenCalled();
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
+    it('flag off (default): unregistered group messages are still dropped', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts({
+        autoRegisterGroups: false,
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({ chatId: -100999, text: 'hello?' }),
+      );
+
+      expect(registerGroup).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('flag on: bot added to a group registers it and greets', async () => {
+      const { opts, registerGroup, groups } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(createChatMemberCtx({ canReadAll: true }));
+
+      expect(registerGroup).toHaveBeenCalledWith(
+        'tg:-1001234',
+        expect.objectContaining({
+          name: 'Project Team',
+          folder: 'telegram_project-team',
+          trigger: '@Breadbrich Engels',
+        }),
+      );
+      expect(groups['tg:-1001234']).toBeDefined();
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        -1001234,
+        expect.stringContaining('Breadbrich Engels'),
+        expect.objectContaining({ parse_mode: 'Markdown' }),
+      );
+      expect(opts.onChatMetadata).toHaveBeenCalledWith(
+        'tg:-1001234',
+        expect.any(String),
+        'Project Team',
+        'telegram',
+        true,
+      );
+    });
+
+    it('flag on: greeting warns about privacy mode when the bot cannot read all messages', async () => {
+      const { opts } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(createChatMemberCtx({ canReadAll: false }));
+
+      const [, text] = currentBot().api.sendMessage.mock.calls[0];
+      expect(text).toContain('privacy mode');
+      expect(text).toContain('admin');
+    });
+
+    it('flag on: greeting omits the privacy warning when the bot reads all messages', async () => {
+      const { opts } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(createChatMemberCtx({ canReadAll: true }));
+
+      const [, text] = currentBot().api.sendMessage.mock.calls[0];
+      expect(text).not.toContain('privacy mode');
+    });
+
+    it('flag on: already-registered chat gets no duplicate registration or greeting', async () => {
+      const { opts, registerGroup, groups } = createAutoRegisterOpts();
+      groups['tg:-1001234'] = {
+        name: 'Project Team',
+        folder: 'telegram_project-team',
+        trigger: '@Breadbrich Engels',
+        added_at: '2024-01-01T00:00:00.000Z',
+      };
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(
+        createChatMemberCtx({
+          oldStatus: 'member',
+          newStatus: 'administrator',
+        }),
+      );
+
+      expect(registerGroup).not.toHaveBeenCalled();
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('flag on: bot removed (status left/kicked) does not register', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(
+        createChatMemberCtx({ oldStatus: 'member', newStatus: 'left' }),
+      );
+      await triggerChatMember(
+        createChatMemberCtx({ oldStatus: 'member', newStatus: 'kicked' }),
+      );
+
+      expect(registerGroup).not.toHaveBeenCalled();
+    });
+
+    it('flag on: membership update about another user does not register', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerChatMember(createChatMemberCtx({ newMemberUserId: 777 }));
+
+      expect(registerGroup).not.toHaveBeenCalled();
+    });
+
+    it('flag on: message from an unregistered group late-registers it and processes the message', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({
+          chatId: -100777,
+          chatType: 'supergroup',
+          chatTitle: 'Late Group',
+          text: '@Breadbrich Engels hello',
+        }),
+      );
+
+      expect(registerGroup).toHaveBeenCalledWith(
+        'tg:-100777',
+        expect.objectContaining({
+          name: 'Late Group',
+          folder: 'telegram_late-group',
+        }),
+      );
+      // The triggering message itself is delivered, not dropped.
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:-100777',
+        expect.objectContaining({ content: '@Breadbrich Engels hello' }),
+      );
+    });
+
+    it('flag on: private chats are never auto-registered', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({ chatId: 555, chatType: 'private', text: 'dm hi' }),
+      );
+
+      expect(registerGroup).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('flag on: /chatid in an unregistered group self-heal registers it', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('chatid')!;
+      await handler({
+        chat: { id: -100888, type: 'group', title: 'Ops Chat' },
+        from: { first_name: 'Alice' },
+        reply: vi.fn(),
+      });
+
+      expect(registerGroup).toHaveBeenCalledWith(
+        'tg:-100888',
+        expect.objectContaining({ folder: 'telegram_ops-chat' }),
+      );
+    });
+
+    it('flag off: /chatid does not register (existing behavior)', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts({
+        autoRegisterGroups: false,
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const reply = vi.fn();
+      const handler = currentBot().commandHandlers.get('chatid')!;
+      await handler({
+        chat: { id: -100888, type: 'group', title: 'Ops Chat' },
+        from: { first_name: 'Alice' },
+        reply,
+      });
+
+      expect(reply).toHaveBeenCalledWith(
+        expect.stringContaining('tg:-100888'),
+        expect.any(Object),
+      );
+      expect(registerGroup).not.toHaveBeenCalled();
+    });
+
+    it('flag on: media from an unregistered group also late-registers', async () => {
+      const { opts, registerGroup } = createAutoRegisterOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({ chatId: -100555, extra: {} });
+      await triggerMediaMessage('message:location', ctx);
+
+      expect(registerGroup).toHaveBeenCalledWith(
+        'tg:-100555',
+        expect.anything(),
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:-100555',
+        expect.objectContaining({ content: '[Location]' }),
+      );
+    });
+  });
+
+  // --- Auto-allowlist (TELEGRAM_AUTO_ALLOWLIST_GROUPS) ---
+
+  describe('auto-allowlist', () => {
+    it('off by default: never seeds senders', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(createTextCtx({ text: 'hello' }));
+
+      expect(ensureAllowlistedMock).not.toHaveBeenCalled();
+      expect(opts.onMessage).toHaveBeenCalled();
+    });
+
+    it("'all': seeds the sender of any registered group message", async () => {
+      const opts = createTestOpts({ autoAllowlistGroups: 'all' });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(createTextCtx({ text: 'hello' }));
+
+      expect(ensureAllowlistedMock).toHaveBeenCalledWith({
+        telegramId: '99001',
+        username: 'alice_user',
+        firstName: 'Alice',
+      });
+      expect(opts.onMessage).toHaveBeenCalled();
+    });
+
+    it('jid list: seeds only in listed groups', async () => {
+      const opts = createTestOpts({
+        autoAllowlistGroups: 'tg:100200300,tg:-555',
+      });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(createTextCtx({ text: 'hello' }));
+      expect(ensureAllowlistedMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('jid list: does not seed in unlisted groups', async () => {
+      const opts = createTestOpts({ autoAllowlistGroups: 'tg:-555' });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(createTextCtx({ text: 'hello' }));
+
+      expect(ensureAllowlistedMock).not.toHaveBeenCalled();
+      expect(opts.onMessage).toHaveBeenCalled(); // message still delivered
+    });
+
+    it("'all' does not seed registered private chats", async () => {
+      const opts = createTestOpts({ autoAllowlistGroups: 'all' });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(
+        createTextCtx({ text: 'hello', chatType: 'private' }),
+      );
+
+      expect(ensureAllowlistedMock).not.toHaveBeenCalled();
+    });
+
+    it('never seeds bot senders', async () => {
+      const opts = createTestOpts({ autoAllowlistGroups: 'all' });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'beep' });
+      (ctx.from as any).is_bot = true;
+      await triggerTextMessage(ctx);
+
+      expect(ensureAllowlistedMock).not.toHaveBeenCalled();
+    });
+
+    it('seeding failure never blocks message delivery', async () => {
+      ensureAllowlistedMock.mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+      const opts = createTestOpts({ autoAllowlistGroups: 'all' });
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await triggerTextMessage(createTextCtx({ text: 'hello' }));
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: 'hello' }),
+      );
     });
   });
 });
