@@ -5,6 +5,7 @@ import fs from 'fs';
 import {
   ASSISTANT_NAME,
   isPrivilegedGroup,
+  MCP_SERVERS,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -187,6 +188,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
+        mcpServers: MCP_SERVERS,
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

@@ -7,21 +7,51 @@ const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
-vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
-  CONTAINER_MAX_OUTPUT_SIZE: 10485760,
-  CONTAINER_TIMEOUT: 1800000, // 30min
-  CREDENTIAL_PROXY_PORT: 3001,
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
-  IDLE_TIMEOUT: 1800000, // 30min
-  NANOCLAW_MODEL: undefined,
-  NANOCLAW_SUBAGENT_MODEL: undefined,
-  PROFILE_DIR: '/tmp/nanoclaw-test-profile',
-  SHARED_KB_GROUP: 'slack_main',
-  STORE_DIR: '/tmp/nanoclaw-test-profile/store',
-  TIMEZONE: 'America/Los_Angeles',
-}));
+vi.mock('./config.js', async () => {
+  // Real (deps-free) env-var-name resolver so container-runner's MCP env
+  // plumbing runs its actual logic; MCP_SERVERS defaults to [] and can be
+  // overridden per-test via setMcpServers() for the generic-bridge cases.
+  const { mcpServerEnvVarNames } =
+    await vi.importActual<typeof import('./mcp-servers.js')>(
+      './mcp-servers.js',
+    );
+  return {
+    AGENT_CONTAINER_CPUS: '',
+    AGENT_CONTAINER_MEMORY: '',
+    AGENT_CONTAINER_PIDS_LIMIT: '',
+    CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+    CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+    CONTAINER_RUNTIME: 'docker',
+    CONTAINER_TIMEOUT: 1800000, // 30min
+    CREDENTIAL_PROXY_PORT: 3001,
+    DATA_DIR: '/tmp/nanoclaw-test-data',
+    GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+    IDLE_TIMEOUT: 1800000, // 30min
+    K8S_DATA_PVC_NAME: '',
+    K8S_NAMESPACE: '',
+    K8S_NODE_NAME: '',
+    K8S_POD_IP: '',
+    K8S_VOLUME_MODE: 'hostPath',
+    KB_DASHBOARD_URL: 'https://kb.test.example',
+    NANOCLAW_MODEL: undefined,
+    NANOCLAW_SUBAGENT_MODEL: undefined,
+    PROFILE_DIR: '/tmp/nanoclaw-test-profile',
+    SHARED_KB_GROUP: 'slack_main',
+    STORE_DIR: '/tmp/nanoclaw-test-profile/store',
+    TIMEZONE: 'America/Los_Angeles',
+    get MCP_SERVERS() {
+      return mockMcpServers;
+    },
+    mcpServerEnvVarNames,
+  };
+});
+
+// Mutable holder so individual tests can inject configured MCP servers into
+// the mocked config without re-mocking the module. Reset in beforeEach.
+let mockMcpServers: unknown[] = [];
+function setMcpServers(servers: unknown[]): void {
+  mockMcpServers = servers;
+}
 
 // Mock logger
 vi.mock('./logger.js', () => ({
@@ -66,7 +96,16 @@ vi.mock('./container-runtime.js', () => ({
   CONTAINER_HOST_GATEWAY: 'host.docker.internal',
   hostGatewayArgs: () => [],
   readonlyMountArgs: (h: string, c: string) => ['-v', `${h}:${c}:ro`],
+  resourceLimitArgs: vi.fn(() => []),
   stopContainer: vi.fn(),
+}));
+
+// Mock container-runtime-k8s (only exercised when CONTAINER_RUNTIME is
+// mocked to 'kubernetes' in a specific describe block; harmless default here).
+vi.mock('./container-runtime-k8s.js', () => ({
+  buildK8sPodOverrides: vi.fn(() => ({})),
+  buildKubectlRunArgs: vi.fn(() => ['run', 'test-pod']),
+  warnPidsLimitUnsupported: vi.fn(),
 }));
 
 // Mock credential-proxy
@@ -118,6 +157,7 @@ vi.mock('child_process', async () => {
 import { spawn } from 'child_process';
 import fs from 'fs';
 import { logger } from './logger.js';
+import { resourceLimitArgs } from './container-runtime.js';
 import { runContainerAgent, ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -334,6 +374,140 @@ describe('container-runner GitHub PAT injection', () => {
     // No env override is applied at all when the token is absent
     expect(opts.env).toBeUndefined();
   });
+
+  it('passes KB_DASHBOARD_URL by value in argv (non-secret, for citations)', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args] = lastSpawnCall();
+
+    // Mocked config sets KB_DASHBOARD_URL — it should reach the container so the
+    // agent can deep-link internal-doc citations into the dashboard.
+    expect(args).toContain('KB_DASHBOARD_URL=https://kb.test.example');
+  });
+});
+
+describe('container-runner placeholder API key composition', () => {
+  let savedAuthToken: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    savedAuthToken = process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+    delete process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedAuthToken === undefined) {
+      delete process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+    } else {
+      process.env.CREDENTIAL_PROXY_AUTH_TOKEN = savedAuthToken;
+    }
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnArgs(): string[] {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1][1] as unknown as string[];
+  }
+
+  it('encodes placeholder-<containerName> with no auth token configured', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const args = lastSpawnArgs();
+    const apiKeyArg = args.find((a) => a.startsWith('ANTHROPIC_API_KEY='));
+    expect(apiKeyArg).toBeDefined();
+    const value = apiKeyArg!.slice('ANTHROPIC_API_KEY='.length);
+    expect(value).toMatch(/^placeholder-nanoclaw-test-group-\d+$/);
+  });
+
+  it('encodes placeholder.<authToken>.<containerName> when CREDENTIAL_PROXY_AUTH_TOKEN is set', async () => {
+    process.env.CREDENTIAL_PROXY_AUTH_TOKEN = 'shared-secret';
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const args = lastSpawnArgs();
+    const apiKeyArg = args.find((a) => a.startsWith('ANTHROPIC_API_KEY='));
+    expect(apiKeyArg).toBeDefined();
+    const value = apiKeyArg!.slice('ANTHROPIC_API_KEY='.length);
+    expect(value).toMatch(
+      /^placeholder\.shared-secret\.nanoclaw-test-group-\d+$/,
+    );
+  });
+});
+
+describe('container-runner resource limit args', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(resourceLimitArgs).mockReturnValue([]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(resourceLimitArgs).mockReturnValue([]);
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnArgs(): string[] {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1][1] as unknown as string[];
+  }
+
+  it('includes no resource-limit flags by default', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+    const args = lastSpawnArgs();
+    expect(args).not.toContain('--memory');
+    expect(args).not.toContain('--cpus');
+    expect(args).not.toContain('--pids-limit');
+  });
+
+  it('forwards resourceLimitArgs() output into the docker run args', async () => {
+    vi.mocked(resourceLimitArgs).mockReturnValue([
+      '--memory',
+      '512m',
+      '--memory-swap',
+      '512m',
+      '--cpus',
+      '1.5',
+      '--pids-limit',
+      '256',
+    ]);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const args = lastSpawnArgs();
+    expect(args).toContain('--memory');
+    expect(args).toContain('512m');
+    expect(args).toContain('--cpus');
+    expect(args).toContain('1.5');
+    expect(args).toContain('--pids-limit');
+    expect(args).toContain('256');
+  });
 });
 
 describe('container-runner Linear API key injection', () => {
@@ -417,6 +591,121 @@ describe('container-runner Linear API key injection', () => {
 
     expect(args).not.toContain('LINEAR_API_KEY');
     // No env override is applied at all when neither token is set
+    expect(opts.env).toBeUndefined();
+  });
+});
+
+describe('container-runner generic remote-MCP bridge', () => {
+  const SECRET = 'zapier-secret-TESTVALUE-do-not-log-0123456789';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.debug).mockClear();
+    vi.mocked(logger.info).mockClear();
+    setMcpServers([]);
+    delete process.env.ZAPIER_MCP_TOKEN;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.ZAPIER_MCP_TOKEN;
+    setMcpServers([]);
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnCall() {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1] as unknown as [
+      string,
+      string[],
+      { stdio: unknown; env?: NodeJS.ProcessEnv },
+    ];
+  }
+
+  it('passes the referenced env var by NAME only in argv, and by VALUE via the runtime env, when set', async () => {
+    setMcpServers([
+      {
+        name: 'zapier',
+        type: 'http',
+        url: 'https://mcp.zapier.com/api/mcp/abc',
+        bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+      },
+    ]);
+    process.env.ZAPIER_MCP_TOKEN = SECRET;
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+
+    // Passthrough flag present as name only (no `=value`)
+    expect(args).toContain('ZAPIER_MCP_TOKEN');
+    expect(args.some((a) => a.includes('ZAPIER_MCP_TOKEN='))).toBe(false);
+    expect(args.join(' ')).not.toContain(SECRET);
+
+    // The secret is delivered only through the spawned runtime's env
+    expect(opts.env?.ZAPIER_MCP_TOKEN).toBe(SECRET);
+
+    // And it must not have leaked into any log line
+    const logged = JSON.stringify([
+      ...vi.mocked(logger.debug).mock.calls,
+      ...vi.mocked(logger.info).mock.calls,
+    ]);
+    expect(logged).not.toContain(SECRET);
+  });
+
+  it('omits the env passthrough entirely when the referenced env var is unset', async () => {
+    setMcpServers([
+      {
+        name: 'zapier',
+        type: 'http',
+        url: 'https://mcp.zapier.com/api/mcp/abc',
+        bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+      },
+    ]);
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+    expect(args).not.toContain('ZAPIER_MCP_TOKEN');
+    expect(opts.env).toBeUndefined();
+  });
+
+  it('injects the configured mcpServers into the stdin-JSON payload written to the container process', async () => {
+    const configured = [
+      {
+        name: 'zapier',
+        type: 'http' as const,
+        url: 'https://mcp.zapier.com/api/mcp/abc',
+        bearerEnvVar: 'ZAPIER_MCP_TOKEN',
+      },
+    ];
+    setMcpServers(configured);
+
+    const writeSpy = vi.spyOn(fakeProc.stdin, 'write');
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    const written = writeSpy.mock.calls[0][0] as string;
+    const parsed = JSON.parse(written);
+    expect(parsed.mcpServers).toEqual(configured);
+  });
+
+  it('does not change docker args/env at all when no mcpServers are configured (no behavior change)', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+    const [, args, opts] = lastSpawnCall();
+    expect(args.filter((a) => a === 'ZAPIER_MCP_TOKEN')).toHaveLength(0);
     expect(opts.env).toBeUndefined();
   });
 });

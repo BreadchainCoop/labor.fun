@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock logger
 vi.mock('./logger.js', () => ({
@@ -19,6 +19,7 @@ vi.mock('child_process', () => ({
 import {
   CONTAINER_RUNTIME_BIN,
   readonlyMountArgs,
+  resourceLimitArgs,
   stopContainer,
   ensureContainerRuntimeRunning,
   cleanupOrphans,
@@ -27,6 +28,69 @@ import { logger } from './logger.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe('resourceLimitArgs', () => {
+  const keys = [
+    'AGENT_CONTAINER_MEMORY',
+    'AGENT_CONTAINER_CPUS',
+    'AGENT_CONTAINER_PIDS_LIMIT',
+  ];
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const k of keys) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('returns no flags when no env vars are set', () => {
+    expect(resourceLimitArgs()).toEqual([]);
+  });
+
+  it('adds --memory and matching --memory-swap when AGENT_CONTAINER_MEMORY is set', () => {
+    process.env.AGENT_CONTAINER_MEMORY = '512m';
+    expect(resourceLimitArgs()).toEqual([
+      '--memory',
+      '512m',
+      '--memory-swap',
+      '512m',
+    ]);
+  });
+
+  it('adds --cpus when AGENT_CONTAINER_CPUS is set', () => {
+    process.env.AGENT_CONTAINER_CPUS = '1.5';
+    expect(resourceLimitArgs()).toEqual(['--cpus', '1.5']);
+  });
+
+  it('adds --pids-limit when AGENT_CONTAINER_PIDS_LIMIT is set', () => {
+    process.env.AGENT_CONTAINER_PIDS_LIMIT = '256';
+    expect(resourceLimitArgs()).toEqual(['--pids-limit', '256']);
+  });
+
+  it('combines all three when all env vars are set', () => {
+    process.env.AGENT_CONTAINER_MEMORY = '1g';
+    process.env.AGENT_CONTAINER_CPUS = '2';
+    process.env.AGENT_CONTAINER_PIDS_LIMIT = '512';
+    expect(resourceLimitArgs()).toEqual([
+      '--memory',
+      '1g',
+      '--memory-swap',
+      '1g',
+      '--cpus',
+      '2',
+      '--pids-limit',
+      '512',
+    ]);
+  });
 });
 
 // --- Pure functions ---

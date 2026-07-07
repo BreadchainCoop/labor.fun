@@ -10,6 +10,7 @@ import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { SlackHttpReceiver } from './slack-http-receiver.js';
 import {
   Channel,
   OnInboundMessage,
@@ -76,24 +77,71 @@ export class SlackChannel implements Channel {
   constructor(opts: SlackChannelOpts) {
     this.opts = opts;
 
-    // Read tokens from .env (not process.env — keeps secrets off the environment
-    // so they don't leak to child processes, matching NanoClaw's security pattern)
-    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
-    const botToken = env.SLACK_BOT_TOKEN;
-    const appToken = env.SLACK_APP_TOKEN;
+    // Config is sourced from process.env first (hosted: Kubernetes tenant pods
+    // inject these via envFrom secretRef, with no .env file present), falling
+    // back to .env for self-hosted/dev. process.env wins over .env. Matches the
+    // control-plane-sync / container-runner `process.env.X || env.X` convention.
+    const env = readEnvFile([
+      'SLACK_BOT_TOKEN',
+      'SLACK_APP_TOKEN',
+      'SLACK_RECEIVER_MODE',
+      'SLACK_HTTP_PORT',
+      'SLACK_INGRESS_SECRET',
+      'SLACK_SIGNING_SECRET',
+    ]);
+    const botToken = process.env.SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN;
+    const appToken = process.env.SLACK_APP_TOKEN || env.SLACK_APP_TOKEN;
+    const receiverMode =
+      process.env.SLACK_RECEIVER_MODE || env.SLACK_RECEIVER_MODE;
+    const httpPort = process.env.SLACK_HTTP_PORT || env.SLACK_HTTP_PORT;
+    const ingressSecret =
+      process.env.SLACK_INGRESS_SECRET || env.SLACK_INGRESS_SECRET;
+    const signingSecret =
+      process.env.SLACK_SIGNING_SECRET || env.SLACK_SIGNING_SECRET;
+    const mode = (receiverMode || 'socket').toLowerCase();
 
-    if (!botToken || !appToken) {
-      throw new Error(
-        'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
-      );
+    if (mode === 'http') {
+      // HTTP receiver mode: Slack Events API over HTTP POST /slack/events.
+      // Used by the hosted control-plane ingress (one multi-workspace Slack
+      // app forwarding events per tenant) or for direct Events API exposure.
+      // No app-level token needed — outbound still uses the bot token, and
+      // app.start()/stop() delegate to the receiver, so connect()/disconnect()
+      // work unchanged. All event handlers below are shared with socket mode.
+      if (!botToken) {
+        throw new Error('SLACK_BOT_TOKEN must be set in .env');
+      }
+      if (!ingressSecret && !signingSecret) {
+        const msg =
+          'SLACK_RECEIVER_MODE=http requires SLACK_INGRESS_SECRET ' +
+          '(forwarded-from-ingress) or SLACK_SIGNING_SECRET (direct Slack ' +
+          'exposure) to be set in .env';
+        logger.error(msg);
+        throw new Error(msg);
+      }
+      const receiver = new SlackHttpReceiver({
+        port: Number(httpPort) || 3012,
+        ingressSecret,
+        signingSecret,
+      });
+      this.app = new App({
+        token: botToken,
+        receiver,
+        logLevel: LogLevel.ERROR,
+      });
+    } else {
+      // Socket Mode (default): unchanged behavior.
+      if (!botToken || !appToken) {
+        throw new Error(
+          'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
+        );
+      }
+      this.app = new App({
+        token: botToken,
+        appToken,
+        socketMode: true,
+        logLevel: LogLevel.ERROR,
+      });
     }
-
-    this.app = new App({
-      token: botToken,
-      appToken,
-      socketMode: true,
-      logLevel: LogLevel.ERROR,
-    });
 
     this.setupEventHandlers();
   }
@@ -680,8 +728,35 @@ export class SlackChannel implements Channel {
 }
 
 registerChannel('slack', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
-  if (!envVars.SLACK_BOT_TOKEN || !envVars.SLACK_APP_TOKEN) {
+  // Config is sourced from process.env first (hosted: envFrom secretRef),
+  // falling back to .env for self-hosted/dev; process.env wins over .env.
+  const envVars = readEnvFile([
+    'SLACK_BOT_TOKEN',
+    'SLACK_APP_TOKEN',
+    'SLACK_RECEIVER_MODE',
+    'SLACK_INGRESS_SECRET',
+    'SLACK_SIGNING_SECRET',
+  ]);
+  const botToken = process.env.SLACK_BOT_TOKEN || envVars.SLACK_BOT_TOKEN;
+  const appToken = process.env.SLACK_APP_TOKEN || envVars.SLACK_APP_TOKEN;
+  const receiverMode =
+    process.env.SLACK_RECEIVER_MODE || envVars.SLACK_RECEIVER_MODE;
+  const ingressSecret =
+    process.env.SLACK_INGRESS_SECRET || envVars.SLACK_INGRESS_SECRET;
+  const signingSecret =
+    process.env.SLACK_SIGNING_SECRET || envVars.SLACK_SIGNING_SECRET;
+  const mode = (receiverMode || 'socket').toLowerCase();
+  if (mode === 'http') {
+    // HTTP mode needs the bot token plus one verification secret — the
+    // app-level (Socket Mode) token is NOT required.
+    if (!botToken || (!ingressSecret && !signingSecret)) {
+      logger.warn(
+        'Slack (http mode): SLACK_BOT_TOKEN plus SLACK_INGRESS_SECRET or ' +
+          'SLACK_SIGNING_SECRET must be set',
+      );
+      return null;
+    }
+  } else if (!botToken || !appToken) {
     logger.warn('Slack: SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set');
     return null;
   }

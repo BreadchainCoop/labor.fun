@@ -15,7 +15,13 @@ import './signal.js';
 // slack
 import './slack.js';
 
+// teams (Microsoft Teams / Bot Framework; opt-in via TEAMS_ENABLED)
+import './teams.js';
+
 // telegram
 import './telegram.js';
+
+// web (browser chat widget; opt-in via WEB_WIDGET_ENABLED)
+import './web.js';
 
 // whatsapp

@@ -3,11 +3,22 @@ import path from 'path';
 
 import { readEnvFile } from './env.js';
 import {
+  type McpServerConfig,
+  validateMcpServerConfigs,
+} from './mcp-servers.js';
+import {
   PROJECT_ROOT,
   loadProfileConfig,
   resolveProfileDir,
 } from './profile.js';
 import { isValidTimezone } from './timezone.js';
+
+export type {
+  McpServerConfig,
+  McpServerHttpConfig,
+  McpServerStdioConfig,
+} from './mcp-servers.js';
+export { mcpServerEnvVarNames } from './mcp-servers.js';
 
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
@@ -23,6 +34,17 @@ const envConfig = readEnvFile([
   // should be operator-configurable must be listed here for readEnvFile to
   // pick it up at process start.
   'FLAT_ACCESS',
+  // Microsoft Teams channel (src/channels/teams.ts). Opt-in via TEAMS_ENABLED;
+  // stays fully inert (no HTTP port opened) unless TEAMS_APP_ID +
+  // TEAMS_APP_PASSWORD are also set. The secret (TEAMS_APP_PASSWORD) is
+  // deliberately NOT listed here — it's read directly by teams.ts via its own
+  // readEnvFile call (matching slack.ts's SLACK_BOT_TOKEN / discord.ts's
+  // DISCORD_TOKEN), so it never flows through this module or gets exported.
+  'TEAMS_ENABLED',
+  'TEAMS_APP_ID',
+  'TEAMS_APP_TENANT_ID',
+  'TEAMS_MESSAGING_PORT',
+  'TEAMS_HOST',
   'DISCORD_DM_ALLOWED_ROLE_IDS',
   'DISCORD_DM_ALLOWED_GUILD_IDS',
   'DISCORD_DM_ROLE_REFRESH_INTERVAL',
@@ -34,6 +56,9 @@ const envConfig = readEnvFile([
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
   'ENABLED_SKILLS',
+  'GATED_ACTION_CLASSES',
+  'APPROVAL_TIMEOUT_MINUTES',
+  'APPROVAL_EXPIRY_TICK_MS',
   'GITHUB_ORG',
   'SERVICE_USER',
   'REMINDER_LADDER',
@@ -58,6 +83,30 @@ const envConfig = readEnvFile([
   'SMITHERS_BRIDGE_ENABLED',
   'SMITHERS_BRIDGE_PORT',
   'SMITHERS_BRIDGE_TOKEN',
+  // Container runtime backend selection + Kubernetes-specific config.
+  // See docs/KUBERNETES.md. Inert unless CONTAINER_RUNTIME=kubernetes.
+  'CONTAINER_RUNTIME',
+  'K8S_NAMESPACE',
+  'K8S_VOLUME_MODE',
+  'K8S_NODE_NAME',
+  'K8S_DATA_PVC_NAME',
+  'K8S_POD_IP',
+  'AGENT_CONTAINER_MEMORY',
+  'AGENT_CONTAINER_CPUS',
+  'AGENT_CONTAINER_PIDS_LIMIT',
+  // Knowledge connectors (src/integrations/connectors/). Env-gated + off by
+  // default. Secrets (NOTION_API_KEY, Google creds file) are NOT read here —
+  // they're loaded lazily via readEnvFile in the connector modules so tokens
+  // never enter this module's cached config or any log.
+  'CONNECTOR_SYNC_INTERVAL_MS',
+  'NOTION_ROOT_PAGE_IDS',
+  'NOTION_DATABASE_IDS',
+  'GOOGLE_DRIVE_FOLDER_IDS',
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md). A JSON array of MCP
+  // server configs, additive to the active profile's `mcpServers`. Lets a
+  // hosted/multi-tenant install inject servers without editing profile files.
+  // Holds only NAMES of env vars for secrets, never secret values.
+  'MCP_SERVERS',
 ]);
 
 /** Look up an env value, preferring process.env, falling back to .env. */
@@ -99,6 +148,110 @@ export const ENABLED_SKILLS: string[] = (() => {
     : [];
   return Array.from(new Set([...fromProfile, ...fromEnv]));
 })();
+
+// --- Generic remote-MCP bridge (docs/MCP-SERVERS.md) ---
+// The configured MCP servers (remote/HTTP or local/stdio) to wire into every
+// agent container, beyond the built-ins (nanoclaw, gws, github, linear).
+// Merged from the active profile's `mcpServers` and the `MCP_SERVERS` env var
+// (a JSON array, appended after the profile's list — for hosted/multi-tenant
+// injection). Validated loudly at startup: a bad name / shape / reserved
+// collision throws rather than silently disabling the integration. The
+// non-secret shape (name/type/url/command/args + env var NAMES) is threaded to
+// the container via ContainerInput; secret VALUES flow only through the
+// container's env (see container-runner.ts). See src/mcp-servers.ts.
+export const MCP_SERVERS: McpServerConfig[] = (() => {
+  const fromProfile = Array.isArray(PROFILE.mcpServers)
+    ? PROFILE.mcpServers
+    : [];
+  const envRaw = envVal('MCP_SERVERS');
+  let fromEnv: unknown[] = [];
+  if (envRaw && envRaw.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(envRaw);
+    } catch (err) {
+      throw new Error(
+        `MCP_SERVERS env var is not valid JSON: ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error('MCP_SERVERS env var must be a JSON array.');
+    }
+    fromEnv = parsed;
+  }
+  return validateMcpServerConfigs([...fromProfile, ...fromEnv]);
+})();
+
+// --- Human-in-the-loop approval gate (reusable primitive) ---
+// Which classes of consequential action require a human approval before the
+// agent proceeds. Declared in config/rules, never hardcoded per-op. Merged from
+// the active profile's `gatedActionClasses` and the `GATED_ACTION_CLASSES` env
+// var (comma-separated); when NEITHER is set, a conservative default set
+// applies. See rules/approvals/README.md and src/ipc.ts (request_approval).
+//
+// Default gated set (conservative — write actions that are hard to undo or that
+// reach outside the org). Each token is a stable `action_class` an agent tags
+// its proposal with:
+//   outbound_external_message — a message/DM/email leaving the org
+//   github_write              — opening/merging PRs, pushing, editing issues
+//   linear_write              — creating/closing Linear issues/projects
+//   kb_delete                 — deleting a knowledge-base document
+//   payout                    — moving money / on-chain value
+export const DEFAULT_GATED_ACTION_CLASSES: string[] = [
+  'outbound_external_message',
+  'github_write',
+  'linear_write',
+  'kb_delete',
+  'payout',
+];
+
+export const GATED_ACTION_CLASSES: string[] = (() => {
+  const fromEnv = (envVal('GATED_ACTION_CLASSES') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromProfile = Array.isArray(PROFILE.gatedActionClasses)
+    ? PROFILE.gatedActionClasses.map((s) => String(s).trim()).filter(Boolean)
+    : [];
+  const merged = Array.from(new Set([...fromProfile, ...fromEnv]));
+  // Neither profile nor env declared anything → conservative default.
+  return merged.length > 0 ? merged : [...DEFAULT_GATED_ACTION_CLASSES];
+})();
+
+/** True when the given action_class must go through the human approval gate. */
+export function isGatedActionClass(actionClass: string): boolean {
+  return GATED_ACTION_CLASSES.includes(actionClass);
+}
+
+// KB people-slugs allowed to approve gated actions. Empty → ANY allowlisted
+// sender may approve (today's flat model). When non-empty, approval is narrowed
+// to these slugs.
+export const APPROVER_SLUGS: string[] = Array.isArray(
+  PROFILE.approvals?.approverSlugs,
+)
+  ? PROFILE.approvals!.approverSlugs!.map((s) => String(s).trim()).filter(
+      Boolean,
+    )
+  : [];
+
+// Minutes a pending approval stays open before auto-expiry. 0 → never expires.
+export const APPROVAL_TIMEOUT_MINUTES: number = (() => {
+  const raw = envVal('APPROVAL_TIMEOUT_MINUTES');
+  if (raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  if (
+    PROFILE.approvals &&
+    typeof PROFILE.approvals.timeoutMinutes === 'number'
+  ) {
+    return Math.max(0, Math.floor(PROFILE.approvals.timeoutMinutes));
+  }
+  // Present-but-unset block, or no block at all → 24h default.
+  return 1440;
+})();
+
 export const SERVICE_USER =
   envVal('SERVICE_USER') || PROFILE.serviceUser || 'breadbrich';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -135,6 +288,45 @@ export const CONTAINER_TIMEOUT = parseInt(
   process.env.CONTAINER_TIMEOUT || '1800000',
   10,
 );
+
+// --- Container runtime backend ---
+// 'docker' (default, self-hosters) or 'kubernetes' (hosted SaaS — one
+// namespace per tenant, orchestrator as a Deployment, agent runs as Pods in
+// the same namespace). See docs/KUBERNETES.md and src/container-runtime-k8s.ts.
+export type ContainerRuntimeKind = 'docker' | 'kubernetes';
+export const CONTAINER_RUNTIME: ContainerRuntimeKind =
+  envVal('CONTAINER_RUNTIME') === 'kubernetes' ? 'kubernetes' : 'docker';
+
+// Namespace kubectl targets. Empty = use the current kubeconfig context's
+// default namespace (kubectl's own behavior when --namespace is omitted).
+export const K8S_NAMESPACE = envVal('K8S_NAMESPACE') || '';
+
+// How agent pods get the same filesystem view as the orchestrator:
+// 'hostPath' (default) pins agent pods to the orchestrator's node via
+// K8S_NODE_NAME and bind-mounts host paths directly, matching Docker's
+// single-host trust model. 'pvc' mounts a shared RWX PersistentVolumeClaim
+// (K8S_DATA_PVC_NAME) with subPaths mirroring the profile's relative layout,
+// for real multi-node clusters. See docs/KUBERNETES.md "Volumes".
+export type K8sVolumeMode = 'hostPath' | 'pvc';
+export const K8S_VOLUME_MODE: K8sVolumeMode =
+  envVal('K8S_VOLUME_MODE') === 'pvc' ? 'pvc' : 'hostPath';
+
+// Downward-API env vars the orchestrator Deployment must inject (see
+// deploy/k8s/tenant-example/deployment.yaml). Read here, not computed, so a
+// missing value fails loudly (undefined) rather than guessing.
+export const K8S_NODE_NAME = envVal('K8S_NODE_NAME') || '';
+export const K8S_POD_IP = envVal('K8S_POD_IP') || '';
+
+// PVC claim name shared by the orchestrator Deployment and every agent Pod
+// when K8S_VOLUME_MODE=pvc. Required in that mode; unused in hostPath mode.
+export const K8S_DATA_PVC_NAME = envVal('K8S_DATA_PVC_NAME') || '';
+
+// Agent container resource limits — shared between the docker and kubernetes
+// backends. Empty = no limit applied (current behavior, unchanged default).
+export const AGENT_CONTAINER_MEMORY = envVal('AGENT_CONTAINER_MEMORY') || '';
+export const AGENT_CONTAINER_CPUS = envVal('AGENT_CONTAINER_CPUS') || '';
+export const AGENT_CONTAINER_PIDS_LIMIT =
+  envVal('AGENT_CONTAINER_PIDS_LIMIT') || '';
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
@@ -206,6 +398,21 @@ function splitIds(raw: string | undefined): string[] {
 export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
   envVal('DISCORD_DM_ALLOWED_ROLE_IDS'),
 );
+
+// --- Microsoft Teams channel (src/channels/teams.ts) ---
+// Non-secret feature flags, exported for anything outside the channel module
+// that needs to know Teams is configured (e.g. setup/status tooling). The App
+// ID is not a secret (it's a public GUID identifying the Azure AD app
+// registration) but TEAMS_APP_PASSWORD (the app's client secret) is — that one
+// is intentionally read only inside teams.ts itself and never exported here.
+export const TEAMS_ENABLED = envVal('TEAMS_ENABLED') === 'true';
+export const TEAMS_APP_ID = envVal('TEAMS_APP_ID') || '';
+export const TEAMS_APP_TENANT_ID = envVal('TEAMS_APP_TENANT_ID') || '';
+export const TEAMS_MESSAGING_PORT = parseInt(
+  envVal('TEAMS_MESSAGING_PORT') || '3978',
+  10,
+);
+export const TEAMS_HOST = envVal('TEAMS_HOST') || '0.0.0.0';
 // Optional: scope role lookup to specific guild IDs. Empty = check every
 // guild the bot is in.
 export const DISCORD_DM_ALLOWED_GUILD_IDS = splitIds(
@@ -437,3 +644,26 @@ export const SMITHERS_BRIDGE_PORT = Number(
   envVal('SMITHERS_BRIDGE_PORT') || 3002,
 );
 export const SMITHERS_BRIDGE_TOKEN = envVal('SMITHERS_BRIDGE_TOKEN') || '';
+
+// --- Knowledge connectors (RAG) ---
+// External sources (Notion, Google Drive, …) synced INTO the per-group KB as
+// markdown so RBAC, search, and citations apply. Each connector self-registers
+// (src/integrations/connectors/) and is env-gated. See docs/CONNECTORS.md.
+//
+// Shared poll interval for all connectors unless a connector overrides it.
+// Default 30 min. Set to 0 to disable every connector loop at once.
+export const CONNECTOR_SYNC_INTERVAL_MS = Math.max(
+  0,
+  parseInt(envVal('CONNECTOR_SYNC_INTERVAL_MS') || '1800000', 10) || 1800000,
+);
+// Notion scope: comma-separated page ids (subtrees) and/or database ids to
+// mirror. Empty (both) → Notion connector off. The API key itself is a secret,
+// read lazily via readEnvFile (NOTION_API_KEY), never here.
+export const NOTION_ROOT_PAGE_IDS = splitIds(envVal('NOTION_ROOT_PAGE_IDS'));
+export const NOTION_DATABASE_IDS = splitIds(envVal('NOTION_DATABASE_IDS'));
+// Google Drive scope: comma-separated Drive folder ids whose Google Docs are
+// mirrored. Empty → Drive connector off. Auth reuses the existing
+// GOOGLE_WORKSPACE_CREDENTIALS_FILE (the same OAuth creds the `gws` tool uses).
+export const GOOGLE_DRIVE_FOLDER_IDS = splitIds(
+  envVal('GOOGLE_DRIVE_FOLDER_IDS'),
+);

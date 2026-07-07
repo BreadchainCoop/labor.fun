@@ -19,6 +19,7 @@ import { ChildProcess } from 'child_process';
 import {
   ASSISTANT_NAME,
   isPrivilegedGroup,
+  MCP_SERVERS,
   PM_DM_COOLDOWN_MS,
   PM_DUE_SOON_DAYS,
   PM_LEAD,
@@ -163,6 +164,7 @@ export async function runPmOrchestrationTick(
           isMain,
           isScheduledTask: true,
           assistantName: ASSISTANT_NAME,
+          mcpServers: MCP_SERVERS,
         },
         (proc, containerName) =>
           deps.onProcess(jid, proc, containerName, group.folder),

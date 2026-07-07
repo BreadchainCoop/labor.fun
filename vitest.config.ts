@@ -21,6 +21,12 @@ export default defineConfig({
       // live beside them and import only the pure render fns, never serve.mjs
       // (which starts an HTTPS server on import).
       'tools/agenda-page/*.test.mjs',
+      // container/agent-runner is a separate TS build (its own tsconfig,
+      // compiled by container/build.sh) with no test runner of its own. Its
+      // pure (fs/stdin/query-free) modules — e.g. mcp-servers.ts — are unit
+      // tested beside them; the repo's vitest can run these directly since
+      // they have no runtime dependency on the container image.
+      'container/agent-runner/src/**/*.test.ts',
       // Container git hooks are plain .mjs run inside the agent image; their
       // pure logic (coauthor.mjs) is unit-tested beside them.
       'container/hooks/*.test.mjs',

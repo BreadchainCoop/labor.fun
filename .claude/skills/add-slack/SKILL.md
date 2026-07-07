@@ -1,6 +1,6 @@
 ---
 name: add-slack
-description: Add Slack as a channel. Can replace WhatsApp entirely or run alongside it. Uses Socket Mode (no public URL needed).
+description: Add Slack as a channel. Can replace WhatsApp entirely or run alongside it. Uses Socket Mode by default (no public URL needed); an HTTP receiver mode is available for Events API delivery.
 ---
 
 # Add Slack Channel
@@ -196,6 +196,42 @@ The Slack channel supports:
 - **Private channels** — Bot must be invited to the channel
 - **Direct messages** — Users can DM the bot directly
 - **Multi-channel** — Can run alongside WhatsApp or other channels (auto-enabled by credentials)
+
+## HTTP receiver mode
+
+By default the channel uses Socket Mode (`SLACK_RECEIVER_MODE=socket`). Setting
+`SLACK_RECEIVER_MODE=http` switches to receiving Slack Events API posts over
+HTTP instead — used by the hosted multi-workspace architecture (a control-plane
+ingress verifies Slack's signature, routes by `team_id`, and forwards events to
+the tenant orchestrator) and by self-hosters who want direct Events API
+exposure without Socket Mode.
+
+- Endpoint: `POST /slack/events`, listening on `SLACK_HTTP_PORT` (default `3012`).
+- `SLACK_APP_TOKEN` is **not** needed in http mode; outbound still uses `SLACK_BOT_TOKEN`.
+- Slack's `url_verification` challenge is answered automatically.
+- Events are acked with an immediate 200 and processed asynchronously.
+- Both modes share the same event handlers — behavior is identical either way.
+
+Request verification (http mode requires at least one secret; the channel
+refuses to start if neither is set; ingress wins if both are):
+
+1. **Forwarded from ingress** — set `SLACK_INGRESS_SECRET`. Each request must
+   carry `x-labor-ingress-timestamp` (unix seconds) and
+   `x-labor-ingress-signature` = hex(HMAC-SHA256(secret, `${timestamp}.${rawBody}`)).
+   Requests older/newer than 300s or with a bad signature get 401.
+2. **Direct Slack exposure** — set `SLACK_SIGNING_SECRET` (the app's Signing
+   Secret from **Basic Information**). Standard Slack v0 signature verification
+   (`x-slack-request-timestamp` / `x-slack-signature`), same 300s window. In
+   the Slack app config, disable Socket Mode and set the Events API Request URL
+   to `https://<your-host>/slack/events`.
+
+```bash
+# .env — http mode, direct Slack exposure
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_RECEIVER_MODE=http
+SLACK_HTTP_PORT=3012
+SLACK_SIGNING_SECRET=your-signing-secret
+```
 
 ## Known Limitations
 

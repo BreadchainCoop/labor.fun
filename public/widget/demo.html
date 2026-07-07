@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>labor.fun web widget — demo</title>
+    <style>
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        max-width: 720px;
+        margin: 40px auto;
+        padding: 0 20px;
+        line-height: 1.6;
+        color: #1f2937;
+      }
+      h1 {
+        font-size: 28px;
+      }
+      code {
+        background: #f3f4f6;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      pre {
+        background: #f3f4f6;
+        padding: 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Acme Corp</h1>
+    <p>
+      Welcome to the demo page for the labor.fun embeddable chat widget. This is
+      placeholder marketing copy so the floating chat bubble has something to
+      float over. In a real deployment this would be your product landing page,
+      docs site, or support portal.
+    </p>
+    <p>
+      Our AI assistant answers questions instantly, 24/7, right here on the page
+      — no signup, no third-party chat vendor, fully self-owned. Click the chat
+      bubble in the bottom-right corner to start a conversation.
+    </p>
+    <p>
+      Everything the assistant knows comes from your own knowledge base. It runs
+      in an isolated container with per-visitor memory and does not share data
+      with any outside chat provider.
+    </p>
+
+    <h2>Embed snippet</h2>
+    <p>Adding the widget to any page is a single script tag:</p>
+    <pre><code>&lt;script
+  src="https://your-host.example.com/widget/labor-widget.js"
+  data-site-key="YOUR_SITE_KEY"
+  data-endpoint="https://your-host.example.com:3100"&gt;&lt;/script&gt;</code></pre>
+
+    <!--
+      NOTE: replace the placeholders below before using this in production:
+        - data-site-key  → your WEB_WIDGET_SITE_KEY value
+        - data-endpoint  → the public origin of your widget server
+                           (behind a TLS-terminating reverse proxy)
+      This demo points at a local dev server on port 3100. The endpoint's
+      origin must be listed in WEB_WIDGET_ALLOWED_ORIGINS on the server.
+    -->
+    <script
+      src="./labor-widget.js"
+      data-site-key="YOUR_SITE_KEY"
+      data-endpoint="http://localhost:3100"
+    ></script>
+  </body>
+</html>

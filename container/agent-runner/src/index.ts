@@ -23,6 +23,7 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { buildDynamicMcpServers, type McpServerConfig } from './mcp-servers.js';
 
 interface ContainerInput {
   prompt: string;
@@ -37,6 +38,14 @@ interface ContainerInput {
   allowedTools?: string[];
   /** Extra system-prompt text appended after the global memory. */
   systemPromptAppend?: string;
+  /**
+   * Config-driven MCP servers (generic remote-MCP bridge). NON-SECRET shape
+   * only — name/type/url/command/args + env var NAMES; the referenced secret
+   * VALUES arrive via the container's process env (docker `-e NAME` / k8s pod
+   * env). Each enabled entry becomes an SDK `mcpServers` entry + an
+   * `mcp__<name>__*` allowlist token. See docs/MCP-SERVERS.md.
+   */
+  mcpServers?: McpServerConfig[];
 }
 
 interface ContainerOutput {
@@ -455,6 +464,21 @@ async function runQuery(
     log(`Model: ${orchestratorModel}`);
   }
 
+  // Generic remote-MCP bridge: assemble config-driven MCP servers (Zapier,
+  // Jira, Stripe, Notion, stdio tools, …) from ContainerInput.mcpServers and
+  // the container's env. Each enabled entry yields an SDK `mcpServers` entry
+  // plus an `mcp__<name>__*` allowlist token. Entries whose referenced env
+  // vars are unset are silently omitted (same gating as hasLinear). Only
+  // non-secret metadata (names/count) is logged, never header/env values.
+  const dynamicMcp = buildDynamicMcpServers(
+    containerInput.mcpServers,
+    process.env,
+  );
+  const dynamicMcpNames = Object.keys(dynamicMcp.mcpServers);
+  if (dynamicMcpNames.length > 0) {
+    log(`Config-driven MCP servers: ${dynamicMcpNames.join(', ')}`);
+  }
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -495,6 +519,8 @@ async function runQuery(
         ...(hasGoogleWorkspace ? ['mcp__gws__*'] : []),
         ...(hasGithub ? ['mcp__github__*'] : []),
         ...(hasLinear ? ['mcp__linear__*'] : []),
+        // Config-driven MCP servers (generic remote-MCP bridge).
+        ...dynamicMcp.allowedToolTokens,
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -565,6 +591,11 @@ async function runQuery(
               },
             }
           : {}),
+        // Config-driven MCP servers (generic remote-MCP bridge). Each enabled
+        // entry (its referenced env vars are all set) is spread in here as a
+        // streamable-HTTP or stdio server. Built from ContainerInput.mcpServers
+        // + the container's env by buildDynamicMcpServers. See docs/MCP-SERVERS.md.
+        ...dynamicMcp.mcpServers,
       },
       hooks: {
         PreCompact: [

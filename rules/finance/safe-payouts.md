@@ -5,6 +5,12 @@ On-chain reimbursements are paid as an ERC-20 transfer from the org's
 [expenses](expenses.md) lifecycle — its own `safe_payouts` table, its own
 `safe-payouts` integration. The two never share state.
 
+This is also intentionally **not** built on the generic
+[human-in-the-loop approval primitive](../approvals/README.md) — its
+"approval" is an on-chain signer threshold, not a chat-reply decision. See
+that doc's "Relationship to other approval flows" section for why the two
+stay separate.
+
 ## The model: the Safe threshold IS the approval
 
 - There are **no approval tiers**. Whether a payout happens is decided **entirely

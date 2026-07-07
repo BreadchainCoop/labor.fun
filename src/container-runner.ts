@@ -7,14 +7,26 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AGENT_CONTAINER_CPUS,
+  AGENT_CONTAINER_MEMORY,
+  AGENT_CONTAINER_PIDS_LIMIT,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
+  CONTAINER_RUNTIME,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   ENABLED_SKILLS,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  K8S_NAMESPACE,
+  K8S_NODE_NAME,
+  K8S_POD_IP,
+  K8S_VOLUME_MODE,
+  K8S_DATA_PVC_NAME,
+  KB_DASHBOARD_URL,
+  MCP_SERVERS,
+  mcpServerEnvVarNames,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
   PROFILE_DIR,
@@ -29,10 +41,19 @@ import {
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
   readonlyMountArgs,
+  resourceLimitArgs,
   stopContainer,
 } from './container-runtime.js';
+import {
+  buildK8sPodOverrides,
+  buildKubectlRunArgs,
+  warnPidsLimitUnsupported,
+  type K8sEnvVar,
+  type PvcRootMapping,
+} from './container-runtime-k8s.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
+import type { McpServerConfig } from './mcp-servers.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -124,6 +145,15 @@ export interface ContainerInput {
    * usual 'Container exited with error'. Unset = current behavior.
    */
   expectExternalStop?: boolean;
+  /**
+   * Config-driven MCP servers (generic remote-MCP bridge). The NON-SECRET
+   * shape (name/type/url/command/args + env var NAMES) is threaded to the
+   * container via this stdin-JSON payload; the referenced secret VALUES flow
+   * separately through the container's env (docker `-e NAME` passthrough /
+   * kubernetes resolved pod env — see buildContainerArgs / buildK8sEnvVars).
+   * Sourced from MCP_SERVERS in config.ts. See docs/MCP-SERVERS.md.
+   */
+  mcpServers?: McpServerConfig[];
 }
 
 export interface ContainerOutput {
@@ -184,9 +214,26 @@ function buildVolumeMounts(
     // system" (code 125) and every message is dropped. Ensure an empty stub
     // mountpoint exists so the writable store bind can mount over it.
     // Idempotent, and a no-op in the legacy root layout (STORE_DIR == stub).
-    const storeMountpoint = path.join(projectRoot, 'store');
-    if (!fs.existsSync(storeMountpoint)) {
-      fs.mkdirSync(storeMountpoint, { recursive: true });
+    //
+    // This stub is a Docker nested-bind-mount workaround only. Under
+    // CONTAINER_RUNTIME=kubernetes the store is a separate volumeMount (no
+    // nesting), so no stub is needed — and projectRoot is the read-only image
+    // dir (/app), NOT writable by the non-root orchestrator user, so creating
+    // it would throw EACCES and drop every run. Skip it under kubernetes, and
+    // treat a failure elsewhere as non-fatal (best-effort) rather than
+    // crashing the run.
+    if (CONTAINER_RUNTIME !== 'kubernetes') {
+      const storeMountpoint = path.join(projectRoot, 'store');
+      if (!fs.existsSync(storeMountpoint)) {
+        try {
+          fs.mkdirSync(storeMountpoint, { recursive: true });
+        } catch (err) {
+          logger.warn(
+            { storeMountpoint, err },
+            'Could not create project-root store stub mountpoint (continuing)',
+          );
+        }
+      }
     }
     mounts.push({
       hostPath: STORE_DIR,
@@ -393,9 +440,15 @@ function buildVolumeMounts(
  * .env (with process.env fallback). Returns undefined when unset, which
  * leaves the GitHub MCP server unloaded inside the container.
  *
- * The value is intentionally NEVER placed in the container argv — it is
- * passed through the spawned runtime's process environment instead, so it
- * cannot leak via the debug log of containerArgs or host process args.
+ * Docker path: the value is NEVER placed in the container argv — it is
+ * passed through the spawned runtime's process environment instead (bare
+ * `-e NAME` passthrough), so it cannot leak via the debug log of
+ * containerArgs or host process args.
+ *
+ * Kubernetes path: kubectl run has no equivalent of "read this var from my
+ * own process env," so buildK8sEnvVars resolves the value directly into the
+ * pod spec's env list (part of the --overrides argv). redactSecretsInArgs
+ * strips it back out before that argv is written to the debug log.
  */
 function getGithubToken(): string | undefined {
   return (
@@ -407,14 +460,72 @@ function getGithubToken(): string | undefined {
 /**
  * Linear personal API key for the bundled Linear MCP server, read from .env
  * (with process.env fallback). Returns undefined when unset, which leaves the
- * Linear MCP server unloaded inside the container. Like the GitHub PAT, the
- * value is passed through the spawned runtime's process environment, never
- * argv, so it can't leak via the containerArgs debug log or host process args.
+ * Linear MCP server unloaded inside the container. Same docker-vs-kubernetes
+ * distinction as getGithubToken() above.
  */
 function getLinearApiKey(): string | undefined {
   return (
     readEnvFile(['LINEAR_API_KEY']).LINEAR_API_KEY || process.env.LINEAR_API_KEY
   );
+}
+
+/**
+ * Resolve the env vars referenced by the configured generic MCP servers
+ * (bearerEnvVar / headerEnvVars / stdio envVars — see docs/MCP-SERVERS.md) to
+ * their real values, reading from .env (with process.env fallback) exactly like
+ * getGithubToken()/getLinearApiKey(). Only NAMES that resolve to a non-empty
+ * value are returned; unset ones are omitted (the corresponding server then
+ * stays unloaded inside the container, same gating as hasLinear).
+ *
+ * Same docker-vs-kubernetes distinction as the other secret getters: the docker
+ * path passes only the NAME (`-e NAME`) so values stay out of argv; the
+ * kubernetes path embeds the resolved value in the pod spec (redacted from the
+ * debug log by redactSecretsInArgs).
+ */
+function getMcpServerEnvVars(): Record<string, string> {
+  const names = mcpServerEnvVarNames(MCP_SERVERS);
+  if (names.length === 0) return {};
+  const fromFile = readEnvFile(names);
+  const out: Record<string, string> = {};
+  for (const name of names) {
+    const value = fromFile[name] || process.env[name];
+    if (value) out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * Redacts known secret values (GitHub PAT, Linear API key) out of a joined
+ * argv string before it's written to the debug log. No-op for the docker
+ * backend (those values never appear in argv there); needed for the
+ * kubernetes backend, whose --overrides JSON embeds them — see
+ * getGithubToken()/getLinearApiKey() docs above.
+ */
+function redactSecretsInArgs(joined: string): string {
+  let result = joined;
+  const githubToken = getGithubToken();
+  if (githubToken) {
+    result = result.split(githubToken).join('***REDACTED***');
+  }
+  const linearApiKey = getLinearApiKey();
+  if (linearApiKey) {
+    result = result.split(linearApiKey).join('***REDACTED***');
+  }
+  // Generic remote-MCP bridge: the kubernetes pod spec embeds every configured
+  // MCP server's referenced secret value (docs/MCP-SERVERS.md) — scrub them all
+  // out of the logged argv, same as the github/linear tokens above.
+  for (const value of Object.values(getMcpServerEnvVars())) {
+    result = result.split(value).join('***REDACTED***');
+  }
+  // The kubernetes pod spec embeds the run-tagged auth placeholder, which
+  // carries CREDENTIAL_PROXY_AUTH_TOKEN when set — see composeAuthPlaceholder.
+  const proxyAuthToken =
+    readEnvFile(['CREDENTIAL_PROXY_AUTH_TOKEN']).CREDENTIAL_PROXY_AUTH_TOKEN ||
+    process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+  if (proxyAuthToken) {
+    result = result.split(proxyAuthToken).join('***REDACTED***');
+  }
+  return result;
 }
 
 // Fixed in-container path for the mounted gws credentials file. The host
@@ -493,6 +604,22 @@ function resolveGoogleWorkspaceCredsPath(): string | undefined {
   return realPath;
 }
 
+/**
+ * Placeholder ANTHROPIC_API_KEY value the container sends to the credential
+ * proxy in api-key mode: encodes the container name (runTag) for usage
+ * attribution, and the CREDENTIAL_PROXY_AUTH_TOKEN shared secret when set.
+ * Shared by the docker (-e flag) and kubernetes (pod-spec env) paths — see
+ * parsePlaceholderApiKey in credential-proxy.ts for the decode side.
+ */
+function composeAuthPlaceholder(containerName: string): string {
+  const proxyAuthToken =
+    readEnvFile(['CREDENTIAL_PROXY_AUTH_TOKEN']).CREDENTIAL_PROXY_AUTH_TOKEN ||
+    process.env.CREDENTIAL_PROXY_AUTH_TOKEN;
+  return proxyAuthToken
+    ? `placeholder.${proxyAuthToken}.${containerName}`
+    : `placeholder-${containerName}`;
+}
+
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -510,12 +637,27 @@ function buildContainerArgs(
   );
 
   // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
+  // API key mode: SDK sends x-api-key, proxy replaces with real key. The
+  //               placeholder encodes the container name (runTag) so the
+  //               proxy can attribute usage to this run — and, when
+  //               CREDENTIAL_PROXY_AUTH_TOKEN is set, a shared secret the
+  //               proxy checks before forwarding (multi-tenant hardening).
+  //               Format: placeholder-<runTag>, or with an auth token:
+  //               placeholder.<authToken>.<runTag>. See parsePlaceholderApiKey
+  //               in credential-proxy.ts for the matching decode logic and why
+  //               '.' is a safe separator (never appears in a container name).
   // OAuth mode:   SDK exchanges placeholder token for temp API key,
   //               proxy injects real OAuth token on that exchange request.
+  //               The exchange request carries the placeholder via
+  //               `authorization`, not `x-api-key`, so there's no placeholder
+  //               value to attach run attribution/auth-token to — OAuth mode
+  //               intentionally skips both (see credential-proxy.ts).
   const authMode = detectAuthMode();
   if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    args.push(
+      '-e',
+      `ANTHROPIC_API_KEY=${composeAuthPlaceholder(containerName)}`,
+    );
   } else {
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
@@ -529,6 +671,14 @@ function buildContainerArgs(
   }
   if (NANOCLAW_SUBAGENT_MODEL) {
     args.push('-e', `NANOCLAW_SUBAGENT_MODEL=${NANOCLAW_SUBAGENT_MODEL}`);
+  }
+
+  // KB dashboard base URL (non-secret, from profile.config.json). The agent
+  // reads $KB_DASHBOARD_URL to render internal-doc citations as deep-links into
+  // the dashboard (`/doc/:category/:file`). See the `citations` container skill.
+  // Safe to pass by value — it's a public URL, not a credential.
+  if (KB_DASHBOARD_URL) {
+    args.push('-e', `KB_DASHBOARD_URL=${KB_DASHBOARD_URL}`);
   }
 
   // GitHub MCP server: enable the env passthrough WITHOUT putting the
@@ -554,6 +704,14 @@ function buildContainerArgs(
     args.push('-e', 'LINEAR_API_KEY');
   }
 
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md): pass through, by NAME
+  // only, every env var referenced by a configured MCP server whose value is
+  // set. Same secret-safe pattern as Linear/GitHub — the value comes from the
+  // spawned runtime's process env (populated in runContainerAgent), never argv.
+  for (const name of Object.keys(getMcpServerEnvVars())) {
+    args.push('-e', name);
+  }
+
   // Google Workspace MCP: only the in-container path goes in argv (not a
   // secret); actual credentials live in the read-only mounted file. The
   // env var presence is what flips hasGoogleWorkspace inside agent-runner.
@@ -568,6 +726,10 @@ function buildContainerArgs(
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // Optional resource limits (AGENT_CONTAINER_MEMORY / _CPUS / _PIDS_LIMIT).
+  // Unset by default — no behavior change for existing installs.
+  args.push(...resourceLimitArgs());
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -592,6 +754,161 @@ function buildContainerArgs(
   return args;
 }
 
+/**
+ * Same env vars buildContainerArgs derives (TZ, auth placeholder, model
+ * routing, GitHub/Linear/GWS passthrough), reshaped as {name, value} pairs
+ * for the Kubernetes pod spec instead of docker `-e` flags. Kept as its own
+ * function (not folded into buildContainerArgs) so the docker arg-building
+ * code path is untouched — see docs/KUBERNETES.md for why this is a
+ * parallel builder rather than a shared one.
+ */
+function buildK8sEnvVars(
+  containerName: string,
+  modelOverride?: string,
+): K8sEnvVar[] {
+  const env: K8sEnvVar[] = [{ name: 'TZ', value: TIMEZONE }];
+
+  env.push({
+    name: 'ANTHROPIC_BASE_URL',
+    value: `http://${K8S_POD_IP}:${CREDENTIAL_PROXY_PORT}`,
+  });
+
+  const authMode = detectAuthMode();
+  if (authMode === 'api-key') {
+    // Same run-tagged placeholder as the docker path, so usage attribution
+    // and CREDENTIAL_PROXY_AUTH_TOKEN enforcement work identically under k8s.
+    env.push({
+      name: 'ANTHROPIC_API_KEY',
+      value: composeAuthPlaceholder(containerName),
+    });
+  } else {
+    env.push({ name: 'CLAUDE_CODE_OAUTH_TOKEN', value: 'placeholder' });
+  }
+
+  const orchestratorModel = modelOverride || NANOCLAW_MODEL;
+  if (orchestratorModel) {
+    env.push({ name: 'NANOCLAW_MODEL', value: orchestratorModel });
+  }
+  if (NANOCLAW_SUBAGENT_MODEL) {
+    env.push({
+      name: 'NANOCLAW_SUBAGENT_MODEL',
+      value: NANOCLAW_SUBAGENT_MODEL,
+    });
+  }
+
+  // Non-secret: lets the citations skill render internal-doc deep-links into
+  // the KB dashboard under the kubernetes runtime too (mirrors the docker
+  // `-e KB_DASHBOARD_URL` passthrough in buildContainerArgs).
+  if (KB_DASHBOARD_URL) {
+    env.push({ name: 'KB_DASHBOARD_URL', value: KB_DASHBOARD_URL });
+  }
+
+  // Secrets: resolved to their real value here (unlike the docker path's bare
+  // `-e NAME` passthrough) because kubectl run has no equivalent of "read
+  // this var from my own process env" — the pod spec is a self-contained
+  // JSON document handed to the API server, not a child process inheriting
+  // the parent's environment. The value still never touches this file's
+  // *logged* debug output (callers log containerArgs/mounts, not the
+  // resolved env list) but it IS present in the --overrides JSON passed as a
+  // kubectl argv, which is a real difference from the docker passthrough —
+  // documented in docs/KUBERNETES.md.
+  const githubToken = getGithubToken();
+  if (githubToken) {
+    env.push({ name: 'GITHUB_PERSONAL_ACCESS_TOKEN', value: githubToken });
+    env.push({ name: 'GH_TOKEN', value: githubToken });
+  }
+  const linearApiKey = getLinearApiKey();
+  if (linearApiKey) {
+    env.push({ name: 'LINEAR_API_KEY', value: linearApiKey });
+  }
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md): resolve each configured
+  // server's referenced secret into the pod spec's env list (kubectl run has no
+  // name-only passthrough). redactSecretsInArgs strips these values back out
+  // before the argv is logged.
+  for (const [name, value] of Object.entries(getMcpServerEnvVars())) {
+    env.push({ name, value });
+  }
+  if (resolveGoogleWorkspaceCredsPath()) {
+    env.push({
+      name: 'GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE',
+      value: CONTAINER_GWS_CREDS_PATH,
+    });
+  }
+
+  return env;
+}
+
+/**
+ * PVC-mode subPath roots: every host path buildVolumeMounts() can produce
+ * falls under one of these three (PROFILE_DIR for the profile/store/groups
+ * tree, DATA_DIR for sessions/IPC/agent-runner-src, process.cwd() for the
+ * read-only project-root mount). See docs/KUBERNETES.md "Path translation
+ * is the hard part" — a host path outside all three (e.g. an
+ * additionalMounts entry pointing elsewhere) fails loudly in
+ * translateMountForK8s rather than mounting silently wrong.
+ */
+function pvcRootMappings(): PvcRootMapping[] {
+  return [
+    { hostRoot: PROFILE_DIR, subPathPrefix: 'profile' },
+    { hostRoot: DATA_DIR, subPathPrefix: 'data' },
+    { hostRoot: process.cwd(), subPathPrefix: 'project' },
+  ];
+}
+
+/**
+ * The spawn seam: returns the binary + argv to invoke for this run, branching
+ * on CONTAINER_RUNTIME. Docker path is a thin wrapper around the unchanged
+ * buildContainerArgs; Kubernetes path builds a pod spec (buildK8sPodOverrides)
+ * and a `kubectl run` invocation (buildKubectlRunArgs). This is the ONE place
+ * container-runner.ts branches on runtime kind — see docs/KUBERNETES.md.
+ */
+function buildSpawnCommand(
+  mounts: VolumeMount[],
+  containerName: string,
+  modelOverride?: string,
+): { bin: string; args: string[] } {
+  if (CONTAINER_RUNTIME === 'kubernetes') {
+    if (AGENT_CONTAINER_PIDS_LIMIT) {
+      warnPidsLimitUnsupported(AGENT_CONTAINER_PIDS_LIMIT);
+    }
+    const hostUid = process.getuid?.();
+    const hostGid = process.getgid?.();
+    const runAsRoot = hostUid == null || hostUid === 0 || hostUid === 1000;
+    const overrides = buildK8sPodOverrides({
+      podName: containerName,
+      image: CONTAINER_IMAGE,
+      mounts: mounts.map((m) => ({
+        hostPath: m.hostPath,
+        containerPath: m.containerPath,
+        readonly: m.readonly,
+      })),
+      env: buildK8sEnvVars(containerName, modelOverride),
+      volumeMode: K8S_VOLUME_MODE,
+      nodeName: K8S_VOLUME_MODE === 'hostPath' ? K8S_NODE_NAME : undefined,
+      pvcName: K8S_VOLUME_MODE === 'pvc' ? K8S_DATA_PVC_NAME : undefined,
+      pvcRoots: K8S_VOLUME_MODE === 'pvc' ? pvcRootMappings() : undefined,
+      resources: {
+        memory: AGENT_CONTAINER_MEMORY || undefined,
+        cpus: AGENT_CONTAINER_CPUS || undefined,
+      },
+      runAsUser: runAsRoot ? undefined : hostUid,
+      runAsGroup: runAsRoot ? undefined : hostGid,
+    });
+    const args = buildKubectlRunArgs({
+      podName: containerName,
+      image: CONTAINER_IMAGE,
+      namespace: K8S_NAMESPACE,
+      overrides,
+    });
+    return { bin: 'kubectl', args };
+  }
+
+  return {
+    bin: CONTAINER_RUNTIME_BIN,
+    args: buildContainerArgs(mounts, containerName, modelOverride),
+  };
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -603,24 +920,40 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
+  // Generic remote-MCP bridge (docs/MCP-SERVERS.md): thread the configured MCP
+  // servers' NON-SECRET shape into the container via the stdin-JSON payload so
+  // agent-runner can build the SDK `mcpServers` map + allowlist. The referenced
+  // secret VALUES travel separately through the container env (see
+  // buildContainerArgs / buildK8sEnvVars / extraEnv below). Injected here from
+  // config so no call site can forget it; an explicit input.mcpServers wins.
+  input = { ...input, mcpServers: input.mcpServers ?? MCP_SERVERS };
+
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(
+  const { bin: runtimeBin, args: containerArgs } = buildSpawnCommand(
     mounts,
     containerName,
     input.modelOverride,
   );
 
+  // The docker argv never contains secret values (bare `-e NAME` passthrough
+  // — see buildContainerArgs). The kubernetes argv DOES embed resolved
+  // secret values inside the --overrides JSON (kubectl run has no
+  // name-only env passthrough — see buildK8sEnvVars), so redact known
+  // secret values before this hits the debug log.
+  const loggedContainerArgs = redactSecretsInArgs(containerArgs.join(' '));
+
   logger.debug(
     {
       group: group.name,
       containerName,
+      runtimeBin,
       mounts: mounts.map(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
       ),
-      containerArgs: containerArgs.join(' '),
+      containerArgs: loggedContainerArgs,
     },
     'Container mount configuration',
   );
@@ -641,23 +974,34 @@ export async function runContainerAgent(
   return new Promise((resolve) => {
     // Inject the GitHub PAT into the runtime's process environment (never
     // argv), matching the `-e GITHUB_PERSONAL_ACCESS_TOKEN` and `-e GH_TOKEN`
-    // passthrough flags added in buildContainerArgs.
+    // passthrough flags added in buildContainerArgs. Docker-only: the
+    // kubernetes backend resolves these directly into the pod spec's env
+    // list instead (see buildK8sEnvVars) since `kubectl run` has no
+    // equivalent of "read this var from my own process env."
     //
     // GITHUB_PERSONAL_ACCESS_TOKEN — used by the GitHub MCP server.
     // GH_TOKEN                     — used by the gh CLI (different name,
     //                                same value). Without this, `gh api`
     //                                calls in task script gates fail silently.
-    const githubToken = getGithubToken();
-    const linearApiKey = getLinearApiKey();
     const extraEnv: Record<string, string> = {};
-    if (githubToken) {
-      extraEnv.GITHUB_PERSONAL_ACCESS_TOKEN = githubToken;
-      extraEnv.GH_TOKEN = githubToken;
+    if (CONTAINER_RUNTIME !== 'kubernetes') {
+      const githubToken = getGithubToken();
+      const linearApiKey = getLinearApiKey();
+      if (githubToken) {
+        extraEnv.GITHUB_PERSONAL_ACCESS_TOKEN = githubToken;
+        extraEnv.GH_TOKEN = githubToken;
+      }
+      if (linearApiKey) {
+        extraEnv.LINEAR_API_KEY = linearApiKey;
+      }
+      // Generic remote-MCP bridge (docs/MCP-SERVERS.md): inject each configured
+      // server's referenced secret VALUE into the runtime's process env,
+      // matching the bare `-e NAME` passthrough flags in buildContainerArgs.
+      for (const [name, value] of Object.entries(getMcpServerEnvVars())) {
+        extraEnv[name] = value;
+      }
     }
-    if (linearApiKey) {
-      extraEnv.LINEAR_API_KEY = linearApiKey;
-    }
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
+    const container = spawn(runtimeBin, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(Object.keys(extraEnv).length
         ? { env: { ...process.env, ...extraEnv } }
@@ -871,7 +1215,7 @@ export async function runContainerAgent(
         }
         logLines.push(
           `=== Container Args ===`,
-          containerArgs.join(' '),
+          loggedContainerArgs,
           ``,
           `=== Mounts ===`,
           mounts
