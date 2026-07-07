@@ -1,0 +1,109 @@
+# Example orchestrator Deployment for one tenant, running the labor.fun
+# Node.js process with CONTAINER_RUNTIME=kubernetes so agent runs become
+# Pods in this same namespace. See docs/KUBERNETES.md for the full design.
+#
+# Replace before applying:
+#   - image: the orchestrator image, built from the repo root via
+#     deploy/docker/Dockerfile.orchestrator (published to GHCR as
+#     nanoclaw-orchestrator by .github/workflows/container.yml). NOT
+#     container/Dockerfile — that one builds the AGENT image referenced by
+#     CONTAINER_IMAGE below.
+#   - CONTAINER_IMAGE: the agent image (container/build.sh output), pushed
+#     to a registry the cluster can pull from.
+#   - hostPath volumes: only used in K8S_VOLUME_MODE=hostPath (default) —
+#     point them at the profile directory's actual location on the node.
+#     Switch to the commented-out PVC alternative for K8S_VOLUME_MODE=pvc.
+#   - secretKeyRef sources: however this install already manages
+#     ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (OneCLI vault, k8s Secret,
+#     etc.) — this manifest does not change credential sourcing, only
+#     container spawning.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nanoclaw-orchestrator
+  namespace: nanoclaw-tenant-example
+  labels:
+    app: nanoclaw-orchestrator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single orchestrator instance per tenant; SQLite store is not multi-writer safe
+  selector:
+    matchLabels:
+      app: nanoclaw-orchestrator
+  template:
+    metadata:
+      labels:
+        app: nanoclaw-orchestrator
+    spec:
+      serviceAccountName: nanoclaw-orchestrator
+      # hostPath mode (default): pin the orchestrator to a specific node so
+      # its own hostPath mounts and the agent pods' hostPath mounts
+      # (via K8S_NODE_NAME below) resolve to the same disk. Omit this
+      # (and K8S_NODE_NAME) entirely when using K8S_VOLUME_MODE=pvc.
+      nodeSelector:
+        kubernetes.io/hostname: REPLACE_WITH_NODE_NAME
+      containers:
+        - name: orchestrator
+          image: REPLACE_WITH_ORCHESTRATOR_IMAGE
+          env:
+            - name: CONTAINER_RUNTIME
+              value: "kubernetes"
+            - name: K8S_NAMESPACE
+              value: "nanoclaw-tenant-example"
+            - name: K8S_VOLUME_MODE
+              value: "hostPath" # or "pvc" — see docs/KUBERNETES.md
+            - name: CONTAINER_IMAGE
+              value: "REPLACE_WITH_AGENT_IMAGE:latest"
+            # --- Downward API: the orchestrator learns its own placement ---
+            - name: K8S_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # --- Credentials: source however this install already does ---
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-secrets
+                  key: anthropic-api-key
+                  optional: true
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nanoclaw-secrets
+                  key: claude-code-oauth-token
+                  optional: true
+          ports:
+            - containerPort: 3001 # credential proxy
+          volumeMounts:
+            # hostPath mode: mount the profile dir at the SAME path the
+            # orchestrator process expects (PROFILE_DIR), so container-runner's
+            # computed host paths are valid both for the orchestrator's own
+            # process and for agent pods scheduled on the same node.
+            - name: profile-data
+              mountPath: /data/profiles/tenant-example
+            # --- PVC mode alternative (comment out hostPath above, uncomment
+            # below, and remove nodeSelector/K8S_NODE_NAME usage):
+            # - name: profile-data
+            #   mountPath: /data/profiles/tenant-example
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+      volumes:
+        # hostPath mode:
+        - name: profile-data
+          hostPath:
+            path: /srv/nanoclaw/tenant-example
+            type: DirectoryOrCreate
+        # --- PVC mode alternative:
+        # - name: profile-data
+        #   persistentVolumeClaim:
+        #     claimName: nanoclaw-data

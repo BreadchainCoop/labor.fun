@@ -69,7 +69,7 @@ Key-value state persistence for the message router.
 | **key** | TEXT PK | State key          |
 | value   | TEXT    | JSON-encoded value |
 
-Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group).
+Stores: `last_timestamp`, `last_agent_timestamp` (JSON per-group), and `control_plane_usage_cursor` (last `api_usage.id` already reported to the hosted control plane — see `api_usage`).
 
 ### scheduled_tasks
 
@@ -251,6 +251,30 @@ Action items extracted from meeting transcripts that need coordinator approval b
 | resulting_task_id | TEXT    | TASK-NNN id created on approval                        |
 | rejection_reason  | TEXT    | Optional reason given by coordinator                   |
 
+### pending_approvals
+
+The reusable human-in-the-loop approval primitive (`rules/approvals/README.md`). A container agent proposes a consequential action `{action_class, summary, payload}` via `request_approval`; if the class is gated (config-driven, see `GATED_ACTION_CLASSES`), one row is recorded here and an approve/reject prompt is posted to chat. An allowlisted human's reply resolves it via `resolve_approval`. **Not** used by `safe_payouts` (that approval is the on-chain Safe threshold, not a chat reply) — see `rules/finance/safe-payouts.md`.
+
+| Column               | Type    | Notes                                                          |
+| -------------------- | ------- | --------------------------------------------------------------- |
+| **id**               | TEXT PK | Generated ID (AP-{timestamp}-{random})                          |
+| action_class         | TEXT    | Free-form tag, e.g. `github_write`, `kb_write`, `payout`         |
+| summary              | TEXT    | One-line human-readable description shown to the approver       |
+| payload              | TEXT    | Opaque JSON the proposer round-trips back on approval            |
+| dedupe_key           | TEXT    | Optional idempotency key; a live pending row with the same key is reused |
+| chat_jid             | TEXT    | Chat the requesting agent is attached to (notified on resolution) |
+| group_folder         | TEXT    | Source group folder                                             |
+| requested_by_user_id | TEXT    | KB person id of the requester (nullable)                        |
+| approver_hint        | TEXT    | Optional suggested approver name                                 |
+| status               | TEXT    | `pending` → `approved` / `rejected` / `revise` / `expired`        |
+| created_at           | TEXT    | ISO timestamp                                                    |
+| expires_at           | TEXT    | ISO deadline from `APPROVAL_TIMEOUT_MINUTES`; null = never expires |
+| resolved_by_user_id  | TEXT    | KB person id of the approver (nullable)                          |
+| resolved_at          | TEXT    | ISO timestamp of resolution                                       |
+| revision_notes       | TEXT    | Reject/revise reason, carried back to the requesting chat          |
+
+Only a still-`pending` row transitions (guards double-resolution/races). A dedicated background sweep (`src/integrations/approval-expiry.ts`) flips stale pending rows past `expires_at` to `expired` and notifies the requesting chat once.
+
 ### reminder_log
 
 Idempotency ledger for the escalating-deadline reminder engine (`src/reminder-engine.ts`). One row per (item, ladder rung) that has already fired, so the periodic sweep sends each rung at most once.
@@ -284,6 +308,44 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | **period** | TEXT PK | Period key — ISO week (`2026-W24`) or month (`2026-06`) |
 | sent_at    | TEXT    | ISO timestamp the report was delivered                  |
 
+### api_usage
+
+API cost tracking & budgets: one row per completed `/v1/messages` call observed by the credential proxy (`src/credential-proxy.ts`). Powers usage reporting (`scripts/usage-report.ts`), budget enforcement (`src/usage-budget.ts`), and hosted control-plane usage push (`src/integrations/control-plane-sync.ts` — drains rows by `id` in batches, cursor persisted in `router_state` under `control_plane_usage_cursor`). `run_tag` is the spawning container's name (see `container-runner.ts`), which encodes the group folder, so usage can be grouped per-group by prefix. `est_cost_usd` is computed at insert time from `src/model-pricing.ts`, so historical rows keep the price in effect when the call was made even if pricing is later overridden.
+
+| Column             | Type       | Notes                                              |
+| ------------------ | ---------- | --------------------------------------------------- |
+| **id**             | INTEGER PK | Autoincrement                                      |
+| run_tag            | TEXT       | Container name the request was attributed to (nullable — unattributed when the container sent no placeholder run tag) |
+| model              | TEXT       | Model id reported by the API response              |
+| input_tokens       | INTEGER    | Prompt tokens (excludes cache)                     |
+| output_tokens      | INTEGER    | Completion tokens                                  |
+| cache_read_tokens  | INTEGER    | Tokens served from the prompt cache                |
+| cache_write_tokens | INTEGER    | Tokens written to the prompt cache                 |
+| est_cost_usd       | REAL       | Estimated USD cost at time of the call             |
+| status_code        | INTEGER    | HTTP status of the upstream response               |
+| created_at         | TEXT       | ISO timestamp (indexed)                            |
+
+### assistant_events
+
+Assistant usage + knowledge-gap analytics: one row per completed agent run in a group (`src/db.ts`, `logAssistantEvent`). Powers the KB dashboard's `/analytics` tab (`kb-ui/server.mjs`). `run_id` is a soft link to `agent_runs.id` (no FK) so analytics can be pruned/rebuilt independently. `outcome` is one of `answered` | `knowledge_gap` | `error` | `unknown`; `gap_source` (`agent_signal` | `heuristic`) records how a `knowledge_gap` outcome was determined. Question text and sender are subject to the `ASSISTANT_ANALYTICS_PRIVACY` stance — see [rules/knowledge-base/analytics.md](../rules/knowledge-base/analytics.md) for the knowledge-gap signal convention and the privacy modes.
+
+| Column        | Type       | Notes                                                                 |
+| ------------- | ---------- | ---------------------------------------------------------------------- |
+| **id**        | INTEGER PK | Autoincrement                                                         |
+| run_id        | INTEGER    | Soft link to `agent_runs.id` (nullable, no FK)                        |
+| chat_jid      | TEXT       | Chat/group JID the run served                                         |
+| channel       | TEXT       | Channel the trigger arrived on (slack/telegram/etc, nullable)         |
+| group_name    | TEXT       | Display name of the group (nullable)                                  |
+| group_folder  | TEXT       | Group folder (stable identifier; NOT NULL)                            |
+| is_main       | INTEGER    | 1 if the run happened in the main/shared-KB group                     |
+| sender_name   | TEXT       | Trigger message sender; suppressed (null) per privacy mode            |
+| is_question   | INTEGER    | 1 if the trigger text heuristically looks like a question             |
+| outcome       | TEXT       | `answered` \| `knowledge_gap` \| `error` \| `unknown`                  |
+| gap_source    | TEXT       | `agent_signal` \| `heuristic` \| null (set only when outcome is `knowledge_gap`) |
+| topic         | TEXT       | Coarse keyword-bucketed topic (e.g. `expenses`, `calendar`), nullable |
+| question_text | TEXT       | Trigger text, redacted/truncated/nulled per `ASSISTANT_ANALYTICS_PRIVACY` |
+| created_at    | TEXT       | ISO timestamp (indexed)                                               |
+
 ## Indices
 
 | Index                          | Columns                                | Purpose                                      |
@@ -299,3 +361,9 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | idx_expenses_status            | expenses(status)                       | Approval-queue lookup                        |
 | idx_expenses_requester         | expenses(requester_user_id)            | Per-person expense history                   |
 | idx_expenses_event             | expenses(event_id)                     | Expense grouping by event_id                 |
+| idx_api_usage_created          | api_usage(created_at)                  | Time-range usage queries                     |
+| idx_api_usage_run_tag          | api_usage(run_tag)                     | Per-run/group usage lookup                   |
+| idx_api_usage_model            | api_usage(model)                       | Per-model usage breakdown                    |
+| idx_assistant_events_created   | assistant_events(created_at)           | Time-range analytics queries                 |
+| idx_assistant_events_group     | assistant_events(group_folder, created_at) | Per-group analytics breakdown            |
+| idx_assistant_events_outcome   | assistant_events(outcome, created_at)  | Resolution-rate / knowledge-gap filtering    |

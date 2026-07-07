@@ -1,0 +1,123 @@
+# labor.fun orchestrator image (OSS-generic).
+#
+# This is the ORCHESTRATOR — the long-lived `node dist/index.js` process that
+# runs one-per-org. It is distinct from the AGENT image (container/Dockerfile),
+# which is the short-lived per-run sandbox. In hosted-Kubernetes mode the
+# orchestrator runs as a per-tenant Deployment and spawns agent runs as Pods
+# via `kubectl run` (see docs/KUBERNETES.md, src/container-runtime-k8s.ts), so
+# this image bundles a pinned `kubectl` even though the Docker backend does not
+# need it. The control plane (separate repo) references this image as
+# TENANT_ORCHESTRATOR_IMAGE.
+#
+# Build context is the REPO ROOT (unlike container/Dockerfile whose context is
+# ./container). Build from the repo root:
+#   docker build -f deploy/docker/Dockerfile.orchestrator -t nanoclaw-orchestrator:latest .
+#
+# What is IN the image vs mounted from the tenant PVC/hostPath:
+#   IN the image (framework code + runtime assets read relative to cwd):
+#     - dist/                        compiled orchestrator
+#     - node_modules/ (prod only)    incl. native better-sqlite3 for linux/amd64
+#     - container/skills/            synced into each agent's .claude/skills/
+#                                    (container-runner.ts reads cwd/container/skills)
+#     - container/agent-runner/      copied into each agent pod at /app/src and
+#                                    recompiled at pod start (container-runner.ts
+#                                    reads cwd/container/agent-runner/src)
+#     - scripts/                     task-script gates (agent Dockerfile also
+#                                    bakes these, but the orchestrator reads cwd)
+#     - rules/ setup/ docs/          agent guidance mounted read-only into the
+#                                    main group's agent pods (cwd project-root mount)
+#     - package.json                 version/engines metadata
+#   MOUNTED from the tenant (NOT in the image):
+#     - profiles/<org>/              PVC or hostPath; LABOR_PROFILE selects it.
+#       (profile.config.json, groups/ KB, store/ SQLite, data/ sessions+IPC)
+#     - .env                         secrets come via env/Secret, not the image
+
+# ---- build stage: compile TypeScript with full (dev) deps ----
+# node:22 satisfies package.json engines (>=20) and matches the agent image's
+# node:22 base, so native module ABIs line up across both images.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+
+# Toolchain for native addons (better-sqlite3) built during npm ci.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install deps against the lockfile first (better layer caching).
+# Drop the `prepare` lifecycle script (it runs husky to install git hooks) —
+# there's no .git in the build context and husky is a devDependency; leaving it
+# breaks `npm ci`. Native postinstalls (e.g. better-sqlite3) are unaffected.
+COPY package.json package-lock.json ./
+RUN npm pkg delete scripts.prepare && npm ci
+
+# Compile the orchestrator (tsc → dist/).
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# ---- runtime stage: prod deps + built dist + runtime assets ----
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# kubectl — required to spawn agent pods under CONTAINER_RUNTIME=kubernetes.
+# Pinned; the Kubernetes version-skew policy tolerates a client one minor
+# behind/ahead of the API server, so this covers a range of tenant clusters.
+# Arch is detected from the image (dpkg) rather than a build ARG so a plain
+# `docker build` (no buildx TARGETARCH) still gets the right binary; CI builds
+# linux/amd64. sha256 is verified against the release checksum for the arch.
+ARG KUBECTL_VERSION=v1.30.2
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) karch=amd64 ;; \
+      arm64) karch=arm64 ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl" \
+      -o /usr/local/bin/kubectl; \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl.sha256" \
+      -o /tmp/kubectl.sha256; \
+    echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c -; \
+    chmod +x /usr/local/bin/kubectl; \
+    rm -f /tmp/kubectl.sha256; \
+    kubectl version --client=true 1>/dev/null; \
+    apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Production dependencies only, rebuilt for THIS stage so the native
+# better-sqlite3 binary matches the runtime node/glibc (build-stage node_modules
+# is dev-heavy and not copied). Toolchain is installed then removed in one layer.
+COPY package.json package-lock.json ./
+RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends python3 make g++; \
+    npm pkg delete scripts.prepare; \
+    npm ci --omit=dev; \
+    apt-get purge -y python3 make g++ && apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/* /root/.npm
+
+# Compiled orchestrator.
+COPY --from=build /app/dist ./dist
+
+# Runtime assets the orchestrator reads relative to cwd (process.cwd() == /app).
+# See the header note for why each is here.
+COPY container/skills ./container/skills
+COPY container/agent-runner ./container/agent-runner
+COPY scripts ./scripts
+COPY rules ./rules
+COPY setup ./setup
+COPY docs ./docs
+# The copy-me profile template (docs/NEW-ORG-GUIDE.md). Real tenant profiles are
+# NOT baked — they come from the PVC/hostPath mount selected by LABOR_PROFILE.
+COPY profiles/example ./profiles/example
+
+# Non-root: the stock node:22 image ships a uid/gid 1000 `node` user. The
+# orchestrator writes runtime state (SQLite store, sessions, IPC) under the
+# mounted profile dir, which the tenant provisions writable for uid 1000.
+USER node
+
+# The orchestrator is `node dist/index.js` (package.json "start"). LABOR_PROFILE
+# selects the mounted profile; CONTAINER_RUNTIME=kubernetes flips the pod-spawn
+# backend. Both come from the tenant Deployment's env, not baked here.
+ENTRYPOINT ["node", "dist/index.js"]

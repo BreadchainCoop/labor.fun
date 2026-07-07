@@ -1,0 +1,8 @@
+# One namespace per tenant. Everything else in this directory (RBAC, PVC,
+# Deployment) targets this namespace. See docs/KUBERNETES.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nanoclaw-tenant-example
+  labels:
+    app.kubernetes.io/part-of: labor.fun

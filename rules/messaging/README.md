@@ -7,6 +7,7 @@ How the assistant formats output and sends messages across channels.
 | Rule | When to Read |
 |------|-------------|
 | [Channel Formatting](channel-formatting.md) | Before sending any message — format varies by platform |
+| [Citations](citations.md) | Any answer that draws on a specific KB doc, web page, or GitHub/Linear item — append a Sources block |
 | [Cross-Channel Send](cross-channel.md) | When asked to message someone on a different platform |
 | [Mentions](mentions.md) | Any message meant to notify a person — a plain name doesn't ping; use `<@id>` |
 

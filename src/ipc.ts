@@ -8,6 +8,8 @@ import matter from 'gray-matter';
 import nodemailer from 'nodemailer';
 
 import {
+  APPROVAL_TIMEOUT_MINUTES,
+  APPROVER_SLUGS,
   DATA_DIR,
   FLAT_ACCESS,
   GROUPS_DIR,
@@ -18,6 +20,7 @@ import {
   SERVICE_USER,
   SHARED_KB_GROUP,
   TIMEZONE,
+  isGatedActionClass,
 } from './config.js';
 import { findChatFlow } from './chat-flows/registry.js';
 import { PersonCandidate, resolveDmTarget } from './integrations/dm-resolve.js';
@@ -46,6 +49,9 @@ import {
   isBotMessage,
   getRecentBotMessages,
   logKbAudit,
+  createPendingApproval,
+  getPendingApproval,
+  resolvePendingApproval,
 } from './db.js';
 import { parseAmount, formatAmount, validateAddress } from './safe/payout.js';
 import { resolveRecipient } from './safe/recipient.js';
@@ -173,6 +179,209 @@ function canModifyKbFile(senderCtx: IpcSenderCtx | null): {
 }
 
 /**
+ * Pull every string that looks like a KB file path out of a stored approval
+ * `payload` (a JSON string the agent supplied to request_approval). We accept a
+ * few common key spellings the agent might use, plus any bare string values, so
+ * the delete-authorization match isn't brittle to phrasing. The final gate
+ * still requires EXACT normalized-path equality, so extra candidates can never
+ * broaden authorization to the wrong file.
+ */
+function extractPayloadPaths(payload: string | null): string[] {
+  if (!payload) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    // Non-JSON payload — treat the raw string as a candidate path.
+    return [payload.trim()].filter(Boolean);
+  }
+  const out: string[] = [];
+  const visit = (v: unknown, keyHint?: string): void => {
+    if (typeof v === 'string') {
+      if (
+        keyHint === undefined ||
+        /file_?path|path|file|target/i.test(keyHint)
+      ) {
+        out.push(v.trim());
+      }
+    } else if (Array.isArray(v)) {
+      for (const el of v) visit(el, keyHint);
+    } else if (v && typeof v === 'object') {
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        visit(val, k);
+      }
+    }
+  };
+  visit(parsed);
+  return out.filter(Boolean);
+}
+
+/**
+ * Hard-enforce `kb_delete`: a KB delete only proceeds when the agent points at
+ * an approval row that is (a) present, (b) status `approved`, (c) action_class
+ * `kb_delete`, (d) not past its `expires_at`, and (e) whose recorded payload
+ * references the SAME KB-relative path being deleted. Any miss fails closed.
+ *
+ * `normalizedRelPath` is the target path relative to KB_CONTEXT_DIR (as
+ * `path.relative` produces it). Exported for direct unit testing.
+ */
+export function checkKbDeleteApproval(
+  approvalId: string | null | undefined,
+  normalizedRelPath: string,
+  nowIso: string = new Date().toISOString(),
+): { allowed: boolean; reason: string } {
+  const id = (approvalId || '').trim();
+  if (!id) {
+    return {
+      allowed: false,
+      reason: 'kb_delete is gated — an approved approval_id is required',
+    };
+  }
+  const approval = getPendingApproval(id);
+  if (!approval) {
+    return { allowed: false, reason: `approval ${id} not found` };
+  }
+  if (approval.action_class !== 'kb_delete') {
+    return {
+      allowed: false,
+      reason: `approval ${id} is for ${approval.action_class}, not kb_delete`,
+    };
+  }
+  if (approval.status !== 'approved') {
+    return {
+      allowed: false,
+      reason: `approval ${id} is ${approval.status}, not approved`,
+    };
+  }
+  if (approval.expires_at && approval.expires_at < nowIso) {
+    return { allowed: false, reason: `approval ${id} has expired` };
+  }
+  const wantRel = path.normalize(normalizedRelPath);
+  const paths = extractPayloadPaths(approval.payload).map((p) =>
+    // Normalize candidate paths the same way (strip leading slashes so an
+    // agent that recorded "/tasks/x.md" still matches "tasks/x.md").
+    path.normalize(p.replace(/^\/+/, '')),
+  );
+  if (!paths.includes(wantRel)) {
+    return {
+      allowed: false,
+      reason: `approval ${id} does not authorize deleting ${wantRel}`,
+    };
+  }
+  return { allowed: true, reason: `authorized by approval ${id}` };
+}
+
+/**
+ * Handle a `modify_kb_file` IPC op (write or delete). Extracted from the inline
+ * watcher loop so the delete gate is directly testable. Identity is the flat
+ * allowlist (any known sender, or a synthetic system id for main-group
+ * scheduled runs). Deletes are additionally HARD-gated on an approved
+ * `kb_delete` approval when the org gates that class — the advisory
+ * request_approval prompt alone is not enough (see `checkKbDeleteApproval`).
+ */
+export async function processModifyKbFile(
+  data: {
+    filePath?: string;
+    content?: string;
+    action?: string;
+    approval_id?: string | null;
+  },
+  sourceGroup: string,
+  isMain: boolean,
+  deps: IpcDeps,
+  ipcBaseDir: string = path.join(DATA_DIR, 'ipc'),
+): Promise<void> {
+  if (!data.filePath) return;
+  const registeredGroups = deps.registeredGroups();
+
+  let senderCtx: IpcSenderCtx | null = readSenderCtxFromDir(
+    ipcBaseDir,
+    sourceGroup,
+  );
+  if (!senderCtx && isMain) {
+    // Main-group origin without an attached sender (e.g. a scheduled task fired
+    // in the control channel) is implicitly authorized; attribute the audit
+    // trail to a synthetic system identity so the gate stays semantically a
+    // *validated* allowlist hit.
+    senderCtx = {
+      user_id: `system:scheduled@${sourceGroup}`,
+      display_name: 'scheduled task',
+      tags: [],
+    };
+  }
+
+  const { allowed, reason } = canModifyKbFile(senderCtx);
+  if (!allowed) {
+    logger.warn(
+      { filePath: data.filePath, sourceGroup, reason },
+      'KB file modification blocked — insufficient permissions',
+    );
+    return;
+  }
+
+  const fullPath = resolveKbPath(data.filePath);
+  if (!fullPath) {
+    logger.warn(
+      { filePath: data.filePath, sourceGroup },
+      'KB file modification blocked — path escapes KB context dir',
+    );
+    return;
+  }
+
+  const normalized = path.relative(KB_CONTEXT_DIR, fullPath);
+  const action = data.action || 'write';
+
+  if (action === 'delete') {
+    // HARD gate: when the org gates `kb_delete`, the delete must be backed by
+    // an approved, unexpired approval whose payload references this same path.
+    // Not gated → flat allowlist only, unchanged.
+    const deleteGate = isGatedActionClass('kb_delete')
+      ? checkKbDeleteApproval(data.approval_id, normalized)
+      : { allowed: true, reason: 'kb_delete not gated' };
+    if (!deleteGate.allowed) {
+      logger.warn(
+        { filePath: normalized, sourceGroup, reason: deleteGate.reason },
+        'KB file delete blocked — kb_delete requires an approved approval',
+      );
+      const notifyJid = Object.entries(registeredGroups).find(
+        ([, g]) => g.folder === sourceGroup,
+      )?.[0];
+      if (notifyJid) {
+        await deps.sendMessage(
+          notifyJid,
+          `⚠️ Refused to delete \`${normalized}\`: ${deleteGate.reason}. Get a kb_delete approval first (request_approval), then retry with its approval_id.`,
+        );
+      }
+      return;
+    }
+    if (fs.existsSync(fullPath)) {
+      fs.unlinkSync(fullPath);
+      logger.info(
+        { filePath: normalized, sourceGroup, reason: deleteGate.reason },
+        'KB file deleted via IPC',
+      );
+    }
+    return;
+  }
+
+  // Write: ensure parent directory exists, write content, fix ownership.
+  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+  fs.writeFileSync(fullPath, data.content || '');
+  const ids = getKbOwnerIds();
+  if (ids && process.getuid?.() !== ids.uid) {
+    try {
+      fs.chownSync(fullPath, ids.uid, ids.gid);
+    } catch {
+      /* best-effort; permissions failure is logged elsewhere */
+    }
+  }
+  logger.info(
+    { filePath: normalized, sourceGroup, reason },
+    'KB file written via IPC',
+  );
+}
+
+/**
  * Validated per-IPC-call sender context. A non-null value means the
  * orchestrator resolved the sender to a known KB person; `user_id` is the
  * single authoritative attribution field downstream code may rely on.
@@ -181,6 +390,22 @@ interface IpcSenderCtx {
   user_id: string;
   display_name: string;
   tags: string[];
+  /**
+   * Every distinct human sender in the run's message batch, each carrying the
+   * platform id the orchestrator used to resolve them. This is the TRUSTED
+   * roster a per-decision actor is verified against: an approval/decision
+   * command's `actor_sender_id` is only accepted when it matches one of these
+   * `platform_sender_id`s. Absent on legacy writes — a batch-derived context
+   * without it is treated as a single-sender roster equal to the top-level id.
+   */
+  senders?: BatchSenderEntry[];
+}
+
+interface BatchSenderEntry {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+  platform_sender_id: string;
 }
 
 /**
@@ -201,7 +426,46 @@ function parseSenderCtx(raw: unknown): IpcSenderCtx | null {
   const tags = Array.isArray(obj.tags)
     ? obj.tags.filter((t): t is string => typeof t === 'string')
     : [];
-  return { user_id: userId, display_name: displayName, tags };
+  const senders = Array.isArray(obj.senders)
+    ? obj.senders
+        .map((s) => parseBatchSenderEntry(s))
+        .filter((s): s is BatchSenderEntry => s !== null)
+    : undefined;
+  return {
+    user_id: userId,
+    display_name: displayName,
+    tags,
+    ...(senders && senders.length > 0 ? { senders } : {}),
+  };
+}
+
+/**
+ * Validate one entry of the batch sender roster. Drops entries missing a
+ * `user_id` or `platform_sender_id` — an entry without a verifiable platform id
+ * can't be matched against an agent's per-decision claim.
+ */
+function parseBatchSenderEntry(raw: unknown): BatchSenderEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const userId = typeof obj.user_id === 'string' ? obj.user_id.trim() : '';
+  const platformSenderId =
+    typeof obj.platform_sender_id === 'string'
+      ? obj.platform_sender_id.trim()
+      : '';
+  if (!userId || !platformSenderId) return null;
+  const displayName =
+    typeof obj.display_name === 'string' && obj.display_name.trim() !== ''
+      ? obj.display_name
+      : userId;
+  const tags = Array.isArray(obj.tags)
+    ? obj.tags.filter((t): t is string => typeof t === 'string')
+    : [];
+  return {
+    user_id: userId,
+    display_name: displayName,
+    tags,
+    platform_sender_id: platformSenderId,
+  };
 }
 
 /**
@@ -534,76 +798,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   }
                 }
               } else if (data.type === 'modify_kb_file' && data.filePath) {
-                // KB file modification — flat permission model: any
-                // allowlisted sender (or main-group origin / same-group
-                // scheduled task) may modify any KB file.
-                let senderCtx: IpcSenderCtx | null = readSenderCtxFromDir(
-                  ipcBaseDir,
+                // KB file modification (write/delete). Flat allowlist for the
+                // identity gate; deletes additionally hard-gated on an approved
+                // kb_delete approval. Logic lives in processModifyKbFile so it's
+                // unit-testable.
+                await processModifyKbFile(
+                  data,
                   sourceGroup,
+                  isMain,
+                  deps,
+                  ipcBaseDir,
                 );
-                if (!senderCtx && isMain) {
-                  // Main-group origin without an attached sender (e.g. a
-                  // scheduled task fired in the control channel) is
-                  // implicitly authorized; attribute the audit trail to a
-                  // synthetic system identity so the gate stays
-                  // semantically a *validated* allowlist hit.
-                  senderCtx = {
-                    user_id: `system:scheduled@${sourceGroup}`,
-                    display_name: 'scheduled task',
-                    tags: [],
-                  };
-                }
-
-                const { allowed, reason } = canModifyKbFile(senderCtx);
-
-                if (!allowed) {
-                  logger.warn(
-                    { filePath: data.filePath, sourceGroup, reason },
-                    'KB file modification blocked — insufficient permissions',
-                  );
-                } else {
-                  const fullPath = resolveKbPath(data.filePath);
-                  if (!fullPath) {
-                    logger.warn(
-                      { filePath: data.filePath, sourceGroup },
-                      'KB file modification blocked — path escapes KB context dir',
-                    );
-                  } else {
-                    const normalized = path.relative(KB_CONTEXT_DIR, fullPath);
-                    const action = data.action || 'write';
-
-                    if (action === 'delete') {
-                      if (fs.existsSync(fullPath)) {
-                        fs.unlinkSync(fullPath);
-                        logger.info(
-                          { filePath: normalized, sourceGroup, reason },
-                          'KB file deleted via IPC',
-                        );
-                      }
-                    } else {
-                      // Ensure parent directory exists
-                      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-                      fs.writeFileSync(fullPath, data.content || '');
-                      // Fix ownership when running as a user other than
-                      // breadbrich (e.g. when the orchestrator runs as
-                      // root in some bootstrap paths). Uses cached
-                      // numeric ids + fs.chownSync — no shell, no
-                      // interpolation of agent-controlled paths.
-                      const ids = getKbOwnerIds();
-                      if (ids && process.getuid?.() !== ids.uid) {
-                        try {
-                          fs.chownSync(fullPath, ids.uid, ids.gid);
-                        } catch {
-                          /* best-effort; permissions failure is logged elsewhere */
-                        }
-                      }
-                      logger.info(
-                        { filePath: normalized, sourceGroup, reason },
-                        'KB file written via IPC',
-                      );
-                    }
-                  }
-                }
               } else if (
                 data.type === 'add_kb_user' &&
                 data.username &&
@@ -703,6 +908,36 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         : undefined,
                   },
                   { sourceGroup, isMain, senderCtx },
+                );
+              } else if (
+                data.type === 'report_knowledge_gap' &&
+                typeof data.question === 'string'
+              ) {
+                // Analytics knowledge-gap signal from the agent. We DON'T insert
+                // the event here — the orchestrator's message loop logs exactly
+                // one assistant_events row per run at completion. Instead we drop
+                // a sentinel flag in this group's IPC dir; the message loop reads
+                // and clears it, attributing the gap (gap_source='agent_signal')
+                // to the run that just finished. Flag-only avoids double-counting
+                // and keeps the single canonical event per run.
+                //
+                // The flag path MUST match what src/index.ts reads:
+                // resolveGroupIpcPath(folder)/analytics/knowledge_gap.flag, which
+                // resolves to the same absolute path as
+                // <ipcBaseDir>/<sourceGroup>/analytics/knowledge_gap.flag.
+                const analyticsDir = path.join(
+                  ipcBaseDir,
+                  sourceGroup,
+                  'analytics',
+                );
+                fs.mkdirSync(analyticsDir, { recursive: true });
+                fs.writeFileSync(
+                  path.join(analyticsDir, 'knowledge_gap.flag'),
+                  '1',
+                );
+                logger.info(
+                  { sourceGroup, topic: data.topic ?? null },
+                  'Knowledge-gap signal recorded (report_knowledge_gap)',
                 );
               }
               fs.unlinkSync(filePath);
@@ -1277,6 +1512,21 @@ export async function processTaskIpc(
     target?: string;
     text?: string;
     sourceJid?: string;
+    // For the reusable human-in-the-loop approval primitive.
+    action_class?: string;
+    summary?: string;
+    payload?: unknown;
+    dedupe_key?: string | null;
+    approver_hint?: string | null;
+    approval_id?: string;
+    // Platform sender id (Slack user id / Telegram id / …) of the specific
+    // human who issued THIS decision. Verified against the batch sender roster
+    // by resolveActorFromSenderContext — an agent cannot assert an approver by
+    // string, only point at a message/sender the orchestrator already resolved.
+    // Shared by all per-decision handlers (resolve_approval, expense_decision,
+    // expense_receipt, expense_cancel). Optional/ignored when the batch has a
+    // single sender; REQUIRED (fail-closed) when it has more than one.
+    actor_sender_id?: string | null;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -2113,9 +2363,24 @@ export async function processTaskIpc(
         break;
       }
 
-      const approverCtx = readSenderContext(sourceGroup);
+      // Verify the deciding human against the batch roster (not the batch-last
+      // sender) so a requester can't self-approve by interleaving another
+      // sender's message — same defense as resolve_approval.
+      const { ctx: approverCtx, ambiguous: expAmbiguous } =
+        resolveActorFromSenderContext(sourceGroup, data.actor_sender_id);
       if (!approverCtx) {
-        logger.warn({ sourceGroup }, 'expense_decision: no sender context');
+        logger.warn(
+          { sourceGroup, ambiguous: expAmbiguous },
+          expAmbiguous
+            ? 'expense_decision: ambiguous approver in multi-sender batch'
+            : 'expense_decision: no sender context',
+        );
+        if (expAmbiguous) {
+          await deps.sendMessage(
+            expense.chat_jid,
+            `⚠️ Couldn't tell who decided on expense ${expense.id} — multiple people spoke. Re-issue the decision identifying the approver.`,
+          );
+        }
         break;
       }
       if (approverCtx.user_id === expense.requester_user_id) {
@@ -2228,7 +2493,13 @@ export async function processTaskIpc(
         break;
       }
 
-      const submitterCtx = readSenderContext(sourceGroup);
+      // Resolve the submitting human against the batch roster so the
+      // "must be the requester" check can't be satisfied (or defeated) by a
+      // batch-last-sender misattribution.
+      const { ctx: submitterCtx } = resolveActorFromSenderContext(
+        sourceGroup,
+        data.actor_sender_id,
+      );
       if (
         !submitterCtx ||
         submitterCtx.user_id !== rExpense.requester_user_id
@@ -2346,7 +2617,13 @@ export async function processTaskIpc(
         );
         break;
       }
-      const cancellerCtx = readSenderContext(sourceGroup);
+      // Resolve the cancelling human against the batch roster (not batch-last
+      // sender) so "only the requester may cancel" is enforced against the real
+      // actor.
+      const { ctx: cancellerCtx } = resolveActorFromSenderContext(
+        sourceGroup,
+        data.actor_sender_id,
+      );
       if (
         !cancellerCtx ||
         cancellerCtx.user_id !== cExpense.requester_user_id
@@ -2488,6 +2765,255 @@ export async function processTaskIpc(
       break;
     }
 
+    case 'request_approval': {
+      // Reusable human-in-the-loop gate. The agent proposes a consequential
+      // action { action_class, summary, payload }. If the class is gated, we
+      // record a pending row and post an approve/reject prompt to the control
+      // channel; an allowlisted human's reply later resolves it. If the class
+      // is NOT gated, we record nothing and tell the agent to proceed.
+      const actionClass = (data.action_class || '').trim();
+      const summary = (data.summary || '').trim();
+      if (!actionClass || !summary) {
+        logger.warn(
+          { sourceGroup, actionClass },
+          'request_approval: missing action_class or summary',
+        );
+        break;
+      }
+
+      const requesterCtx = readSenderContext(sourceGroup);
+      const requesterUserId = requesterCtx?.user_id ?? null;
+      const chatJid =
+        data.chatJid ||
+        findChatJidForGroup(registeredGroups, sourceGroup) ||
+        findMainGroupJid(registeredGroups) ||
+        '';
+
+      if (!isGatedActionClass(actionClass)) {
+        // Not gated → no approval needed. Echo an explicit "proceed" so the
+        // agent doesn't block; nothing is persisted.
+        if (chatJid) {
+          await deps.sendMessage(
+            chatJid,
+            `✅ No approval required for a ${actionClass} action — proceeding.`,
+          );
+        }
+        logger.info(
+          { actionClass, sourceGroup },
+          'request_approval: action class not gated — auto-proceed',
+        );
+        break;
+      }
+
+      const payloadJson =
+        data.payload === undefined || data.payload === null
+          ? null
+          : typeof data.payload === 'string'
+            ? data.payload
+            : JSON.stringify(data.payload);
+
+      const approval = createPendingApproval({
+        action_class: actionClass,
+        summary,
+        payload: payloadJson,
+        dedupe_key: data.dedupe_key ?? null,
+        chat_jid: chatJid,
+        group_folder: sourceGroup,
+        requested_by_user_id: requesterUserId,
+        approver_hint: data.approver_hint ?? null,
+        ttl_minutes: APPROVAL_TIMEOUT_MINUTES,
+      });
+
+      // Post the prompt to the control channel (or the requesting chat as a
+      // fallback when there's no registered main group, e.g. in tests).
+      const promptJid = findMainGroupJid(registeredGroups) || chatJid;
+      if (promptJid) {
+        const approverLine = data.approver_hint
+          ? `\nSuggested approver: ${data.approver_hint}`
+          : '';
+        const expiryLine = approval.expires_at
+          ? `\nExpires: ${approval.expires_at}`
+          : '';
+        await deps.sendMessage(
+          promptJid,
+          `🔐 *Approval needed* (\`${actionClass}\`)\n\n${summary}${approverLine}${expiryLine}\n\n` +
+            `Reply "approve ${approval.id}" or "reject ${approval.id} <reason>" ` +
+            `(or "revise ${approval.id} <notes>" to send it back with changes).`,
+        );
+      }
+      logger.info(
+        {
+          approvalId: approval.id,
+          actionClass,
+          requester: requesterUserId,
+          sourceGroup,
+          reused: approval.status === 'pending' && !!data.dedupe_key,
+        },
+        'request_approval: pending approval recorded, reviewers notified',
+      );
+      break;
+    }
+
+    case 'resolve_approval': {
+      // An allowlisted human's decision on a pending approval. `decision` is
+      // one of approve / reject / revise. Mirrors expense_decision: requires a
+      // real sender_context, enforces the (optional) narrower approver tier,
+      // rejects self-approval, and guards against double-resolution.
+      const approvalId = (data.approval_id || '').trim();
+      const decision = (data.decision || '').trim();
+      if (!approvalId || !['approve', 'reject', 'revise'].includes(decision)) {
+        logger.warn(
+          { sourceGroup, approvalId, decision },
+          'resolve_approval: missing/invalid approval_id or decision',
+        );
+        break;
+      }
+
+      const approval = getPendingApproval(approvalId);
+      const mainGroupJid = findMainGroupJid(registeredGroups);
+      if (!approval) {
+        logger.warn({ approvalId, sourceGroup }, 'resolve_approval: not found');
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `⚠️ No approval found with id ${approvalId}.`,
+          );
+        }
+        break;
+      }
+      if (approval.status !== 'pending') {
+        logger.warn(
+          { approvalId, status: approval.status },
+          'resolve_approval: already resolved',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `⚠️ Approval ${approvalId} is already ${approval.status}.`,
+          );
+        }
+        break;
+      }
+
+      // Fail closed: an approval decision must be traceable to the human who
+      // ACTUALLY issued it, verified against the orchestrator-built batch
+      // roster. A batch can carry messages from several senders; the approver
+      // is resolved from `actor_sender_id` (a platform id the host verifies
+      // against the roster), NOT from whoever spoke last — otherwise a proposer
+      // could self-approve by interleaving another allowlisted sender's message.
+      const { ctx: approverCtx, ambiguous } = resolveActorFromSenderContext(
+        sourceGroup,
+        data.actor_sender_id,
+      );
+      if (!approverCtx) {
+        logger.warn(
+          { approvalId, sourceGroup, ambiguous },
+          ambiguous
+            ? 'resolve_approval: rejected — ambiguous approver in multi-sender batch'
+            : 'resolve_approval: rejected — no allowlisted sender identity',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            ambiguous
+              ? `⚠️ Couldn't tell who approved ${approvalId} — multiple people spoke. Re-issue the decision identifying the approver's message/sender.`
+              : '⚠️ Resolving an approval requires an allowlisted sender.',
+          );
+        }
+        break;
+      }
+
+      // Optional narrower approver tier: when APPROVER_SLUGS is configured,
+      // only those KB people may approve. Empty → any allowlisted sender.
+      if (
+        APPROVER_SLUGS.length > 0 &&
+        !APPROVER_SLUGS.includes(approverCtx.user_id)
+      ) {
+        logger.warn(
+          { approvalId, user: approverCtx.user_id },
+          'resolve_approval: sender not in approver allowlist',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `⚠️ ${approverCtx.display_name || approverCtx.user_id} is not an approver for gated actions.`,
+          );
+        }
+        break;
+      }
+
+      // Self-approval guard: the proposer cannot approve their own request.
+      // (Reject / revise are allowed — a requester may withdraw or revise.)
+      if (
+        decision === 'approve' &&
+        approval.requested_by_user_id &&
+        approverCtx.user_id === approval.requested_by_user_id
+      ) {
+        logger.warn(
+          { approvalId, user: approverCtx.user_id },
+          'resolve_approval: requester cannot approve own request',
+        );
+        if (mainGroupJid) {
+          await deps.sendMessage(
+            mainGroupJid,
+            `You cannot approve your own request ${approvalId}. Another approver must review it.`,
+          );
+        }
+        break;
+      }
+
+      const nextStatus =
+        decision === 'approve'
+          ? 'approved'
+          : decision === 'reject'
+            ? 'rejected'
+            : 'revise';
+      const resolved = resolvePendingApproval(
+        approvalId,
+        nextStatus,
+        approverCtx.user_id,
+        data.reason ?? null,
+      );
+      if (!resolved) {
+        // Lost a race — another resolution landed first.
+        logger.warn(
+          { approvalId },
+          'resolve_approval: row no longer pending (race)',
+        );
+        break;
+      }
+
+      // Notify the requesting chat so the proposing agent (and humans) see the
+      // outcome. Reject/revise carry the notes back so the agent can act on
+      // them; approve round-trips the recorded payload so the agent knows
+      // exactly what it proposed and can now execute (the host never executes
+      // gated actions itself — see request_approval).
+      const notifyJid = resolved.chat_jid || mainGroupJid;
+      if (notifyJid) {
+        const notesSuffix = data.reason ? ` — ${data.reason}` : '';
+        const payloadSuffix = resolved.payload
+          ? `\nPayload: ${resolved.payload}`
+          : '';
+        const verb =
+          decision === 'approve'
+            ? `✅ Approved (${resolved.action_class}). Proceeding.${payloadSuffix}`
+            : decision === 'reject'
+              ? `🚫 Rejected (${resolved.action_class}). The action will NOT be taken${notesSuffix}.`
+              : `✏️ Revision requested (${resolved.action_class})${notesSuffix}.`;
+        await deps.sendMessage(notifyJid, `${verb} [${approvalId}]`);
+      }
+      logger.info(
+        {
+          approvalId,
+          decision,
+          approver: approverCtx.user_id,
+          actionClass: resolved.action_class,
+        },
+        'resolve_approval: pending approval resolved',
+      );
+      break;
+    }
+
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
@@ -2502,6 +3028,80 @@ type IpcSenderContext = IpcSenderCtx;
 // base directory isn't already in scope).
 function readSenderContext(sourceGroup: string): IpcSenderContext | null {
   return readSenderCtxFromDir(path.join(DATA_DIR, 'ipc'), sourceGroup);
+}
+
+/**
+ * Resolve WHICH human issued a specific gated decision, verified against the
+ * orchestrator-built batch roster — never against a free-text identity the
+ * agent asserts.
+ *
+ * A single run processes a BATCH of messages from possibly several senders; the
+ * batch-last sender must NOT be assumed to be the one who typed "approve AP-…".
+ * Rules:
+ *   - roster empty / no context           → { ctx: null } (unauthenticated;
+ *                                            handlers reject as today)
+ *   - roster has exactly one sender        → that sender (actorSenderId ignored;
+ *                                            unambiguous — the common case)
+ *   - roster has >1 sender + actorSenderId
+ *     matching a roster platform id        → that sender
+ *   - roster has >1 sender + missing/
+ *     non-matching actorSenderId           → { ctx: null, ambiguous: true }
+ *                                            (FAIL CLOSED — refuse; do not fall
+ *                                            back to any batch-derived identity)
+ *
+ * A legacy context without a `senders` array is treated as a one-element roster
+ * equal to its top-level identity (so single-sender behavior is unchanged).
+ */
+function resolveActorFromSenderContext(
+  sourceGroup: string,
+  actorSenderId?: string | null,
+): { ctx: IpcSenderContext | null; ambiguous: boolean } {
+  const raw = readSenderContext(sourceGroup);
+  if (!raw) return { ctx: null, ambiguous: false };
+
+  const roster: BatchSenderEntry[] =
+    raw.senders && raw.senders.length > 0
+      ? raw.senders
+      : [
+          {
+            user_id: raw.user_id,
+            display_name: raw.display_name,
+            tags: raw.tags,
+            // Legacy single-sender writes carry no platform id; a one-element
+            // roster is always unambiguous, so a sentinel empty id is fine.
+            platform_sender_id: '',
+          },
+        ];
+
+  if (roster.length === 1) {
+    const only = roster[0];
+    return {
+      ctx: {
+        user_id: only.user_id,
+        display_name: only.display_name,
+        tags: only.tags,
+      },
+      ambiguous: false,
+    };
+  }
+
+  const wanted = (actorSenderId || '').trim();
+  const match = wanted
+    ? roster.find((s) => s.platform_sender_id === wanted)
+    : undefined;
+  if (!match) {
+    // Multiple people spoke this batch and the agent didn't (or couldn't)
+    // point unambiguously at the one who issued the decision. Fail closed.
+    return { ctx: null, ambiguous: true };
+  }
+  return {
+    ctx: {
+      user_id: match.user_id,
+      display_name: match.display_name,
+      tags: match.tags,
+    },
+    ambiguous: false,
+  };
 }
 
 function findMainGroupJid(

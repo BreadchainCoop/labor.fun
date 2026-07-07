@@ -45,7 +45,7 @@ const server = new McpServer({
 
 server.tool(
   'modify_kb_file',
-  "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, or other KB files. The orchestrator enforces access control — allowlisted senders (anyone with a sender_context) have full read/write access; unknown senders are rejected. Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md').",
+  "Create or update a file in the organization knowledge base. Use this to modify tasks, calendar events, artifacts, or other KB files. The orchestrator enforces access control — allowlisted senders (anyone with a sender_context) have full read/write access; unknown senders are rejected. Paths are relative to the KB context directory (e.g. 'tasks/TASK-001.md', 'calendar/upcoming.md'). DELETING a file (action:\"delete\") is HARD-GATED when the org gates the \"kb_delete\" action class: first call request_approval with action_class \"kb_delete\" and a payload containing the file_path, wait for a human to approve, then call this with action:\"delete\" AND approval_id set to that approved approval's id — the host refuses the delete otherwise.",
   {
     file_path: z
       .string()
@@ -61,6 +61,12 @@ server.tool(
       .describe(
         'Action: "write" (default) to create/overwrite, "delete" to remove the file',
       ),
+    approval_id: z
+      .string()
+      .optional()
+      .describe(
+        'REQUIRED for action:"delete" when the org gates "kb_delete": the id of an APPROVED, unexpired kb_delete approval whose payload references this same file_path. Ignored for writes and when kb_delete is not gated.',
+      ),
   },
   async (args) => {
     const data = {
@@ -68,6 +74,7 @@ server.tool(
       filePath: args.file_path,
       content: args.content || '',
       action: args.action || 'write',
+      approval_id: args.approval_id ?? null,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -79,6 +86,48 @@ server.tool(
         {
           type: 'text' as const,
           text: `KB file modification queued: ${args.action || 'write'} ${args.file_path}`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'report_knowledge_gap',
+  'Call this when you could NOT answer the user because the needed information ' +
+    'is NOT in the knowledge base / you genuinely lack the knowledge to answer. ' +
+    'It records a knowledge-gap signal so admins can see what to add to the KB. ' +
+    'Call it IN ADDITION to telling the user you do not have the info (do not ' +
+    'rely on this tool to reply — still answer the user). Do NOT call it when: ' +
+    'you answered the question, the request was a command/action rather than a ' +
+    'question, or something errored. One call per unanswerable question.',
+  {
+    question: z
+      .string()
+      .describe(
+        'A short paraphrase of what the user asked that you could not answer.',
+      ),
+    topic: z
+      .string()
+      .optional()
+      .describe('Optional coarse topic, e.g. "expenses", "calendar".'),
+  },
+  async (args) => {
+    const data = {
+      type: 'report_knowledge_gap',
+      question: args.question,
+      topic: args.topic ?? null,
+      chatJid,
+      groupFolder,
+      isMain,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(MESSAGES_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: 'Knowledge gap recorded. Remember to still reply to the user.',
         },
       ],
     };
@@ -1129,6 +1178,109 @@ server.tool(
   },
 );
 
+// --- Human-in-the-loop approval primitive ---
+
+server.tool(
+  'request_approval',
+  `Propose a CONSEQUENTIAL action for human sign-off before you take it. Use this whenever you are about to do something gated: sending a message/DM/email OUTSIDE the org (action_class "outbound_external_message"), a GitHub write like opening/merging a PR ("github_write"), a Linear write ("linear_write"), DELETING a knowledge-base document ("kb_delete"), or moving money/on-chain value ("payout"). The orchestrator decides — based on org config — whether that class is gated: if it is, it records the request and posts an approve/reject prompt to the control channel, and you should STOP and wait; a human's reply resolves it and you'll be told the outcome. If the class is NOT gated, the orchestrator replies immediately telling you to proceed. Do NOT perform the action before you see approval.`,
+  {
+    action_class: z
+      .string()
+      .describe(
+        'Stable class of the action, e.g. "outbound_external_message", "github_write", "linear_write", "kb_delete", "payout".',
+      ),
+    summary: z
+      .string()
+      .min(3)
+      .describe(
+        'One-line human-readable description of exactly what you want to do (the approver reads this).',
+      ),
+    payload: z
+      .any()
+      .optional()
+      .describe(
+        'Optional structured details of the action (round-tripped back to you on approval) — e.g. the recipient + message text, the PR title + body, the file path to delete.',
+      ),
+    dedupe_key: z
+      .string()
+      .optional()
+      .describe(
+        'Optional idempotency key. If a pending approval already exists with this key, it is reused instead of creating a duplicate.',
+      ),
+    approver_hint: z
+      .string()
+      .optional()
+      .describe('Optional suggestion of who should approve (a person/name).'),
+  },
+  async (args) => {
+    const data = {
+      type: 'request_approval',
+      action_class: args.action_class,
+      summary: args.summary,
+      payload: args.payload ?? null,
+      dedupe_key: args.dedupe_key ?? null,
+      approver_hint: args.approver_hint ?? null,
+      chatJid,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Approval requested for a ${args.action_class} action. If this class is gated, wait for a human's approve/reject before proceeding; if not, the orchestrator will tell you to proceed.`,
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'resolve_approval',
+  `Record a human's decision on a PENDING approval request (created earlier by request_approval). Call this ONLY when an allowlisted person in the chat clearly approved, rejected, or asked to revise a specific approval id. The orchestrator enforces that the caller is an allowlisted approver and rejects self-approval by the original requester. Pass a short reason for rejections/revisions so the proposing agent can act on it. When MORE THAN ONE person spoke in this run, you MUST pass actor_sender_id (the platform id of the specific person whose message carried this decision) so the host can verify who approved — without it the host cannot tell them apart and will refuse the decision.`,
+  {
+    approval_id: z
+      .string()
+      .describe('The approval id from the prompt, e.g. AP-1714060800000-ab12cd.'),
+    decision: z
+      .enum(['approve', 'reject', 'revise'])
+      .describe(
+        '"approve" to proceed, "reject" to cancel the action, "revise" to send it back with change notes.',
+      ),
+    reason: z
+      .string()
+      .optional()
+      .describe('Short reason/notes (required in spirit for reject/revise).'),
+    actor_sender_id: z
+      .string()
+      .optional()
+      .describe(
+        'Platform id (Slack user id / Telegram id / …) of the specific person whose message contained this decision. REQUIRED when several people spoke in this run so the host can verify the approver; optional (and ignored) when only one person spoke.',
+      ),
+  },
+  async (args) => {
+    const data = {
+      type: 'resolve_approval',
+      approval_id: args.approval_id,
+      decision: args.decision,
+      reason: args.reason ?? null,
+      actor_sender_id: args.actor_sender_id ?? null,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    writeIpcFile(TASKS_DIR, data);
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Decision "${args.decision}" submitted for ${args.approval_id}. The host will validate the approver and notify the requesting chat.`,
+        },
+      ],
+    };
+  },
+);
+
 // --- Expense tools ---
 
 server.tool(
@@ -1296,10 +1448,16 @@ server.tool(
 
 server.tool(
   'approve_expense',
-  'Approve an expense as-submitted. Any allowlisted sender may approve (the orchestrator rejects unknown callers and self-approval).',
+  'Approve an expense as-submitted. Any allowlisted sender may approve (the orchestrator rejects unknown callers and self-approval). When more than one person spoke in this run, pass actor_sender_id (the platform id of the approver) so the host can verify who approved — otherwise it fails closed.',
   {
     expense_id: z.string(),
     approver_notes: z.string().optional(),
+    actor_sender_id: z
+      .string()
+      .optional()
+      .describe(
+        'Platform id of the person whose message carried this approval. REQUIRED when several people spoke in this run; ignored when only one did.',
+      ),
   },
   async (args) => {
     const data = {
@@ -1307,6 +1465,7 @@ server.tool(
       decision: 'approve' as const,
       expense_id: args.expense_id,
       approver_notes: args.approver_notes || null,
+      actor_sender_id: args.actor_sender_id ?? null,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -1324,10 +1483,16 @@ server.tool(
 
 server.tool(
   'deny_expense',
-  'Deny an expense. Requires a reason visible to the requester.',
+  'Deny an expense. Requires a reason visible to the requester. When more than one person spoke in this run, pass actor_sender_id (the platform id of the decider) so the host can verify who decided.',
   {
     expense_id: z.string(),
     approver_notes: z.string().min(3).describe('Reason — visible to requester'),
+    actor_sender_id: z
+      .string()
+      .optional()
+      .describe(
+        'Platform id of the person whose message carried this decision. REQUIRED when several people spoke in this run; ignored when only one did.',
+      ),
   },
   async (args) => {
     const data = {
@@ -1335,6 +1500,7 @@ server.tool(
       decision: 'deny' as const,
       expense_id: args.expense_id,
       approver_notes: args.approver_notes,
+      actor_sender_id: args.actor_sender_id ?? null,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -1352,13 +1518,19 @@ server.tool(
 
 server.tool(
   'modify_expense',
-  'Approve at a different amount than requested. Use when the expense is reasonable but the amount needs adjustment. Not available for retrospective expenses.',
+  'Approve at a different amount than requested. Use when the expense is reasonable but the amount needs adjustment. Not available for retrospective expenses. When more than one person spoke in this run, pass actor_sender_id (the platform id of the decider) so the host can verify who decided.',
   {
     expense_id: z.string(),
     approved_amount_cents: z.number().int().positive(),
     approver_notes: z
       .string()
       .describe('Explain the modification — visible to requester'),
+    actor_sender_id: z
+      .string()
+      .optional()
+      .describe(
+        'Platform id of the person whose message carried this decision. REQUIRED when several people spoke in this run; ignored when only one did.',
+      ),
   },
   async (args) => {
     const data = {
@@ -1367,6 +1539,7 @@ server.tool(
       expense_id: args.expense_id,
       approved_amount_cents: args.approved_amount_cents,
       approver_notes: args.approver_notes,
+      actor_sender_id: args.actor_sender_id ?? null,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -1384,7 +1557,7 @@ server.tool(
 
 server.tool(
   'submit_receipt',
-  'Attach a receipt to an approved prospective expense. Transitions status from receipt_pending to receipt_submitted. Only the original requester can submit.',
+  'Attach a receipt to an approved prospective expense. Transitions status from receipt_pending to receipt_submitted. Only the original requester can submit. When more than one person spoke in this run, pass actor_sender_id (the platform id of the person submitting) so the host can verify it is the requester.',
   {
     expense_id: z.string(),
     receipt_path: z
@@ -1398,6 +1571,12 @@ server.tool(
       .describe(
         'If the final cost differed from approved, provide it here for reconciliation',
       ),
+    actor_sender_id: z
+      .string()
+      .optional()
+      .describe(
+        'Platform id of the person whose message submitted this receipt. REQUIRED when several people spoke in this run; ignored when only one did.',
+      ),
   },
   async (args) => {
     const data = {
@@ -1405,6 +1584,7 @@ server.tool(
       expense_id: args.expense_id,
       receipt_path: args.receipt_path,
       actual_amount_cents: args.actual_amount_cents || null,
+      actor_sender_id: args.actor_sender_id ?? null,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -1449,16 +1629,23 @@ server.tool(
 
 server.tool(
   'cancel_expense',
-  'Requester cancels their own expense before reimbursement. Only works on non-terminal states.',
+  'Requester cancels their own expense before reimbursement. Only works on non-terminal states. When more than one person spoke in this run, pass actor_sender_id (the platform id of the person cancelling) so the host can verify it is the requester.',
   {
     expense_id: z.string(),
     reason: z.string().optional(),
+    actor_sender_id: z
+      .string()
+      .optional()
+      .describe(
+        'Platform id of the person whose message requested this cancellation. REQUIRED when several people spoke in this run; ignored when only one did.',
+      ),
   },
   async (args) => {
     const data = {
       type: 'expense_cancel',
       expense_id: args.expense_id,
       reason: args.reason || null,
+      actor_sender_id: args.actor_sender_id ?? null,
       groupFolder,
       timestamp: new Date().toISOString(),
     };

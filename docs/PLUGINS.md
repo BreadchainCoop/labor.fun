@@ -73,7 +73,9 @@ Each pairs with a container skill under
 ## 1. Channels
 
 A channel is an I/O adapter (Slack, Telegram, Discord, …). Implement the
-`Channel` interface (`src/types.ts`) and self-register a factory:
+`Channel` interface (`src/types.ts`) and self-register a factory. See also
+[`docs/WEB-WIDGET.md`](WEB-WIDGET.md) for the browser-embeddable web chat widget
+channel — a fuller worked example of a channel that opens its own HTTP server.
 
 ```ts
 // src/channels/mychannel.ts
@@ -118,6 +120,19 @@ Register it from `src/integrations/index.ts` (the barrel). The orchestrator call
 its own config and no-ops when unconfigured. The built-in flows
 (`group-digest`, `github-project-sync`, `discord-members-sync`) are the
 reference implementations.
+
+### Knowledge connectors (a specialized flow)
+
+A **knowledge connector** is a flow that syncs external documents (Notion,
+Google Drive, Confluence, …) **into the per-group markdown KB** so per-doc RBAC,
+search, and citations apply for free. Connectors share a small framework
+(`src/integrations/connectors/base.ts`) — you implement a `Connector`
+(`{ name, syncInterval, isConfigured, sync(ctx) }` returning `ConnectorDoc`s),
+and the framework does the KB writes, upsert idempotency, deletion-on-removal,
+path-safety, citable `source_url` frontmatter, and cursor bookkeeping. See
+[CONNECTORS.md](CONNECTORS.md) for the two built-in connectors (Notion, Google
+Drive), how to enable them, and how to write your own — including as a per-org
+profile plugin.
 
 ## 2b. Chat flows (sandboxed channel takeover)
 
@@ -217,6 +232,21 @@ opt-in flag to add a private skill entirely on the server:
 
 The skill syncs into that org's containers only, stays out of the public repo,
 and the framework needs no changes to host it.
+
+## 3b. Remote MCP servers (config-driven tool access)
+
+Beyond the built-in MCP servers wired directly into the agent
+(`nanoclaw`/`gws`/`github`/`linear`), an org can add **any** MCP server —
+hosted remote (streamable HTTP + Bearer/header auth) or local stdio — purely
+via config: `mcpServers` in `profile.config.json`, or the `MCP_SERVERS` env var
+for a hosted/multi-tenant install. No framework code change, no new
+registration mechanism — the entry is validated at startup and, once its
+referenced env var(s) are set, shows up in every agent container's
+`mcpServers` map and `mcp__<name>__*` tool allowlist. This is how you add
+Zapier (30k+ actions across 9k apps), Jira/Confluence, Stripe, Notion,
+PagerDuty, or any other MCP-speaking service. See
+[MCP-SERVERS.md](MCP-SERVERS.md) for the config schema, the exact
+config-to-container path, and a worked Zapier example.
 
 ## 4. Setup steps
 

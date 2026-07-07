@@ -11,6 +11,7 @@ import {
   IDLE_TIMEOUT,
   isPrivilegedGroup,
   MAX_MESSAGES_PER_PROMPT,
+  MCP_SERVERS,
   FRESH_SESSION_BACKFILL_MESSAGES,
   OPS_REPORT_AUDIENCE,
   OPS_REPORT_INTERVAL_MS,
@@ -32,7 +33,12 @@ import {
   SMITHERS_BRIDGE_TOKEN,
   TIMEZONE,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
+import { startCredentialProxy, UsageEvent } from './credential-proxy.js';
+import { estimateCostUsd } from './model-pricing.js';
+import {
+  checkQuota as checkUsageQuota,
+  onUsageRecorded,
+} from './usage-budget.js';
 import { startSmithersBridge } from './smithers-bridge.js';
 import './channels/index.js';
 import {
@@ -76,7 +82,11 @@ import {
   storeMessage,
   startAgentRun,
   completeAgentRun,
+  logAssistantEvent,
+  detectKnowledgeGapMarker,
+  coarseTopic,
   recordPmDm,
+  insertApiUsage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -137,6 +147,87 @@ import {
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+/**
+ * One resolved human sender in a processed batch, carrying the platform id the
+ * orchestrator used to resolve them. This platform id is the TRUSTED handle the
+ * host verifies an agent's per-decision claim against (see
+ * `resolveActorFromSenderContext` in ipc.ts) — the agent never gets to assert an
+ * approver identity by string; it can only point at a message/sender that the
+ * orchestrator already resolved from real platform data.
+ */
+export interface BatchSender {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+  platform_sender_id: string;
+}
+
+/**
+ * The sender_context.json payload written per run. The top-level
+ * `user_id`/`display_name`/`tags` preserve the historical single-sender shape
+ * (equal to the LAST resolved sender in the batch) so existing consumers that
+ * only need "some allowlisted human triggered this" (flat KB write allowlist,
+ * add_kb_user, etc.) keep working unchanged. `senders` is the full distinct
+ * roster used to disambiguate WHO issued a specific gated decision.
+ */
+export interface BatchSenderContext {
+  user_id: string;
+  display_name: string;
+  tags: string[];
+  senders: BatchSender[];
+}
+
+/** Map a chat JID prefix to the platform key used in `user_identities`. */
+export function platformForChatJid(chatJid: string): string {
+  if (chatJid.startsWith('tg:')) return 'telegram';
+  if (chatJid.startsWith('slack:')) return 'slack';
+  return 'unknown';
+}
+
+/**
+ * Build the per-run sender context from the processed message batch. Resolves
+ * EACH distinct inbound sender (deduped by platform id, first-seen wins for
+ * display info) against the KB; unresolved (unknown/unallowlisted) senders are
+ * dropped exactly as the previous single-sender path dropped a null resolution.
+ * Returns null when nothing resolves (caller unlinks the file — fail closed).
+ *
+ * Pure and injectable (`resolve`) so it can be unit-tested without the KB.
+ */
+export function buildBatchSenderContext(
+  messages: NewMessage[],
+  platform: string,
+  resolve: (
+    platformId: string,
+    platform: string,
+  ) => { user_id: string; display_name: string; tags: string[] } | undefined,
+): BatchSenderContext | null {
+  const seen = new Set<string>();
+  const senders: BatchSender[] = [];
+  for (const m of messages) {
+    if (m.is_from_me || !m.sender || seen.has(m.sender)) continue;
+    const ctx = resolve(m.sender, platform);
+    if (!ctx) continue;
+    seen.add(m.sender);
+    senders.push({
+      user_id: ctx.user_id,
+      display_name: ctx.display_name,
+      tags: ctx.tags,
+      platform_sender_id: m.sender,
+    });
+  }
+  if (senders.length === 0) return null;
+  // Back-compat top-level identity == the LAST resolved sender in the batch,
+  // matching the previous "last message's sender" behavior for single-sender
+  // batches (the overwhelmingly common case).
+  const last = senders[senders.length - 1];
+  return {
+    user_id: last.user_id,
+    display_name: last.display_name,
+    tags: last.tags,
+    senders,
+  };
+}
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -535,17 +626,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // inherit that identity and pass allowlist gates (e.g. fetch_discord_history,
   // modify_kb_file). Fail closed: write when present, unlink when absent.
   const lastMsg = missedMessages[missedMessages.length - 1];
-  const senderCtx =
-    lastMsg && !lastMsg.is_from_me
-      ? getSenderContext(
-          lastMsg.sender,
-          chatJid.startsWith('tg:')
-            ? 'telegram'
-            : chatJid.startsWith('slack:')
-              ? 'slack'
-              : 'unknown',
-        )
-      : null;
+  // Resolve EVERY distinct sender in the batch, not just the last message's —
+  // otherwise an approve/decision command from one sender could be attributed
+  // to whoever happened to speak last, defeating the self-approval guard and
+  // the approver-tier check (see resolveActorFromSenderContext in ipc.ts).
+  const senderCtx = buildBatchSenderContext(
+    missedMessages,
+    platformForChatJid(chatJid),
+    getSenderContext,
+  );
   {
     const ipcInputDir = resolveGroupIpcPath(group.folder) + '/input';
     const senderCtxPath = path.join(ipcInputDir, 'sender_context.json');
@@ -570,6 +659,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // ('success'/'error'), and which previously made agent_runs.output_length
   // always 7 ("success") or 5 ("error") regardless of the real reply.
   let outputLength = 0;
+  // Accumulated agent reply text, used by the analytics knowledge-gap heuristic
+  // (detectKnowledgeGapMarker) after the run completes.
+  let agentReplyText = '';
 
   // ACK pattern: react with a thinking emoji on the triggering message,
   // then swap to a checkmark when processing completes.
@@ -602,6 +694,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         });
         outputSentToUser = true;
         outputLength += text.length;
+        agentReplyText += text + '\n';
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -628,6 +721,54 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const runDuration = Date.now() - runStartTime;
 
+  // Analytics: an explicit knowledge-gap signal from the agent arrives as a
+  // sentinel flag file written by the IPC handler (report_knowledge_gap tool).
+  // Read-and-clear it so it's attributed to THIS run and never leaks into the
+  // next. Falls back to the output heuristic when no explicit signal is present.
+  let agentSignaledGap = false;
+  try {
+    const gapFlag = path.join(
+      resolveGroupIpcPath(group.folder),
+      'analytics',
+      'knowledge_gap.flag',
+    );
+    if (fs.existsSync(gapFlag)) {
+      agentSignaledGap = true;
+      fs.unlinkSync(gapFlag);
+    }
+  } catch {
+    /* best-effort — never let analytics break the message loop */
+  }
+
+  // Record a single analytics event for this run (best-effort; guarded so a
+  // logging failure never affects message handling). Privacy redaction is
+  // applied inside logAssistantEvent per the ASSISTANT_ANALYTICS_PRIVACY stance.
+  const recordEvent = (
+    outcome: 'answered' | 'knowledge_gap' | 'error',
+    gapSource: 'agent_signal' | 'heuristic' | null,
+  ) => {
+    try {
+      logAssistantEvent({
+        runId,
+        chatJid,
+        channel: channelRoute,
+        groupName: group.name,
+        groupFolder: group.folder,
+        isMain: isMainGroup,
+        senderName: triggerMsg?.sender_name,
+        questionText: triggerMsg?.content,
+        outcome,
+        gapSource,
+        topic: coarseTopic(triggerMsg?.content),
+      });
+    } catch (err) {
+      logger.warn(
+        { group: group.name, err },
+        'Failed to record assistant analytics event',
+      );
+    }
+  };
+
   if (output === 'error' || hadError) {
     completeAgentRun(
       runId,
@@ -638,6 +779,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         ? 'Agent returned error (partial output sent to user)'
         : 'Agent returned error (no output sent)',
     );
+    recordEvent('error', null);
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -658,6 +800,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   completeAgentRun(runId, 'success', outputLength, runDuration);
+  // Knowledge-gap on a successful run: prefer the explicit agent signal, else
+  // fall back to the (lower-precision) output heuristic.
+  if (agentSignaledGap) {
+    recordEvent('knowledge_gap', 'agent_signal');
+  } else if (detectKnowledgeGapMarker(agentReplyText)) {
+    recordEvent('knowledge_gap', 'heuristic');
+  } else {
+    recordEvent('answered', null);
+  }
   return true;
 }
 
@@ -731,6 +882,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         allowedTools: opts?.allowedTools,
         systemPromptAppend: opts?.systemPromptAppend,
+        mcpServers: MCP_SERVERS,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -933,10 +1085,49 @@ async function main(): Promise<void> {
   loadState();
   restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
+  // Start credential proxy (containers route API calls through this).
+  // Usage-metering hooks (OSS "API cost tracking & budgets" foundation):
+  // onUsage persists every observed /v1/messages call to api_usage with an
+  // estimated cost; checkQuota gates new requests against env-configured
+  // monthly budgets (src/usage-budget.ts). Both are no-ops unless the
+  // relevant env vars are set, so default behavior is unchanged.
   const proxyServer = await startCredentialProxy(
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
+    {
+      onUsage: (usage: UsageEvent) => {
+        const estCostUsd = estimateCostUsd({
+          model: usage.model || '',
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheWriteTokens: usage.cacheWriteTokens,
+        });
+        try {
+          insertApiUsage({
+            runTag: usage.runTag,
+            model: usage.model,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            estCostUsd,
+            statusCode: usage.statusCode,
+          });
+          onUsageRecorded({
+            totalTokens:
+              usage.inputTokens +
+              usage.outputTokens +
+              usage.cacheReadTokens +
+              usage.cacheWriteTokens,
+            costUsd: estCostUsd,
+          });
+        } catch (err) {
+          logger.error({ err, usage }, 'Failed to record API usage');
+        }
+      },
+      checkQuota: () => checkUsageQuota(),
+    },
   );
 
   // Optionally start the Smithers durable-workflow bridge (orchestration/).
@@ -991,6 +1182,7 @@ async function main(): Promise<void> {
               isScheduledTask: true,
               modelOverride,
               allowedTools,
+              mcpServers: MCP_SERVERS,
               // We stop the container ourselves below — keep the runner from
               // logging the resulting non-zero exit as an error.
               expectExternalStop: true,

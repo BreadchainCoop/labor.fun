@@ -236,6 +236,72 @@ function createSchema(database: Database.Database): void {
       ON safe_payouts(safe_tx_hash) WHERE safe_tx_hash IS NOT NULL;
   `);
 
+  // --- API usage / cost tracking (usage metering foundation) ---
+  // One row per completed /v1/messages call observed by the credential proxy
+  // (src/credential-proxy.ts). run_tag is the container name (see
+  // container-runner.ts), letting usage be grouped by group/run via prefix.
+  // est_cost_usd is computed at insert time from src/model-pricing.ts so
+  // historical rows keep the price that was in effect when the call was made,
+  // even if pricing is later overridden via MODEL_PRICING_JSON.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_tag TEXT,
+      model TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      est_cost_usd REAL NOT NULL DEFAULT 0,
+      status_code INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_run_tag ON api_usage(run_tag);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_model ON api_usage(model);
+  `);
+
+  // --- Human-in-the-loop approvals (reusable primitive) ---
+  // A generic, action-class-agnostic gate. A container agent proposes a
+  // consequential action via the `request_approval` IPC op; the orchestrator
+  // records one row here and posts an approve/reject prompt to the control
+  // channel. An allowlisted human's reply resolves the row (approved / rejected
+  // / revise). This is the generalization of the bespoke proposed-task and
+  // expense approval queues — same shape (pending row + chat prompt + resolve),
+  // but the { action_class, summary, payload } triplet makes it reusable for
+  // any consequential action (outbound message, GitHub/Linear write, KB delete,
+  // payout, …). Which classes are *gated* is declared in config, not here.
+  //
+  // NOTE: this is a chat-reply gate, distinct from safe_payouts whose "approval"
+  // is the on-chain Safe threshold (signers confirming in their wallet). The two
+  // are complementary and do not conflict — see rules/approvals/README.md.
+  //   payload      : opaque JSON the proposer round-trips back on approval.
+  //   dedupe_key   : optional idempotency key; a live (pending) row with the
+  //                  same key is reused instead of creating a duplicate.
+  //   expires_at   : ISO deadline; a pending row past it resolves to 'expired'.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS pending_approvals (
+      id TEXT PRIMARY KEY,
+      action_class TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      payload TEXT,
+      dedupe_key TEXT,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      requested_by_user_id TEXT,
+      approver_hint TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT,
+      resolved_by_user_id TEXT,
+      resolved_at TEXT,
+      revision_notes TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_approvals_dedupe
+      ON pending_approvals(dedupe_key) WHERE dedupe_key IS NOT NULL AND status = 'pending';
+  `);
+
   // Add context_mode column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -382,6 +448,43 @@ function createSchema(database: Database.Database): void {
   );
   database.exec(
     `CREATE INDEX IF NOT EXISTS idx_agent_runs_channel ON agent_runs(channel, started_at)`,
+  );
+
+  // --- Assistant usage + knowledge-gap analytics ---
+  //
+  // One row per completed agent run in a group: was it a question, did the
+  // assistant answer or hit a knowledge gap, the run outcome, and (subject to
+  // the privacy config) the question text. Decoupled from agent_runs by design
+  // — run_id is a soft link (no hard FK) so analytics can be pruned/rebuilt
+  // independently and a missing agent_runs row never blocks an event insert.
+  // See rules/knowledge-base/analytics.md for the knowledge_gap signal
+  // convention and the ASSISTANT_ANALYTICS_PRIVACY stance.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS assistant_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER,
+      chat_jid TEXT NOT NULL,
+      channel TEXT,
+      group_name TEXT,
+      group_folder TEXT NOT NULL,
+      is_main INTEGER NOT NULL DEFAULT 0,
+      sender_name TEXT,
+      is_question INTEGER NOT NULL DEFAULT 0,
+      outcome TEXT NOT NULL,
+      gap_source TEXT,
+      topic TEXT,
+      question_text TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assistant_events_created ON assistant_events(created_at)`,
+  );
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assistant_events_group ON assistant_events(group_folder, created_at)`,
+  );
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assistant_events_outcome ON assistant_events(outcome, created_at)`,
   );
 
   // --- Permissions tables ---
@@ -1948,6 +2051,777 @@ export function decideProposalApproval(
     notes ?? null,
     approvalId,
   );
+}
+
+// --- API usage / cost tracking accessors ---
+
+export interface ApiUsageInput {
+  runTag: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  estCostUsd: number;
+  statusCode: number | null;
+}
+
+export function insertApiUsage(usage: ApiUsageInput): void {
+  db.prepare(
+    `INSERT INTO api_usage
+       (run_tag, model, input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, est_cost_usd, status_code, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    usage.runTag,
+    usage.model,
+    usage.inputTokens,
+    usage.outputTokens,
+    usage.cacheReadTokens,
+    usage.cacheWriteTokens,
+    usage.estCostUsd,
+    usage.statusCode,
+    new Date().toISOString(),
+  );
+}
+
+export interface ApiUsageModelBreakdown {
+  model: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}
+
+export interface ApiUsageSummary {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+  by_model: ApiUsageModelBreakdown[];
+}
+
+/** Total usage (+ per-model breakdown) recorded since `sinceIso`. */
+export function getUsageSummary(sinceIso: string): ApiUsageSummary {
+  const totals = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?`,
+    )
+    .get(sinceIso) as Omit<ApiUsageSummary, 'by_model'>;
+
+  const byModel = db
+    .prepare(
+      `SELECT
+         model,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?
+       GROUP BY model
+       ORDER BY est_cost_usd DESC`,
+    )
+    .all(sinceIso) as ApiUsageModelBreakdown[];
+
+  return { ...totals, by_model: byModel };
+}
+
+export interface MonthlyUsageRollup {
+  month: string; // YYYY-MM
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}
+
+/** Per-calendar-month usage rollup, most recent month first. */
+export function getMonthlyUsageRollup(): MonthlyUsageRollup[] {
+  return db
+    .prepare(
+      `SELECT
+         strftime('%Y-%m', created_at) AS month,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage
+       GROUP BY month
+       ORDER BY month DESC`,
+    )
+    .all() as MonthlyUsageRollup[];
+}
+
+/** Per-run_tag usage totals since `sinceIso` (used by scripts/usage-report.ts to group by container/group). */
+export function getUsageByRunTag(sinceIso: string): Array<{
+  run_tag: string | null;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+}> {
+  return db
+    .prepare(
+      `SELECT
+         run_tag,
+         COUNT(*) AS requests,
+         COALESCE(SUM(input_tokens), 0) AS input_tokens,
+         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+         COALESCE(SUM(est_cost_usd), 0) AS est_cost_usd
+       FROM api_usage WHERE created_at >= ?
+       GROUP BY run_tag
+       ORDER BY est_cost_usd DESC`,
+    )
+    .all(sinceIso) as Array<{
+    run_tag: string | null;
+    requests: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    est_cost_usd: number;
+  }>;
+}
+
+export interface ApiUsageRow {
+  id: number;
+  run_tag: string | null;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  est_cost_usd: number;
+  status_code: number | null;
+  created_at: string;
+}
+
+/**
+ * Raw usage rows with id greater than `cursor`, oldest first, capped at
+ * `limit`. Used by the hosted control-plane sync
+ * (src/integrations/control-plane-sync.ts) to drain usage deltas in batches;
+ * the autoincrement `id` doubles as the report cursor.
+ */
+export function getApiUsageSince(cursor: number, limit: number): ApiUsageRow[] {
+  return db
+    .prepare(
+      `SELECT id, run_tag, model, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens, est_cost_usd,
+              status_code, created_at
+       FROM api_usage
+       WHERE id > ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    )
+    .all(cursor, limit) as ApiUsageRow[];
+}
+
+/**
+ * Control-plane usage-report cursor: the last api_usage.id already reported
+ * upstream. Persisted in router_state so it survives restarts and never
+ * re-sends drained rows. Defaults to 0 (report from the beginning).
+ */
+const USAGE_REPORT_CURSOR_KEY = 'control_plane_usage_cursor';
+
+export function getUsageReportCursor(): number {
+  const raw = getRouterState(USAGE_REPORT_CURSOR_KEY);
+  if (raw === undefined) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+export function setUsageReportCursor(cursor: number): void {
+  setRouterState(
+    USAGE_REPORT_CURSOR_KEY,
+    String(Math.max(0, Math.trunc(cursor))),
+  );
+}
+
+// --- Assistant analytics (usage + knowledge-gap) ---
+//
+// Feedback loop for admins: "what did the team ask, and where couldn't the
+// assistant answer." The valuable-but-imprecise part is the knowledge-gap
+// signal, which is BEST-EFFORT: it comes either from an explicit agent signal
+// (the container agent calls the `report_knowledge_gap` tool → the orchestrator
+// records gap_source='agent_signal') or, failing that, from output heuristics
+// (gap_source='heuristic'). Heuristics can both miss real gaps and
+// false-positive on hedging language — treat the numbers as directional, not
+// exact. See rules/knowledge-base/analytics.md.
+
+/**
+ * Privacy stance for stored question text / sender, from
+ * ASSISTANT_ANALYTICS_PRIVACY (read lazily so tests can flip it per-case):
+ *   'main-only' (default) — full text + sender only for the main group;
+ *                           other groups get a redacted summary and null sender.
+ *   'full'                — full text + sender for every group (opt-in).
+ *   'redacted'            — never store raw question text (redacted form only)
+ *                           for any group; sender is still stored.
+ */
+export function analyticsPrivacyMode(): 'main-only' | 'full' | 'redacted' {
+  const raw = (process.env.ASSISTANT_ANALYTICS_PRIVACY || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'full' || raw === 'redacted') return raw;
+  return 'main-only';
+}
+
+/**
+ * Best-effort privacy-safe summary of a question: collapse whitespace, replace
+ * email addresses with `<email>` and long digit runs (7+, phone-like) with
+ * `<number>`, then truncate to ~120 chars. Deterministic and intentionally
+ * simple — it reduces obvious PII, it does NOT guarantee anonymization.
+ */
+export function redactQuestionText(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  const noEmail = collapsed.replace(
+    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    '<email>',
+  );
+  const noNumbers = noEmail.replace(/\d[\d\s().-]{6,}\d/g, '<number>');
+  return noNumbers.length > 120
+    ? noNumbers.slice(0, 117).trimEnd() + '…'
+    : noNumbers;
+}
+
+/**
+ * Decide what question text to persist for an event given the privacy mode and
+ * whether the event is from the main group. Full text is capped at 500 chars.
+ */
+export function resolveStoredQuestion(
+  rawText: string | null | undefined,
+  opts: { isMain: boolean; mode: 'main-only' | 'full' | 'redacted' },
+): { question_text: string | null } {
+  if (!rawText || !rawText.trim()) return { question_text: null };
+  const full = () => rawText.trim().slice(0, 500);
+  switch (opts.mode) {
+    case 'full':
+      return { question_text: full() };
+    case 'redacted':
+      return { question_text: redactQuestionText(rawText) };
+    case 'main-only':
+    default:
+      return {
+        question_text: opts.isMain ? full() : redactQuestionText(rawText),
+      };
+  }
+}
+
+const QUESTION_WORDS =
+  /^(who|what|when|where|why|how|which|whose|whom|can|could|would|should|is|are|do|does|did|will|any)\b/i;
+
+/** Cheap heuristic: does the trigger text look like a question? */
+export function looksLikeQuestion(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+  if (t.endsWith('?')) return true;
+  if (QUESTION_WORDS.test(t)) return true;
+  const lower = t.toLowerCase();
+  return lower.includes('how do i') || lower.includes('how to');
+}
+
+// Phrases the assistant tends to use when it cannot answer. Best-effort and
+// deliberately phrase-level (not single words) to keep false positives down.
+const KNOWLEDGE_GAP_PATTERNS: RegExp[] = [
+  /i\s+don'?t\s+have\s+(that\s+|the\s+|any\s+)?(information|info|details|data)/i,
+  /i\s+don'?t\s+know/i,
+  /not\s+in\s+the\s+(knowledge\s*base|kb)/i,
+  /no\s+relevant\s+(knowledge|information|info|docs?|documents?)/i,
+  /couldn'?t\s+find/i,
+  /could\s+not\s+find/i,
+  /i'?m\s+not\s+sure/i,
+  /no\s+information\s+about/i,
+  /there'?s\s+nothing\s+in\s+the\s+kb/i,
+  /i\s+don'?t\s+have\s+access\s+to\s+that/i,
+];
+
+/**
+ * Heuristic fallback for the knowledge-gap signal, derived from the agent's
+ * OUTPUT text. Low precision by nature — a real answer that merely hedges
+ * ("I'm not sure, but…") can trip it, and a genuine gap phrased differently can
+ * be missed. Prefer the explicit agent signal; this is the safety net.
+ */
+export function detectKnowledgeGapMarker(
+  output: string | null | undefined,
+): boolean {
+  if (!output) return false;
+  return KNOWLEDGE_GAP_PATTERNS.some((re) => re.test(output));
+}
+
+const TOPIC_KEYWORDS: Array<[string, RegExp]> = [
+  ['expenses', /\b(expense|reimburs|receipt|invoice|budget)\b/i],
+  ['payments', /\b(payout|payment|safe|multisig|wallet|transfer\s+funds)\b/i],
+  ['calendar', /\b(calendar|event|meeting|schedule|availab)\b/i],
+  ['tasks', /\b(task|todo|assignee|deadline|due\s+date)\b/i],
+  ['people', /\b(who\s+is|contact|person|member|people|email\s+address)\b/i],
+  ['github', /\b(github|pull\s+request|\bpr\b|issue|repo|commit)\b/i],
+];
+
+/** Very cheap coarse topic bucket by keyword, or null when nothing matches. */
+export function coarseTopic(text: string | null | undefined): string | null {
+  if (!text) return null;
+  for (const [topic, re] of TOPIC_KEYWORDS) {
+    if (re.test(text)) return topic;
+  }
+  return null;
+}
+
+export interface AssistantEventInput {
+  runId?: number | null;
+  chatJid: string;
+  channel?: string | null;
+  groupName?: string | null;
+  groupFolder: string;
+  isMain: boolean;
+  senderName?: string | null;
+  /** RAW trigger text; this function applies the privacy policy to it. */
+  questionText?: string | null;
+  outcome: 'answered' | 'knowledge_gap' | 'error' | 'unknown';
+  gapSource?: 'agent_signal' | 'heuristic' | null;
+  topic?: string | null;
+}
+
+/**
+ * Insert one analytics event. Applies the privacy policy (question redaction +
+ * sender suppression) here so callers pass raw values and never have to reason
+ * about the stance. Returns the new row id.
+ */
+export function logAssistantEvent(input: AssistantEventInput): number {
+  const mode = analyticsPrivacyMode();
+  const isQuestion = looksLikeQuestion(input.questionText) ? 1 : 0;
+  const { question_text } = resolveStoredQuestion(input.questionText, {
+    isMain: input.isMain,
+    mode,
+  });
+  // Suppress the sender for non-main groups under the default main-only stance.
+  const storeSender = !(mode === 'main-only' && !input.isMain);
+  const senderName = storeSender ? (input.senderName ?? null) : null;
+
+  const result = db
+    .prepare(
+      `INSERT INTO assistant_events
+       (run_id, chat_jid, channel, group_name, group_folder, is_main,
+        sender_name, is_question, outcome, gap_source, topic, question_text, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.runId ?? null,
+      input.chatJid,
+      input.channel ?? null,
+      input.groupName ?? null,
+      input.groupFolder,
+      input.isMain ? 1 : 0,
+      senderName,
+      isQuestion,
+      input.outcome,
+      input.gapSource ?? null,
+      input.topic ?? null,
+      question_text,
+      new Date().toISOString(),
+    );
+  return Number(result.lastInsertRowid);
+}
+
+/** Clause + params for an optional `created_at >= sinceIso` filter. */
+function sinceClause(sinceIso?: string, days?: number): [string, string[]] {
+  if (sinceIso) return ['created_at >= ?', [sinceIso]];
+  if (days && days > 0) {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    return ['created_at >= ?', [cutoff]];
+  }
+  return ['1=1', []];
+}
+
+export interface VolumePoint {
+  day: string;
+  total: number;
+  answered: number;
+  knowledgeGap: number;
+  error: number;
+}
+
+/** Daily volume with per-outcome counts, chronological. Default last 14 days. */
+export function getEventVolumeByDay(opts?: {
+  sinceIso?: string;
+  days?: number;
+}): VolumePoint[] {
+  const [where, params] = sinceClause(opts?.sinceIso, opts?.days ?? 14);
+  const rows = db
+    .prepare(
+      `SELECT date(created_at) AS day,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'answered' THEN 1 ELSE 0 END) AS answered,
+              SUM(CASE WHEN outcome = 'knowledge_gap' THEN 1 ELSE 0 END) AS knowledgeGap,
+              SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS error
+       FROM assistant_events
+       WHERE ${where}
+       GROUP BY day
+       ORDER BY day`,
+    )
+    .all(...params) as Array<{
+    day: string;
+    total: number;
+    answered: number;
+    knowledgeGap: number;
+    error: number;
+  }>;
+  return rows;
+}
+
+export interface GroupBreakdownRow {
+  groupFolder: string;
+  groupName: string | null;
+  total: number;
+  answered: number;
+  knowledgeGap: number;
+  error: number;
+  resolutionRate: number;
+}
+
+/**
+ * Per-group answered/gap/error counts + resolution rate. Resolution rate is
+ * answered / (answered + knowledge_gap): errors are EXCLUDED from the
+ * denominator so an outage doesn't masquerade as a knowledge problem.
+ */
+export function getEventGroupBreakdown(opts?: {
+  sinceIso?: string;
+}): GroupBreakdownRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const rows = db
+    .prepare(
+      `SELECT group_folder AS groupFolder,
+              MAX(group_name) AS groupName,
+              COUNT(*) AS total,
+              SUM(CASE WHEN outcome = 'answered' THEN 1 ELSE 0 END) AS answered,
+              SUM(CASE WHEN outcome = 'knowledge_gap' THEN 1 ELSE 0 END) AS knowledgeGap,
+              SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS error
+       FROM assistant_events
+       WHERE ${where}
+       GROUP BY group_folder
+       ORDER BY total DESC`,
+    )
+    .all(...params) as Array<Omit<GroupBreakdownRow, 'resolutionRate'>>;
+  return rows.map((r) => {
+    const denom = r.answered + r.knowledgeGap;
+    return { ...r, resolutionRate: denom > 0 ? r.answered / denom : 0 };
+  });
+}
+
+export interface ResolutionStats {
+  total: number;
+  questions: number;
+  answered: number;
+  knowledgeGap: number;
+  error: number;
+  unknown: number;
+  resolutionRate: number;
+}
+
+/** Overall counts + resolution rate, optionally scoped to a group. */
+export function getResolutionStats(opts?: {
+  sinceIso?: string;
+  groupFolder?: string;
+}): ResolutionStats {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const clauses = [where];
+  if (opts?.groupFolder) {
+    clauses.push('group_folder = ?');
+    params.push(opts.groupFolder);
+  }
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(is_question) AS questions,
+              SUM(CASE WHEN outcome = 'answered' THEN 1 ELSE 0 END) AS answered,
+              SUM(CASE WHEN outcome = 'knowledge_gap' THEN 1 ELSE 0 END) AS knowledgeGap,
+              SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS error,
+              SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END) AS unknown
+       FROM assistant_events
+       WHERE ${clauses.join(' AND ')}`,
+    )
+    .get(...params) as {
+    total: number;
+    questions: number | null;
+    answered: number | null;
+    knowledgeGap: number | null;
+    error: number | null;
+    unknown: number | null;
+  };
+  const answered = row.answered ?? 0;
+  const knowledgeGap = row.knowledgeGap ?? 0;
+  const denom = answered + knowledgeGap;
+  return {
+    total: row.total ?? 0,
+    questions: row.questions ?? 0,
+    answered,
+    knowledgeGap,
+    error: row.error ?? 0,
+    unknown: row.unknown ?? 0,
+    resolutionRate: denom > 0 ? answered / denom : 0,
+  };
+}
+
+export interface TopUnansweredRow {
+  question: string;
+  count: number;
+  lastSeen: string;
+  sampleGroup: string | null;
+}
+
+/**
+ * Top knowledge-gap questions, grouped case/whitespace-insensitively. Rows with
+ * no stored question text (redacted-to-null) carry no actionable text and are
+ * skipped — so the list surfaces exactly what an admin could add to the KB.
+ */
+export function getTopUnanswered(opts?: {
+  sinceIso?: string;
+  limit?: number;
+}): TopUnansweredRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const limit = opts?.limit ?? 15;
+  const rows = db
+    .prepare(
+      `SELECT MAX(question_text) AS question,
+              COUNT(*) AS count,
+              MAX(created_at) AS lastSeen,
+              MAX(group_folder) AS sampleGroup
+       FROM assistant_events
+       WHERE ${where}
+         AND outcome = 'knowledge_gap'
+         AND question_text IS NOT NULL
+         AND TRIM(question_text) != ''
+       GROUP BY LOWER(TRIM(question_text))
+       ORDER BY count DESC, lastSeen DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as TopUnansweredRow[];
+  return rows;
+}
+
+export interface ActiveEntityRow {
+  name: string;
+  count: number;
+}
+
+/** Most active groups by event count (by display name, folder fallback). */
+export function getMostActiveGroups(opts?: {
+  sinceIso?: string;
+  limit?: number;
+}): ActiveEntityRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const limit = opts?.limit ?? 10;
+  return db
+    .prepare(
+      `SELECT COALESCE(group_name, group_folder) AS name, COUNT(*) AS count
+       FROM assistant_events
+       WHERE ${where}
+       GROUP BY COALESCE(group_name, group_folder)
+       ORDER BY count DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as ActiveEntityRow[];
+}
+
+/**
+ * Most active users by event count. Only rows with a stored sender appear, so
+ * privacy-redacted (null-sender) events are naturally excluded.
+ */
+export function getMostActiveUsers(opts?: {
+  sinceIso?: string;
+  limit?: number;
+}): ActiveEntityRow[] {
+  const [where, params] = sinceClause(opts?.sinceIso);
+  const limit = opts?.limit ?? 10;
+  return db
+    .prepare(
+      `SELECT sender_name AS name, COUNT(*) AS count
+       FROM assistant_events
+       WHERE ${where}
+         AND sender_name IS NOT NULL
+         AND TRIM(sender_name) != ''
+       GROUP BY sender_name
+       ORDER BY count DESC
+       LIMIT ?`,
+    )
+    .all(...params, limit) as ActiveEntityRow[];
+}
+
+// --- Pending approvals (reusable human-in-the-loop primitive) ---
+
+export type PendingApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'revise'
+  | 'expired';
+
+export interface PendingApproval {
+  id: string;
+  action_class: string;
+  summary: string;
+  payload: string | null;
+  dedupe_key: string | null;
+  chat_jid: string;
+  group_folder: string;
+  requested_by_user_id: string | null;
+  approver_hint: string | null;
+  status: PendingApprovalStatus;
+  created_at: string;
+  expires_at: string | null;
+  resolved_by_user_id: string | null;
+  resolved_at: string | null;
+  revision_notes: string | null;
+}
+
+export interface PendingApprovalInput {
+  action_class: string;
+  summary: string;
+  payload?: string | null;
+  dedupe_key?: string | null;
+  chat_jid: string;
+  group_folder: string;
+  requested_by_user_id?: string | null;
+  approver_hint?: string | null;
+  /** Minutes until a still-pending row auto-expires. Omit/0 → no expiry. */
+  ttl_minutes?: number;
+}
+
+function nextApprovalId(): string {
+  return `AP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Create a pending-approval row. Idempotent on `dedupe_key`: if a still-pending
+ * row exists with the same key, that row is returned unchanged rather than
+ * creating a duplicate (mirrors the partial-unique index).
+ */
+export function createPendingApproval(
+  input: PendingApprovalInput,
+): PendingApproval {
+  if (input.dedupe_key) {
+    const existing = getPendingApprovalByDedupeKey(input.dedupe_key);
+    if (existing) return existing;
+  }
+  const id = nextApprovalId();
+  const now = new Date().toISOString();
+  const expiresAt =
+    input.ttl_minutes && input.ttl_minutes > 0
+      ? new Date(Date.now() + input.ttl_minutes * 60_000).toISOString()
+      : null;
+  db.prepare(
+    `INSERT INTO pending_approvals
+       (id, action_class, summary, payload, dedupe_key, chat_jid, group_folder,
+        requested_by_user_id, approver_hint, status, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+  ).run(
+    id,
+    input.action_class,
+    input.summary,
+    input.payload ?? null,
+    input.dedupe_key ?? null,
+    input.chat_jid,
+    input.group_folder,
+    input.requested_by_user_id ?? null,
+    input.approver_hint ?? null,
+    now,
+    expiresAt,
+  );
+  return getPendingApproval(id)!;
+}
+
+export function getPendingApproval(id: string): PendingApproval | undefined {
+  return db.prepare('SELECT * FROM pending_approvals WHERE id = ?').get(id) as
+    | PendingApproval
+    | undefined;
+}
+
+export function getPendingApprovalByDedupeKey(
+  dedupeKey: string,
+): PendingApproval | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM pending_approvals WHERE dedupe_key = ? AND status = 'pending'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(dedupeKey) as PendingApproval | undefined;
+}
+
+export function getPendingApprovals(): PendingApproval[] {
+  return db
+    .prepare(
+      `SELECT * FROM pending_approvals WHERE status = 'pending' ORDER BY created_at`,
+    )
+    .all() as PendingApproval[];
+}
+
+/**
+ * Resolve a pending row. Only a still-`pending` row transitions (guards against
+ * double-decision / races); returns the resulting row, or undefined if the row
+ * is absent or already terminal. `revision_notes` carries reject/revise reasons
+ * back to the proposing agent.
+ */
+export function resolvePendingApproval(
+  id: string,
+  status: Exclude<PendingApprovalStatus, 'pending'>,
+  resolvedByUserId: string | null,
+  revisionNotes?: string | null,
+): PendingApproval | undefined {
+  const now = new Date().toISOString();
+  const info = db
+    .prepare(
+      `UPDATE pending_approvals
+         SET status = ?, resolved_by_user_id = ?, resolved_at = ?, revision_notes = ?
+       WHERE id = ? AND status = 'pending'`,
+    )
+    .run(status, resolvedByUserId, now, revisionNotes ?? null, id);
+  if (info.changes === 0) return undefined;
+  return getPendingApproval(id);
+}
+
+/**
+ * Sweep still-pending rows whose `expires_at` is in the past to `expired`.
+ * Returns the rows that were expired (for one-shot "your request expired"
+ * notifications). Idempotent — an already-expired row is not re-swept.
+ */
+export function expireStalePendingApprovals(
+  nowIso: string = new Date().toISOString(),
+): PendingApproval[] {
+  const stale = db
+    .prepare(
+      `SELECT * FROM pending_approvals
+       WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?`,
+    )
+    .all(nowIso) as PendingApproval[];
+  if (stale.length === 0) return stale;
+  const mark = db.prepare(
+    `UPDATE pending_approvals SET status = 'expired', resolved_at = ?
+     WHERE id = ? AND status = 'pending'`,
+  );
+  const tx = db.transaction((rows: PendingApproval[]) => {
+    for (const r of rows) mark.run(nowIso, r.id);
+  });
+  tx(stale);
+  return stale.map((r) => ({ ...r, status: 'expired' as const }));
 }
 
 // --- JSON migration ---

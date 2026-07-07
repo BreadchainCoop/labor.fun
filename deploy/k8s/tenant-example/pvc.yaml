@@ -1,0 +1,20 @@
+# Only needed when K8S_VOLUME_MODE=pvc (multi-node clusters / hosted SaaS).
+# Single-node self-host (K8S_VOLUME_MODE=hostPath, the default) does not need
+# this file at all — the orchestrator's node-local disk is used directly.
+#
+# storageClassName is a placeholder: it MUST resolve to a ReadWriteMany
+# (RWX) capable StorageClass (e.g. NFS, EFS, Filestore, Longhorn-RWX,
+# CephFS) since both the orchestrator Deployment and every agent Pod mount
+# this same claim concurrently. See docs/KUBERNETES.md "K8S_VOLUME_MODE=pvc".
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nanoclaw-data
+  namespace: nanoclaw-tenant-example
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: "REPLACE_WITH_RWX_STORAGECLASS"
+  resources:
+    requests:
+      storage: 20Gi

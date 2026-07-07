@@ -111,6 +111,9 @@ export async function run(_args: string[]): Promise<void> {
     'TELEGRAM_BOT_TOKEN',
     'SLACK_BOT_TOKEN',
     'SLACK_APP_TOKEN',
+    'SLACK_RECEIVER_MODE',
+    'SLACK_INGRESS_SECRET',
+    'SLACK_SIGNING_SECRET',
     'DISCORD_BOT_TOKEN',
   ]);
 
@@ -126,10 +129,22 @@ export async function run(_args: string[]): Promise<void> {
   if (process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN) {
     channelAuth.telegram = 'configured';
   }
-  if (
-    (process.env.SLACK_BOT_TOKEN || envVars.SLACK_BOT_TOKEN) &&
-    (process.env.SLACK_APP_TOKEN || envVars.SLACK_APP_TOKEN)
-  ) {
+  // Slack: socket mode (default) needs bot + app tokens; http mode needs the
+  // bot token plus a verification secret (ingress HMAC or Slack signing).
+  const slackMode = (
+    process.env.SLACK_RECEIVER_MODE ||
+    envVars.SLACK_RECEIVER_MODE ||
+    'socket'
+  ).toLowerCase();
+  const slackBotToken = process.env.SLACK_BOT_TOKEN || envVars.SLACK_BOT_TOKEN;
+  const slackSecondFactor =
+    slackMode === 'http'
+      ? process.env.SLACK_INGRESS_SECRET ||
+        envVars.SLACK_INGRESS_SECRET ||
+        process.env.SLACK_SIGNING_SECRET ||
+        envVars.SLACK_SIGNING_SECRET
+      : process.env.SLACK_APP_TOKEN || envVars.SLACK_APP_TOKEN;
+  if (slackBotToken && slackSecondFactor) {
     channelAuth.slack = 'configured';
   }
   if (process.env.DISCORD_BOT_TOKEN || envVars.DISCORD_BOT_TOKEN) {
