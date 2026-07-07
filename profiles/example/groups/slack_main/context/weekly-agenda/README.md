@@ -65,8 +65,13 @@ owners:                                # project label -> KB people slug
   Breadrich Engels: ron
   Solidarity Fund: blessing
 facilitators:                          # meeting date -> KB people slug. QUOTE the dates!
-  '2026-06-17': marv
-  '2026-06-24': gilberto
+  '2026-06-17': marv                    #   explicit entries are manual OVERRIDES
+  '2026-06-24': gilberto                #   (they win over facilitator_pool below)
+facilitator_pool:                       # OPTIONAL: auto-rotate the chair each week
+  - marv                                #   through this list, in order, for any
+  - gilberto                            #   week with no explicit facilitators[date]
+  - blessing                            #   entry. Omit/empty = weeks fall back to
+  - cypherbren                          #   "Facilitator: TBD — claim it".
 ---
 
 Free text: who maintains this config, the meeting link, etc.
@@ -76,6 +81,12 @@ Notes:
 
 - **Quote the facilitator dates** (`'2026-06-17'`). Unquoted, YAML parses them
   as timestamps; the plugin defends against this but quoting is clearer.
+- **Facilitator selection** resolves in this order: (1) an explicit
+  `facilitators[<date>]` entry (manual override) always wins; (2) else, if
+  `facilitator_pool` is set, the chair **auto-rotates** through that list —
+  advancing by one each week via a deterministic week index (no state, wraps
+  around fairly, a skipped week still moves forward); (3) else it's left as
+  `TBD — claim it`. So you only hand-set weeks you want to pin — the rest rotate.
 - Every `owners`/`facilitators` slug should have a `people/<slug>.md` with a
   `discord_id`, so channel posts actually ping them — and a `github_username`,
   so the build agent can attribute each person's merged PRs / closed issues.

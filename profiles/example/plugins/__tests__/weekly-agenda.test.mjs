@@ -8,6 +8,7 @@ import {
   isoDate,
   meetingWindow,
   parseConfig,
+  pickFacilitator,
   planActions,
   resolveDiscordIds,
   tick,
@@ -106,6 +107,57 @@ describe('parseConfig', () => {
     );
     expect(c.correctorBaseUrl).toBe('http://203.0.113.5:8091'); // trailing / stripped
     expect(c.correctorPassword).toBe('bread-solidarity');
+  });
+
+  it('reads facilitator_pool and defaults it to empty', () => {
+    expect(parseConfig('---\nchannel_jid: dc:1\n---').facilitatorPool).toEqual([]);
+    const c = parseConfig(
+      [
+        '---',
+        'facilitator_pool:',
+        '  - josh',
+        '  - marv',
+        '  - " ruben "', // trimmed
+        '  - ""', // dropped
+        '---',
+      ].join('\n'),
+    );
+    expect(c.facilitatorPool).toEqual(['josh', 'marv', 'ruben']);
+  });
+});
+
+describe('pickFacilitator', () => {
+  it('uses an explicit override when present (wins over the pool)', () => {
+    expect(pickFacilitator('2026-06-10', { '2026-06-10': 'josh' }, ['a', 'b'])).toBe('josh');
+    expect(pickFacilitator('2026-06-10', { '2026-06-10': '  gilberto ' }, [])).toBe('gilberto');
+  });
+
+  it('returns "" (TBD) when there is no override and no pool', () => {
+    expect(pickFacilitator('2026-06-10', {}, [])).toBe('');
+    expect(pickFacilitator('2026-06-10', {})).toBe('');
+  });
+
+  it('auto-rotates deterministically, advancing by one each week', () => {
+    const pool = ['ron', 'marv', 'bren'];
+    // Consecutive Wednesdays step the rotation by exactly one, wrapping the pool.
+    const w1 = pickFacilitator('2026-06-17', {}, pool);
+    const w2 = pickFacilitator('2026-06-24', {}, pool);
+    const w3 = pickFacilitator('2026-07-01', {}, pool);
+    const w4 = pickFacilitator('2026-07-08', {}, pool);
+    // Each week advances to the next pool member (adjacency invariant), and the
+    // 4th week (pool length 3) wraps back to the first.
+    const i1 = pool.indexOf(w1);
+    expect(i1).toBeGreaterThanOrEqual(0);
+    expect(w2).toBe(pool[(i1 + 1) % 3]);
+    expect(w3).toBe(pool[(i1 + 2) % 3]);
+    expect(w4).toBe(w1);
+    expect(new Set([w1, w2, w3]).size).toBe(3);
+    // stable: same week always yields the same chair
+    expect(pickFacilitator('2026-06-17', {}, pool)).toBe(w1);
+  });
+
+  it('is resilient to a malformed weekKey', () => {
+    expect(pickFacilitator('not-a-date', {}, ['a', 'b'])).toBe('');
   });
 });
 
