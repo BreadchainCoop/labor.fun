@@ -399,6 +399,30 @@ export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
   envVal('DISCORD_DM_ALLOWED_ROLE_IDS'),
 );
 
+// --- Telegram auto-registration (src/channels/telegram.ts) ---
+// TELEGRAM_AUTO_REGISTER_GROUPS: when 'true', simply adding the bot to a
+// Telegram group/supergroup registers the chat automatically (no /chatid +
+// manual registration step) and posts a short greeting. Messages that reach
+// the bot from a still-unregistered group (e.g. the bot was added before this
+// flag existed, so there is no join event to replay) also self-heal-register
+// the chat instead of being silently dropped.
+// Default: off — unregistered Telegram groups are ignored, exactly as before.
+export const TELEGRAM_AUTO_REGISTER_GROUPS =
+  envVal('TELEGRAM_AUTO_REGISTER_GROUPS') === 'true';
+// TELEGRAM_AUTO_ALLOWLIST_GROUPS: 'all' or a comma-separated list of chat
+// JIDs (e.g. "tg:-1001234,tg:-1005678"). For messages arriving in a matching
+// REGISTERED Telegram group, any sender who doesn't already resolve to a KB
+// person is auto-seeded: a people/<slug>.md file (created_by:
+// telegram-auto-allowlist) plus a user_identities row, making them
+// allowlisted from their first message onward.
+//
+// SECURITY: allowlisting grants FULL access — anyone who can post in a
+// matching group becomes a fully trusted sender. Only enable this for groups
+// whose entire membership you trust; prefer the explicit JID list over 'all'.
+// Default: empty (feature off).
+export const TELEGRAM_AUTO_ALLOWLIST_GROUPS =
+  envVal('TELEGRAM_AUTO_ALLOWLIST_GROUPS') || '';
+
 // --- Microsoft Teams channel (src/channels/teams.ts) ---
 // Non-secret feature flags, exported for anything outside the channel module
 // that needs to know Teams is configured (e.g. setup/status tooling). The App

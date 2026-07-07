@@ -4,12 +4,25 @@ import path from 'path';
 
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  TELEGRAM_AUTO_ALLOWLIST_GROUPS,
+  TELEGRAM_AUTO_REGISTER_GROUPS,
+  TRIGGER_PATTERN,
+} from '../config.js';
 import { logReaction, storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { ensureTelegramSenderAllowlisted } from './telegram-allowlist.js';
+import {
+  autoAllowlistMatches,
+  buildJoinGreeting,
+  deriveTelegramGroupFolder,
+  parseAutoAllowlist,
+  TelegramAutoAllowlist,
+} from './telegram-auto.js';
 import {
   Channel,
   OnChatMetadata,
@@ -33,6 +46,17 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Needed for TELEGRAM_AUTO_REGISTER_GROUPS; auto-registration is silently
+  // disabled when the orchestrator doesn't provide it.
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
+  // TELEGRAM_AUTO_REGISTER_GROUPS — register a group the moment the bot is
+  // added to it (my_chat_member) or when an unregistered group's message
+  // reaches the bot. Default: off.
+  autoRegisterGroups?: boolean;
+  // TELEGRAM_AUTO_ALLOWLIST_GROUPS raw value ('all' or comma-separated
+  // jids) — auto-seed unknown senders in matching groups as KB people.
+  // SECURITY: grants full access; trusted groups only. Default: off.
+  autoAllowlistGroups?: string;
 }
 
 /**
@@ -75,10 +99,83 @@ export class TelegramChannel implements Channel {
   // at all; this also wires that up. Capped LRU.
   private threadIdById = new Map<string, string>();
   private static readonly THREAD_ID_BY_ID_MAX = 500;
+  private autoAllowlist: TelegramAutoAllowlist;
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
     this.opts = opts;
+    this.autoAllowlist = parseAutoAllowlist(opts.autoAllowlistGroups);
+  }
+
+  /**
+   * Auto-register a Telegram group/supergroup when
+   * TELEGRAM_AUTO_REGISTER_GROUPS is on. Returns the registered group
+   * (existing or newly created), or undefined when the feature is off, the
+   * chat isn't a group, or registration was rejected. Idempotent.
+   */
+  private maybeAutoRegisterGroup(chat: {
+    id: number;
+    type: string;
+    title?: string;
+  }): RegisteredGroup | undefined {
+    const chatJid = `tg:${chat.id}`;
+    const existing = this.opts.registeredGroups()[chatJid];
+    if (existing) return existing;
+    if (!this.opts.autoRegisterGroups || !this.opts.registerGroup) {
+      return undefined;
+    }
+    if (chat.type !== 'group' && chat.type !== 'supergroup') return undefined;
+
+    const existingFolders = new Set(
+      Object.values(this.opts.registeredGroups()).map((g) => g.folder),
+    );
+    const folder = deriveTelegramGroupFolder(
+      chat.id,
+      chat.title,
+      existingFolders,
+    );
+    this.opts.registerGroup(chatJid, {
+      name: chat.title || chatJid,
+      folder,
+      trigger: `@${ASSISTANT_NAME}`,
+      added_at: new Date().toISOString(),
+    });
+    // Re-read instead of trusting our input: registerGroup validates the
+    // folder and may reject the registration.
+    const registered = this.opts.registeredGroups()[chatJid];
+    if (registered) {
+      logger.info(
+        { chatJid, name: registered.name, folder: registered.folder },
+        'Telegram group auto-registered',
+      );
+    }
+    return registered;
+  }
+
+  /**
+   * Auto-seed an unknown sender as an allowlisted KB person when this
+   * registered group matches TELEGRAM_AUTO_ALLOWLIST_GROUPS. Failures are
+   * logged and never block message delivery.
+   */
+  private maybeAutoAllowlistSender(
+    chatJid: string,
+    isGroup: boolean,
+    from:
+      | { id: number; is_bot?: boolean; username?: string; first_name?: string }
+      | undefined,
+  ): void {
+    if (this.autoAllowlist.mode === 'off') return;
+    if (!from?.id || from.is_bot) return;
+    if (!autoAllowlistMatches(this.autoAllowlist, chatJid, isGroup)) return;
+    try {
+      ensureTelegramSenderAllowlisted({
+        telegramId: from.id.toString(),
+        username: from.username,
+        firstName: from.first_name,
+      });
+    } catch (err) {
+      logger.warn({ chatJid, err }, 'Telegram auto-allowlist seeding failed');
+    }
   }
 
   /**
@@ -152,6 +249,53 @@ export class TelegramChannel implements Channel {
         `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
         { parse_mode: 'Markdown' },
       );
+
+      // Self-heal path: with auto-registration on, /chatid in an
+      // unregistered group registers it on the spot (covers bots added
+      // before the feature existed — no my_chat_member event to replay).
+      this.maybeAutoRegisterGroup(ctx.chat);
+    });
+
+    // Auto-register the group the moment the bot itself is added
+    // (TELEGRAM_AUTO_REGISTER_GROUPS). No-op when the flag is off.
+    this.bot.on('my_chat_member', async (ctx) => {
+      // Fully inert unless the flag is on — flag-off installs behave
+      // exactly as before this handler existed.
+      if (!this.opts.autoRegisterGroups) return;
+      const update = ctx.myChatMember;
+      const chat = ctx.chat;
+      if (!update || !chat) return;
+      // my_chat_member updates always concern the bot itself, but check
+      // anyway — we only care about the bot being added, as member or admin.
+      if (ctx.me?.id && update.new_chat_member?.user?.id !== ctx.me.id) return;
+      const newStatus = update.new_chat_member?.status;
+      if (newStatus !== 'member' && newStatus !== 'administrator') return;
+      if (chat.type !== 'group' && chat.type !== 'supergroup') return;
+
+      const chatJid = `tg:${chat.id}`;
+      this.opts.onChatMetadata(
+        chatJid,
+        new Date().toISOString(),
+        chat.title,
+        'telegram',
+        true,
+      );
+
+      const alreadyRegistered = !!this.opts.registeredGroups()[chatJid];
+      const group = this.maybeAutoRegisterGroup(chat);
+      if (!group || alreadyRegistered) return; // off, rejected, or known chat
+
+      // Fresh registration — greet, adapting to the bot's privacy mode
+      // (privacy on ⇒ Telegram only delivers /commands, mentions, replies).
+      const greeting = buildJoinGreeting(
+        ASSISTANT_NAME,
+        ctx.me?.can_read_all_group_messages,
+      );
+      try {
+        await sendTelegramMessage(this.bot!.api, chat.id, greeting);
+      } catch (err) {
+        logger.warn({ chatJid, err }, 'Failed to send Telegram join greeting');
+      }
     });
 
     // Command to check bot status
@@ -246,8 +390,22 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      // Only deliver full message for registered groups
-      const group = this.opts.registeredGroups()[chatJid];
+      // Only deliver full messages for registered groups. With
+      // TELEGRAM_AUTO_REGISTER_GROUPS on, an unregistered group's message
+      // self-heal-registers the chat and is processed (covers bots added
+      // before auto-registration existed and privacy-mode bots that only
+      // start seeing messages after an admin promotion).
+      let group: RegisteredGroup | undefined =
+        this.opts.registeredGroups()[chatJid];
+      if (!group) {
+        group = this.maybeAutoRegisterGroup(ctx.chat);
+        if (group) {
+          logger.info(
+            { chatJid, chatName },
+            'Telegram group late-registered on inbound message',
+          );
+        }
+      }
       if (!group) {
         logger.debug(
           { chatJid, chatName },
@@ -255,6 +413,10 @@ export class TelegramChannel implements Channel {
         );
         return;
       }
+
+      // Auto-allowlist the sender when this group matches
+      // TELEGRAM_AUTO_ALLOWLIST_GROUPS (no-op for known senders).
+      this.maybeAutoAllowlistSender(chatJid, isGroup, ctx.from);
 
       // Deliver message — startMessageLoop() will pick it up
       this.opts.onMessage(chatJid, {
@@ -285,7 +447,11 @@ export class TelegramChannel implements Channel {
       opts?: { fileId?: string; filename?: string },
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
-      const group = this.opts.registeredGroups()[chatJid];
+      // Same self-heal registration as the text handler (no-op unless
+      // TELEGRAM_AUTO_REGISTER_GROUPS is on).
+      const group =
+        this.opts.registeredGroups()[chatJid] ??
+        this.maybeAutoRegisterGroup(ctx.chat);
       if (!group) return;
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
@@ -620,5 +786,9 @@ registerChannel('telegram', (opts: ChannelOpts) => {
     logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
     return null;
   }
-  return new TelegramChannel(token, opts);
+  return new TelegramChannel(token, {
+    ...opts,
+    autoRegisterGroups: TELEGRAM_AUTO_REGISTER_GROUPS,
+    autoAllowlistGroups: TELEGRAM_AUTO_ALLOWLIST_GROUPS,
+  });
 });
