@@ -6,7 +6,8 @@
 //     that (re)builds the agenda's "This Week" tab into a DECISION-READY draft:
 //     it first archives the previous week's contents into the doc's permanent
 //     Archive tab, then writes a fresh dated agenda pre-filled with the week's
-//     facilitator (from the rota) and rich auto-pulled context — each owner's
+//     facilitator (explicit rota entry, else auto-rotated from facilitator_pool)
+//     and rich auto-pulled context — each owner's
 //     merged PRs / closed issues from the last 7 days as clickable links with a
 //     one-line summary, upcoming deadlines (from the KB deadline digest), and a
 //     Goals Review read against the quarter's strategic directives. It then
@@ -107,7 +108,8 @@ export function parseConfig(mdText) {
             .map(([k, v]) => [String(k), String(v)]),
         )
       : {};
-  // facilitators: meeting-date (YYYY-MM-DD) -> KB people slug.
+  // facilitators: meeting-date (YYYY-MM-DD) -> KB people slug. Explicit entries
+  // are manual OVERRIDES that always win over the auto-rotation below.
   const facilitators =
     fm.facilitators && typeof fm.facilitators === 'object' && !Array.isArray(fm.facilitators)
       ? Object.fromEntries(
@@ -116,6 +118,12 @@ export function parseConfig(mdText) {
             .map(([k, v]) => [normalizeDateKey(String(k)), String(v)]),
         )
       : {};
+  // facilitator_pool: ordered list of KB people slugs to auto-rotate the chair
+  // through on weeks with no explicit `facilitators[<date>]` entry. Empty/unset
+  // disables auto-rotation (those weeks fall back to "TBD — claim it").
+  const facilitatorPool = Array.isArray(fm.facilitator_pool)
+    ? fm.facilitator_pool.filter((s) => typeof s === 'string' && s.trim()).map((s) => s.trim())
+    : [];
   return {
     channelJid: typeof fm.channel_jid === 'string' ? fm.channel_jid : '',
     docId: typeof fm.doc_id === 'string' ? fm.doc_id : '',
@@ -132,6 +140,7 @@ export function parseConfig(mdText) {
     refreshHoursBefore: Number(fm.refresh_hours_before) || 0,
     owners,
     facilitators,
+    facilitatorPool,
     // Optional context sources the build agent weaves into the agenda (all
     // org-agnostic — paths are KB-relative, org is the GitHub org to mine).
     // Strategic directives doc → drives the "Goals Review" section.
@@ -151,6 +160,32 @@ export function parseConfig(mdText) {
     // Shared StatiCrypt password (must match the agenda-web service's AGENDA_WEB_PASSWORD).
     correctorPassword: typeof fm.corrector_password === 'string' ? fm.corrector_password : '',
   };
+}
+
+/**
+ * Resolve the facilitator (chair) for a meeting week.
+ *
+ * Priority:
+ *   1. An explicit `facilitators[weekKey]` entry always wins — a manual override.
+ *   2. Otherwise, when a non-empty `pool` is configured, auto-rotate: pick the
+ *      pool member by a deterministic week index so the chair advances by one
+ *      each week and wraps around the pool fairly, with no persisted state.
+ *   3. Otherwise '' — the doc renders "Facilitator: TBD — claim it" (the legacy
+ *      behavior, unchanged when no pool is set).
+ *
+ * The index counts whole weeks since the Unix epoch from the meeting date, so
+ * consecutive weekly meetings (7 days apart) step the rotation by exactly one;
+ * a skipped week still moves it forward rather than repeating the same chair.
+ */
+export function pickFacilitator(weekKey, explicit = {}, pool = []) {
+  const override = explicit?.[weekKey];
+  if (typeof override === 'string' && override.trim()) return override.trim();
+  if (!Array.isArray(pool) || pool.length === 0) return '';
+  const ms = Date.parse(`${weekKey}T00:00:00Z`);
+  if (Number.isNaN(ms)) return '';
+  const weeks = Math.floor(ms / (7 * 86_400_000));
+  const idx = ((weeks % pool.length) + pool.length) % pool.length;
+  return pool[idx];
 }
 
 /** slug -> [project labels they own], so one DM can name all their sections. */
@@ -509,7 +544,7 @@ export function tick({ profileDir, logger, nowMs }) {
 
   const assignments = assignmentsBySlug(cfg.owners);
   const slugs = Object.keys(assignments);
-  const facilitator = cfg.facilitators[weekKey] || '';
+  const facilitator = pickFacilitator(weekKey, cfg.facilitators, cfg.facilitatorPool);
 
   const statePath = path.join(ctxDir, 'weekly-agenda', 'state', `${weekKey}.json`);
   let state = {};
