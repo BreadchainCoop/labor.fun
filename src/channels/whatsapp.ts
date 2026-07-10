@@ -27,6 +27,8 @@ import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
   STORE_DIR,
+  WHATSAPP_AUTO_ALLOWLIST_GROUPS,
+  WHATSAPP_AUTO_REGISTER_GROUPS,
 } from '../config.js';
 import {
   getLastGroupSync,
@@ -46,6 +48,13 @@ import {
   RegisteredGroup,
 } from '../types.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { ensureWhatsAppSenderAllowlisted } from './whatsapp-allowlist.js';
+import {
+  autoAllowlistMatches,
+  deriveWhatsAppGroupFolder,
+  parseAutoAllowlist,
+  WhatsAppAutoAllowlist,
+} from './whatsapp-auto.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -53,6 +62,17 @@ export interface WhatsAppChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Needed for WHATSAPP_AUTO_REGISTER_GROUPS; auto-registration is silently
+  // disabled when the orchestrator doesn't provide it.
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
+  // WHATSAPP_AUTO_REGISTER_GROUPS — register a chat the moment the first
+  // inbound message from a still-unregistered chat reaches the bot (the only
+  // hook WhatsApp gives us — there is no join event). Default: off.
+  autoRegisterGroups?: boolean;
+  // WHATSAPP_AUTO_ALLOWLIST_GROUPS raw value ('all' or comma-separated jids) —
+  // auto-seed unknown senders in matching groups as KB people.
+  // SECURITY: grants full access; trusted groups only. Default: off.
+  autoAllowlistGroups?: string;
 }
 
 export class WhatsAppChannel implements Channel {
@@ -75,11 +95,95 @@ export class WhatsAppChannel implements Channel {
   private botLidUser?: string;
   /** Resolve the initial connect() once the first successful open happens. */
   private pendingFirstOpen?: () => void;
+  /** Group JID → last-known subject, populated by syncGroupMetadata. Lets
+   * auto-registration name a new group without an extra socket round-trip. */
+  private groupNameCache = new Map<string, string>();
+  private autoAllowlist: WhatsAppAutoAllowlist;
 
   private opts: WhatsAppChannelOpts;
 
   constructor(opts: WhatsAppChannelOpts) {
     this.opts = opts;
+    this.autoAllowlist = parseAutoAllowlist(opts.autoAllowlistGroups);
+  }
+
+  /**
+   * Auto-register a WhatsApp chat when WHATSAPP_AUTO_REGISTER_GROUPS is on.
+   * Returns the registered group (existing or newly created), or undefined when
+   * the feature is off or registration was rejected. Idempotent.
+   *
+   * Unlike Telegram (which only auto-registers groups, via a join event),
+   * WhatsApp's only hook is the inbound message, so DMs auto-register too —
+   * useful for letting a teammate start a 1:1 without a manual step.
+   */
+  private maybeAutoRegisterGroup(
+    chatJid: string,
+    isGroup: boolean,
+    senderName: string | undefined,
+  ): RegisteredGroup | undefined {
+    const existing = this.opts.registeredGroups()[chatJid];
+    if (existing) return existing;
+    if (!this.opts.autoRegisterGroups || !this.opts.registerGroup) {
+      return undefined;
+    }
+
+    const existingFolders = new Set(
+      Object.values(this.opts.registeredGroups()).map((g) => g.folder),
+    );
+    // Groups: prefer the synced subject; DMs: the sender's push name.
+    const name = isGroup
+      ? this.groupNameCache.get(chatJid)
+      : senderName || undefined;
+    const folder = deriveWhatsAppGroupFolder(chatJid, name, existingFolders);
+    this.opts.registerGroup(chatJid, {
+      name: name || chatJid,
+      folder,
+      trigger: `@${ASSISTANT_NAME}`,
+      added_at: new Date().toISOString(),
+    });
+    // Re-read instead of trusting our input: registerGroup validates the
+    // folder and may reject the registration.
+    const registered = this.opts.registeredGroups()[chatJid];
+    if (registered) {
+      logger.info(
+        { chatJid, name: registered.name, folder: registered.folder },
+        'WhatsApp chat auto-registered',
+      );
+    }
+    return registered;
+  }
+
+  /**
+   * Auto-seed an unknown sender as an allowlisted KB person when this
+   * registered group matches WHATSAPP_AUTO_ALLOWLIST_GROUPS. Failures are
+   * logged and never block message delivery.
+   *
+   * `sender` is the full participant JID (e.g. `<number>@s.whatsapp.net`) —
+   * stored as-is so resolveUser(msg.sender, 'whatsapp') round-trips.
+   */
+  private maybeAutoAllowlistSender(
+    chatJid: string,
+    isGroup: boolean,
+    sender: string,
+    senderName: string | undefined,
+  ): void {
+    if (this.autoAllowlist.mode === 'off') return;
+    // Empty, the bot's own JID, or self-chat → nothing to seed.
+    if (!sender) return;
+    if (
+      this.botLidUser &&
+      sender.split('@')[0].split(':')[0] === this.botLidUser
+    )
+      return;
+    if (!autoAllowlistMatches(this.autoAllowlist, chatJid, isGroup)) return;
+    try {
+      ensureWhatsAppSenderAllowlisted({
+        whatsappId: sender,
+        name: senderName,
+      });
+    } catch (err) {
+      logger.warn({ chatJid, err }, 'WhatsApp auto-allowlist seeding failed');
+    }
   }
 
   async connect(): Promise<void> {
@@ -279,9 +383,25 @@ export class WhatsAppChannel implements Channel {
             isGroup,
           );
 
-          // Only deliver full message for registered groups
+          const sender = msg.key.participant || msg.key.remoteJid || '';
+          const senderName = msg.pushName || sender.split('@')[0];
+
+          // Only deliver full message for registered chats. With
+          // WHATSAPP_AUTO_REGISTER_GROUPS on, the first message from an
+          // unregistered chat self-registers it (the only hook WhatsApp gives
+          // us — there's no join event) and is then processed.
           const groups = this.opts.registeredGroups();
-          if (groups[chatJid]) {
+          let group: RegisteredGroup | undefined = groups[chatJid];
+          if (!group) {
+            group = this.maybeAutoRegisterGroup(chatJid, isGroup, senderName);
+            if (group) {
+              logger.info(
+                { chatJid, isGroup },
+                'WhatsApp chat auto-registered on inbound message',
+              );
+            }
+          }
+          if (group) {
             let content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
@@ -301,8 +421,9 @@ export class WhatsAppChannel implements Channel {
             // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
             if (!content) continue;
 
-            const sender = msg.key.participant || msg.key.remoteJid || '';
-            const senderName = msg.pushName || sender.split('@')[0];
+            // Auto-allowlist the sender when this chat matches
+            // WHATSAPP_AUTO_ALLOWLIST_GROUPS (no-op for known senders).
+            this.maybeAutoAllowlistSender(chatJid, isGroup, sender, senderName);
 
             const fromMe = msg.key.fromMe || false;
             // Detect bot messages: with own number, fromMe is reliable
@@ -434,6 +555,8 @@ export class WhatsAppChannel implements Channel {
       for (const [jid, metadata] of Object.entries(groups)) {
         if (metadata.subject) {
           updateChatName(jid, metadata.subject);
+          // Keep an in-memory name for auto-registration (no extra socket hit).
+          this.groupNameCache.set(jid, metadata.subject);
           count++;
         }
       }
@@ -549,4 +672,12 @@ export class WhatsAppChannel implements Channel {
   }
 }
 
-registerChannel('whatsapp', (opts: ChannelOpts) => new WhatsAppChannel(opts));
+registerChannel(
+  'whatsapp',
+  (opts: ChannelOpts) =>
+    new WhatsAppChannel({
+      ...opts,
+      autoRegisterGroups: WHATSAPP_AUTO_REGISTER_GROUPS,
+      autoAllowlistGroups: WHATSAPP_AUTO_ALLOWLIST_GROUPS,
+    }),
+);

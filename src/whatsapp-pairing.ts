@@ -138,8 +138,9 @@ export async function runPairingSession(
       if (qr && opts.onQr) opts.onQr(qr);
 
       if (connection === 'close') {
-        const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })
-          ?.output?.statusCode;
+        const reason = (
+          lastDisconnect?.error as { output?: { statusCode?: number } }
+        )?.output?.statusCode;
         if (reason === 515) {
           // 515 = stream error, common after pairing succeeds but before
           // registration completes. Reconnect to finish the handshake.

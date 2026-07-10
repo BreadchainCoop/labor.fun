@@ -33,17 +33,19 @@ const sessionMock = vi.hoisted(() => ({
   close: vi.fn(),
 }));
 vi.mock('../whatsapp-pairing.js', () => ({
-  runPairingSession: vi.fn(async (opts: { onPairingCode?: (c: string) => void }) => {
-    sessionMock.onPairingCode = opts.onPairingCode ?? null;
-    const done = new Promise((resolve) => {
-      sessionMock.resolveDone = resolve as (v: unknown) => void;
-    });
-    return {
-      done,
-      requestPairingCode: sessionMock.requestPairingCode,
-      close: sessionMock.close,
-    };
-  }),
+  runPairingSession: vi.fn(
+    async (opts: { onPairingCode?: (c: string) => void }) => {
+      sessionMock.onPairingCode = opts.onPairingCode ?? null;
+      const done = new Promise((resolve) => {
+        sessionMock.resolveDone = resolve as (v: unknown) => void;
+      });
+      return {
+        done,
+        requestPairingCode: sessionMock.requestPairingCode,
+        close: sessionMock.close,
+      };
+    },
+  ),
 }));
 
 import {
