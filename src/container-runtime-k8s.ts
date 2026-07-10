@@ -58,6 +58,17 @@ export interface BuildPodOverridesOptions {
   /** Run the container as this uid:gid, matching docker's --user flag. */
   runAsUser?: number;
   runAsGroup?: number;
+  /**
+   * Pod-level supplemental group applied to mounted volumes
+   * (`spec.securityContext.fsGroup`). Kubernetes recursively chowns the volume
+   * root to this gid on mount, so a non-root agent (the image's uid/gid 1000
+   * `node` user) can write to a PVC whose backing block-storage volume mounts
+   * root-owned — the same EACCES-on-write failure the orchestrator pod hit and
+   * fixed with a pod-level fsGroup. Only meaningful for writable PVC-backed
+   * volumes (hostPath volumes already resolve on the shared node); leave unset
+   * when the pod runs as true root (uid 0), which needs no fsGroup remap.
+   */
+  fsGroup?: number;
   labels?: Record<string, string>;
 }
 
@@ -292,6 +303,14 @@ export function buildK8sPodOverrides(
     containers: [container],
     volumes,
   };
+  // Pod-level fsGroup: chowns mounted (PVC) volumes to this gid so the non-root
+  // agent can write to a root-owned backing volume. Container-level runAsUser/
+  // runAsGroup control the process identity; fsGroup is intentionally
+  // pod-level because it applies to volumes, not the process. See the option's
+  // doc comment for the EACCES rationale.
+  if (opts.fsGroup != null) {
+    spec.securityContext = { fsGroup: opts.fsGroup };
+  }
   if (opts.volumeMode === 'hostPath') {
     if (!opts.nodeName) {
       throw new Error(
