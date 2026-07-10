@@ -434,6 +434,74 @@ describe('SlackChannel', () => {
       );
     });
 
+    it('auto-registers an unregistered DM from a known sender and processes it', async () => {
+      const ensureDmRegistered = vi.fn(() => true);
+      const opts = createTestOpts({ ensureDmRegistered });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          channel: 'D999',
+          channelType: 'im',
+          user: 'U_KNOWN',
+          text: 'hello vinny',
+        }),
+      );
+
+      expect(ensureDmRegistered).toHaveBeenCalledWith(
+        'slack:D999',
+        'slack',
+        'U_KNOWN',
+      );
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:D999',
+        expect.objectContaining({ sender: 'U_KNOWN' }),
+      );
+    });
+
+    it('drops an unregistered DM from an unknown sender', async () => {
+      const ensureDmRegistered = vi.fn(() => false);
+      const opts = createTestOpts({ ensureDmRegistered });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          channel: 'D999',
+          channelType: 'im',
+          user: 'U_STRANGER',
+          text: 'hi',
+        }),
+      );
+
+      expect(ensureDmRegistered).toHaveBeenCalledWith(
+        'slack:D999',
+        'slack',
+        'U_STRANGER',
+      );
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('never auto-registers an unregistered non-DM (group) channel', async () => {
+      const ensureDmRegistered = vi.fn(() => true);
+      const opts = createTestOpts({ ensureDmRegistered });
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          channel: 'C_UNREG',
+          channelType: 'channel',
+          user: 'U_KNOWN',
+          text: 'hi',
+        }),
+      );
+
+      expect(ensureDmRegistered).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
     it('caches user names to avoid repeated API calls', async () => {
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);

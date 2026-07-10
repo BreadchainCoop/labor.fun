@@ -50,6 +50,13 @@ export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Auto-register a 1:1 DM whose sender is a known KB person. Returns true when
+  // the channel is (now) registered and the message should be processed.
+  ensureDmRegistered?: (
+    jid: string,
+    platform: string,
+    senderId: string,
+  ) => boolean;
 }
 
 export class SlackChannel implements Channel {
@@ -316,9 +323,22 @@ export class SlackChannel implements Channel {
       // Always report metadata for group discovery
       this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
 
-      // Only deliver full messages for registered groups
+      // Only deliver full messages for registered groups. An unregistered
+      // 1:1 DM (channel_type 'im') from a known KB person is auto-registered so
+      // any teammate can DM the bot without a per-DM admin step; groups, bot
+      // messages, and unknown senders are still dropped.
       const groups = this.opts.registeredGroups();
-      if (!groups[jid]) return;
+      if (!groups[jid]) {
+        const fromBot = !!msg.bot_id || msg.user === this.botUserId;
+        if (
+          isGroup ||
+          fromBot ||
+          !msg.user ||
+          !this.opts.ensureDmRegistered?.(jid, 'slack', msg.user)
+        ) {
+          return;
+        }
+      }
 
       const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
 
