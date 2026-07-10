@@ -1387,6 +1387,32 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     registerGroup,
     deregisterGroup,
+    // Auto-register a 1:1 DM whose sender resolves to a known KB person, so any
+    // teammate can DM the bot without a per-DM admin step. Unknown senders stay
+    // unregistered (dropped). The DM group needs no trigger (like a solo chat).
+    ensureDmRegistered: (jid: string, platform: string, senderId: string) => {
+      if (registeredGroups[jid]) return true;
+      const kbPerson = resolveUser(senderId, platform);
+      if (!kbPerson) return false;
+      registerGroup(jid, {
+        name: `${kbPerson} DM`,
+        folder: `${platform}_dm_${kbPerson}`,
+        trigger: DEFAULT_TRIGGER,
+        added_at: new Date().toISOString(),
+        requiresTrigger: false,
+        isMain: false,
+      });
+      // registerGroup silently rejects an invalid folder (e.g. an over-long
+      // slug) without registering; only report success when the row landed.
+      const ok = !!registeredGroups[jid];
+      if (ok) {
+        logger.info(
+          { jid, platform, kbPerson },
+          'Auto-registered DM for KB person',
+        );
+      }
+      return ok;
+    },
   };
 
   // Load the active profile's plugins so org-specific channels/flows
