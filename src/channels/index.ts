@@ -24,4 +24,5 @@ import './telegram.js';
 // web (browser chat widget; opt-in via WEB_WIDGET_ENABLED)
 import './web.js';
 
-// whatsapp
+// whatsapp (baileys; opt-in — inert unless authenticated creds exist)
+import './whatsapp.js';
