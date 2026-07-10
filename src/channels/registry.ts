@@ -14,6 +14,16 @@ export interface ChannelOpts {
   // Symmetric removal — used when an allowlist condition stops holding.
   // Persistent state (folder, CLAUDE.md, accumulated context) is preserved.
   deregisterGroup: (jid: string) => void;
+  // Auto-register a 1:1 DM when its sender resolves to a known KB person, so
+  // any teammate can DM the bot without a per-DM admin step. Returns true when
+  // the channel is (now) registered and the message should be processed; false
+  // for unknown senders (still dropped). Channels call this for unregistered
+  // DM channels before dropping. No-op / false for group channels.
+  ensureDmRegistered?: (
+    jid: string,
+    platform: string,
+    senderId: string,
+  ) => boolean;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
