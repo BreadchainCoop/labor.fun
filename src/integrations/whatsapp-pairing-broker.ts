@@ -162,10 +162,7 @@ export async function postPaired(
       );
     }
   } catch (err) {
-    logger.warn(
-      { err },
-      'whatsapp-pairing-broker: paired POST failed',
-    );
+    logger.warn({ err }, 'whatsapp-pairing-broker: paired POST failed');
   }
 }
 
@@ -252,7 +249,10 @@ export async function runWhatsAppPairingBroker(): Promise<boolean> {
     return false;
   } catch (err) {
     // Defensive: runPairingSession shouldn't throw, but never let it crash boot.
-    logger.warn({ err }, 'whatsapp-pairing-broker: unexpected error — skipping');
+    logger.warn(
+      { err },
+      'whatsapp-pairing-broker: unexpected error — skipping',
+    );
     return false;
   } finally {
     if (refreshTimer) clearInterval(refreshTimer);

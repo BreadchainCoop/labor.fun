@@ -1354,7 +1354,9 @@ async function main(): Promise<void> {
           ? 'telegram'
           : chatJid.startsWith('slack:')
             ? 'slack'
-            : 'unknown';
+            : chatJid.endsWith('@s.whatsapp.net') || chatJid.endsWith('@g.us')
+              ? 'whatsapp'
+              : 'unknown';
         const kbPerson = resolveUser(msg.sender, channelName);
         if (kbPerson) msg.user_id = kbPerson;
       }
