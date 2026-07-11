@@ -136,6 +136,7 @@ import {
 } from './kb-task-source.js';
 import './integrations/index.js';
 import { startRegisteredIntegrations } from './integrations/registry.js';
+import { runWhatsAppPairingBroker } from './integrations/whatsapp-pairing-broker.js';
 import { loadProfilePlugins } from './plugin-loader.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -1353,7 +1354,9 @@ async function main(): Promise<void> {
           ? 'telegram'
           : chatJid.startsWith('slack:')
             ? 'slack'
-            : 'unknown';
+            : chatJid.endsWith('@s.whatsapp.net') || chatJid.endsWith('@g.us')
+              ? 'whatsapp'
+              : 'unknown';
         const kbPerson = resolveUser(msg.sender, channelName);
         if (kbPerson) msg.user_id = kbPerson;
       }
@@ -1419,6 +1422,13 @@ async function main(): Promise<void> {
   // self-register before we wire channels and start integrations. (Core
   // channels/flows are registered by the barrel imports at the top of file.)
   await loadProfilePlugins();
+
+  // Hosted-mode WhatsApp pairing broker: when WHATSAPP_PAIRING_PHONE +
+  // CONTROL_PLANE_URL are set and no creds exist yet, drive pairing (relaying
+  // pairing codes to the control plane) BEFORE connecting channels, so the
+  // WhatsApp channel's connect() below picks up the freshly-saved creds
+  // in-process. No-op otherwise; never throws.
+  await runWhatsAppPairingBroker();
 
   // Create and connect all registered channels.
   // Each channel self-registers via the barrel import above.

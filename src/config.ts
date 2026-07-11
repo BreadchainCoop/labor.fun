@@ -423,6 +423,30 @@ export const TELEGRAM_AUTO_REGISTER_GROUPS =
 export const TELEGRAM_AUTO_ALLOWLIST_GROUPS =
   envVal('TELEGRAM_AUTO_ALLOWLIST_GROUPS') || '';
 
+// --- WhatsApp auto-registration (src/channels/whatsapp.ts) ---
+// WHATSAPP_AUTO_REGISTER_GROUPS: when 'true', the first inbound message from a
+// still-unregistered WhatsApp chat registers it automatically (no manual
+// registration step). Unlike Telegram there is no join event, so the inbound
+// message IS the hook — this applies to both groups (`<id>@g.us`) and DMs
+// (`<number>@s.whatsapp.net`). Registering a DM on first message is useful: it
+// lets a teammate start a 1:1 without an admin step.
+// Default: off — unregistered WhatsApp chats are ignored, exactly as before.
+export const WHATSAPP_AUTO_REGISTER_GROUPS =
+  envVal('WHATSAPP_AUTO_REGISTER_GROUPS') === 'true';
+// WHATSAPP_AUTO_ALLOWLIST_GROUPS: 'all' or a comma-separated list of chat JIDs
+// (e.g. "120363000000000000@g.us,120363111111111111@g.us"). For messages
+// arriving in a matching REGISTERED WhatsApp group, any sender who doesn't
+// already resolve to a KB person is auto-seeded: a people/<slug>.md file
+// (created_by: whatsapp-auto-allowlist) plus a user_identities row, making them
+// allowlisted from their first message onward.
+//
+// SECURITY: allowlisting grants FULL access — anyone who can post in a
+// matching group becomes a fully trusted sender. Only enable this for groups
+// whose entire membership you trust; prefer the explicit JID list over 'all'.
+// Default: empty (feature off).
+export const WHATSAPP_AUTO_ALLOWLIST_GROUPS =
+  envVal('WHATSAPP_AUTO_ALLOWLIST_GROUPS') || '';
+
 // --- Microsoft Teams channel (src/channels/teams.ts) ---
 // Non-secret feature flags, exported for anything outside the channel module
 // that needs to know Teams is configured (e.g. setup/status tooling). The App
