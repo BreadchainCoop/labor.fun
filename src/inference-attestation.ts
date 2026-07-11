@@ -85,7 +85,8 @@ export function getInferenceProviderInfo(): InferenceProviderInfo {
   if (NEAR_AI_MODE) {
     return {
       provider: 'near-ai',
-      label: 'NEAR AI Cloud — open-weight model in an Intel TDX + NVIDIA confidential-GPU TEE',
+      label:
+        'NEAR AI Cloud — open-weight model in an Intel TDX + NVIDIA confidential-GPU TEE',
       tee: true,
       openSource: true,
       model: LOCAL_LLM_MODEL,
