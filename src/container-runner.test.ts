@@ -35,6 +35,10 @@ vi.mock('./config.js', async () => {
     KB_DASHBOARD_URL: 'https://kb.test.example',
     NANOCLAW_MODEL: undefined,
     NANOCLAW_SUBAGENT_MODEL: undefined,
+    NANOCLAW_BACKEND: 'claude',
+    LOCAL_LLM_BASE_URL: 'http://host.docker.internal:1234/v1',
+    LOCAL_LLM_MODEL: undefined,
+    LOCAL_LLM_API_KEY: undefined,
     PROFILE_DIR: '/tmp/nanoclaw-test-profile',
     SHARED_KB_GROUP: 'slack_main',
     STORE_DIR: '/tmp/nanoclaw-test-profile/store',
@@ -857,5 +861,118 @@ describe('container-runner Google Workspace credentials mount', () => {
       }),
       expect.stringContaining('blocked pattern'),
     );
+  });
+});
+
+describe('container-runner local-LLM backend wiring', () => {
+  const LLM_SECRET = 'sk-local-TESTSECRET_must_not_leak_0123456789abcdef';
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    vi.mocked(logger.debug).mockClear();
+    vi.mocked(logger.info).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.resetModules();
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnCall() {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1] as unknown as [
+      string,
+      string[],
+      { stdio: unknown; env?: NodeJS.ProcessEnv },
+    ];
+  }
+
+  it('local mode: omits Anthropic proxy env, passes LOCAL_LLM_* through, keeps API key out of argv/logs', async () => {
+    vi.resetModules();
+    const { mcpServerEnvVarNames } =
+      await vi.importActual<typeof import('./mcp-servers.js')>(
+        './mcp-servers.js',
+      );
+    vi.doMock('./config.js', () => ({
+      AGENT_CONTAINER_CPUS: '',
+      AGENT_CONTAINER_MEMORY: '',
+      AGENT_CONTAINER_PIDS_LIMIT: '',
+      CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+      CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+      CONTAINER_RUNTIME: 'docker',
+      CONTAINER_TIMEOUT: 1800000,
+      CREDENTIAL_PROXY_PORT: 3001,
+      DATA_DIR: '/tmp/nanoclaw-test-data',
+      GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+      IDLE_TIMEOUT: 1800000,
+      K8S_DATA_PVC_NAME: '',
+      K8S_NAMESPACE: '',
+      K8S_NODE_NAME: '',
+      K8S_POD_IP: '',
+      K8S_VOLUME_MODE: 'hostPath',
+      KB_DASHBOARD_URL: 'https://kb.test.example',
+      MCP_SERVERS: [],
+      NANOCLAW_MODEL: undefined,
+      NANOCLAW_SUBAGENT_MODEL: undefined,
+      NANOCLAW_BACKEND: 'local',
+      LOCAL_LLM_BASE_URL: 'http://host.docker.internal:1234/v1',
+      LOCAL_LLM_MODEL: 'qwen2.5-coder-32b-instruct',
+      LOCAL_LLM_API_KEY: LLM_SECRET,
+      PROFILE_DIR: '/tmp/nanoclaw-test-profile',
+      SHARED_KB_GROUP: 'slack_main',
+      STORE_DIR: '/tmp/nanoclaw-test-profile/store',
+      TIMEZONE: 'America/Los_Angeles',
+      mcpServerEnvVarNames,
+    }));
+    const { runContainerAgent: runLocal } =
+      await import('./container-runner.js');
+
+    await drive(runLocal(testGroup, testInput, () => {}, vi.fn()));
+
+    const [, args, opts] = lastSpawnCall();
+    const flat = args.join(' ');
+
+    // Backend selection is announced
+    expect(args).toContain('NANOCLAW_BACKEND=local');
+
+    // Local-LLM base URL + model are in argv (non-secret config)
+    expect(args).toContain(
+      'LOCAL_LLM_BASE_URL=http://host.docker.internal:1234/v1',
+    );
+    expect(args).toContain('LOCAL_LLM_MODEL=qwen2.5-coder-32b-instruct');
+
+    // API key is passed as a passthrough flag, not inline — and never raw
+    expect(args).toContain('LOCAL_LLM_API_KEY');
+    expect(args.some((a) => a.includes('LOCAL_LLM_API_KEY='))).toBe(false);
+    expect(flat).not.toContain(LLM_SECRET);
+
+    // The Anthropic proxy / placeholder auth must NOT be injected
+    expect(args.some((a) => a.startsWith('ANTHROPIC_BASE_URL='))).toBe(false);
+    expect(args).not.toContain('ANTHROPIC_API_KEY=placeholder');
+    expect(args).not.toContain('CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+
+    // Secret travels via the spawned runtime's env override only
+    expect(opts.env?.LOCAL_LLM_API_KEY).toBe(LLM_SECRET);
+
+    // And it must not have leaked into any log line
+    const logged = JSON.stringify([
+      ...vi.mocked(logger.debug).mock.calls,
+      ...vi.mocked(logger.info).mock.calls,
+    ]);
+    expect(logged).not.toContain(LLM_SECRET);
   });
 });
