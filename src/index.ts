@@ -10,6 +10,8 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   isPrivilegedGroup,
+  LOCAL_LLM_BASE_URL,
+  LOCAL_LLM_MODEL,
   MAX_MESSAGES_PER_PROMPT,
   MCP_SERVERS,
   FRESH_SESSION_BACKFILL_MESSAGES,
@@ -22,6 +24,7 @@ import {
   OPS_REPORT_WEB_BASE_URL,
   OPS_REPORT_PAGEDATA_DIR,
   ORG_NAME,
+  NANOCLAW_BACKEND,
   POLL_INTERVAL,
   REMINDER_ESCALATION_CONTACT,
   REMINDER_LADDER,
@@ -1087,49 +1090,60 @@ async function main(): Promise<void> {
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this).
+  // Skipped in local-LLM mode — no Anthropic traffic to proxy; the container
+  // talks directly to the OpenAI-compatible endpoint (LOCAL_LLM_BASE_URL).
+  //
   // Usage-metering hooks (OSS "API cost tracking & budgets" foundation):
   // onUsage persists every observed /v1/messages call to api_usage with an
   // estimated cost; checkQuota gates new requests against env-configured
   // monthly budgets (src/usage-budget.ts). Both are no-ops unless the
   // relevant env vars are set, so default behavior is unchanged.
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-    {
-      onUsage: (usage: UsageEvent) => {
-        const estCostUsd = estimateCostUsd({
-          model: usage.model || '',
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          cacheReadTokens: usage.cacheReadTokens,
-          cacheWriteTokens: usage.cacheWriteTokens,
+  const proxyServer =
+    NANOCLAW_BACKEND === 'local'
+      ? null
+      : await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST, {
+          onUsage: (usage: UsageEvent) => {
+            const estCostUsd = estimateCostUsd({
+              model: usage.model || '',
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheWriteTokens: usage.cacheWriteTokens,
+            });
+            try {
+              insertApiUsage({
+                runTag: usage.runTag,
+                model: usage.model,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheReadTokens: usage.cacheReadTokens,
+                cacheWriteTokens: usage.cacheWriteTokens,
+                estCostUsd,
+                statusCode: usage.statusCode,
+              });
+              onUsageRecorded({
+                totalTokens:
+                  usage.inputTokens +
+                  usage.outputTokens +
+                  usage.cacheReadTokens +
+                  usage.cacheWriteTokens,
+                costUsd: estCostUsd,
+              });
+            } catch (err) {
+              logger.error({ err, usage }, 'Failed to record API usage');
+            }
+          },
+          checkQuota: () => checkUsageQuota(),
         });
-        try {
-          insertApiUsage({
-            runTag: usage.runTag,
-            model: usage.model,
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            cacheReadTokens: usage.cacheReadTokens,
-            cacheWriteTokens: usage.cacheWriteTokens,
-            estCostUsd,
-            statusCode: usage.statusCode,
-          });
-          onUsageRecorded({
-            totalTokens:
-              usage.inputTokens +
-              usage.outputTokens +
-              usage.cacheReadTokens +
-              usage.cacheWriteTokens,
-            costUsd: estCostUsd,
-          });
-        } catch (err) {
-          logger.error({ err, usage }, 'Failed to record API usage');
-        }
-      },
-      checkQuota: () => checkUsageQuota(),
-    },
-  );
+
+  if (NANOCLAW_BACKEND === 'local') {
+    logger.info(
+      { backend: 'local', baseUrl: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL },
+      'Backend=local: credential proxy disabled, routing to OpenAI-compatible endpoint',
+    );
+  } else {
+    logger.info({ backend: 'claude' }, 'Backend=claude');
+  }
 
   // Optionally start the Smithers durable-workflow bridge (orchestration/).
   // Off by default; runs one workflow step through runContainerAgent so the
@@ -1260,7 +1274,8 @@ async function main(): Promise<void> {
     //    connections, and GroupQueue.shutdown() only marks the queue closed and
     //    detaches (does not kill) in-flight agent containers — it does not drain,
     //    so it takes no grace period.
-    proxyServer.close();
+    //    proxyServer is null in local-LLM mode — close() is null-safe.
+    proxyServer?.close();
     smithersBridge?.close();
     await queue.shutdown(0);
 
