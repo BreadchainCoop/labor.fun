@@ -13,3 +13,4 @@ Design documents and developer references for Breadbrich Engels (the organizatio
 | [docker-sandboxes.md](docker-sandboxes.md)                     | Docker container sandboxing                                                              |
 | [APPLE-CONTAINER-NETWORKING.md](APPLE-CONTAINER-NETWORKING.md) | Apple Container runtime                                                                  |
 | [KUBERNETES.md](KUBERNETES.md)                                 | Kubernetes container runtime (`CONTAINER_RUNTIME=kubernetes`), hosted multi-tenant model |
+| [TEE.md](TEE.md)                                               | TEE deployment mode (dstack/Phala Intel-TDX): full stack in one CVM, `!verify` attestation, Signal-in-enclave |
