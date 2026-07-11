@@ -45,6 +45,13 @@ const envConfig = readEnvFile([
   'TEAMS_APP_TENANT_ID',
   'TEAMS_MESSAGING_PORT',
   'TEAMS_HOST',
+  // Shared ingress HTTP port (src/channels/ingress-http-server.ts). One
+  // listener bound here serves the Slack HTTP receiver (/slack/events) AND the
+  // Telegram shared-bot ingress (/telegram/updates). In hosted Kubernetes the
+  // tenant NetworkPolicy opens exactly this port. slack.ts reads SLACK_HTTP_PORT
+  // directly for its own construction; this list entry is so the shared
+  // INGRESS_HTTP_PORT export (below) can also see it via .env.
+  'SLACK_HTTP_PORT',
   'DISCORD_DM_ALLOWED_ROLE_IDS',
   'DISCORD_DM_ALLOWED_GUILD_IDS',
   'DISCORD_DM_ROLE_REFRESH_INTERVAL',
@@ -422,6 +429,16 @@ export const TELEGRAM_AUTO_REGISTER_GROUPS =
 // Default: empty (feature off).
 export const TELEGRAM_AUTO_ALLOWLIST_GROUPS =
   envVal('TELEGRAM_AUTO_ALLOWLIST_GROUPS') || '';
+
+// --- Shared ingress HTTP port ---
+// One HTTP listener (src/channels/ingress-http-server.ts) serves BOTH the Slack
+// HTTP receiver (/slack/events) and the Telegram shared-bot ingress
+// (/telegram/updates), so hosted tenants only open a single port. slack.ts
+// reads SLACK_HTTP_PORT inline for its receiver's own construction (unchanged);
+// Telegram ingress reads this shared export so both land on the SAME port.
+// Default 3012 (the port the slack receiver already uses).
+export const INGRESS_HTTP_PORT =
+  Number(process.env.SLACK_HTTP_PORT || envVal('SLACK_HTTP_PORT')) || 3012;
 
 // --- WhatsApp auto-registration (src/channels/whatsapp.ts) ---
 // WHATSAPP_AUTO_REGISTER_GROUPS: when 'true', the first inbound message from a
