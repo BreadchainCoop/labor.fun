@@ -8,6 +8,8 @@ vi.mock('../config.js', () => ({
   STORE_DIR: '/tmp/nanoclaw-test-store',
   ASSISTANT_NAME: 'Andy',
   ASSISTANT_HAS_OWN_NUMBER: false,
+  WHATSAPP_AUTO_REGISTER_GROUPS: false,
+  WHATSAPP_AUTO_ALLOWLIST_GROUPS: '',
 }));
 
 // Mock logger
@@ -42,6 +44,10 @@ vi.mock('fs', async () => {
 });
 
 // Mock child_process (used for osascript notification)
+vi.mock('../integrations/whatsapp-pairing-broker.js', () => ({
+  whatsappCredsExist: vi.fn(() => false),
+}));
+
 vi.mock('child_process', () => ({
   exec: vi.fn(),
 }));
@@ -102,6 +108,8 @@ vi.mock('@whiskeysockets/baileys', () => {
 });
 
 import { WhatsAppChannel, WhatsAppChannelOpts } from './whatsapp.js';
+import { getChannelFactory, ChannelOpts } from './registry.js';
+import { whatsappCredsExist } from '../integrations/whatsapp-pairing-broker.js';
 import { getLastGroupSync, updateChatName, setLastGroupSync } from '../db.js';
 
 // --- Test helpers ---
@@ -269,11 +277,34 @@ describe('WhatsAppChannel', () => {
     });
   });
 
+  // --- Factory credentials gate ---
+
+  describe('factory', () => {
+    // WhatsApp's "credential" is the linked-device session on disk. Without it
+    // the factory must SKIP (return null) like any other unconfigured channel —
+    // the merged upstream channel used to start anyway and kill the process.
+    it('skips (returns null) when no linked session exists', () => {
+      vi.mocked(whatsappCredsExist).mockReturnValue(false);
+      const factory = getChannelFactory('whatsapp');
+      expect(factory).toBeDefined();
+      expect(factory!(createTestOpts() as unknown as ChannelOpts)).toBeNull();
+    });
+
+    it('constructs the channel when a linked session exists', () => {
+      vi.mocked(whatsappCredsExist).mockReturnValue(true);
+      const factory = getChannelFactory('whatsapp');
+      const ch = factory!(createTestOpts() as unknown as ChannelOpts);
+      expect(ch).toBeInstanceOf(WhatsAppChannel);
+      vi.mocked(whatsappCredsExist).mockReturnValue(false);
+    });
+  });
+
   // --- QR code and auth ---
 
   describe('authentication', () => {
-    it('exits process when QR code is emitted (no auth state)', async () => {
-      vi.useFakeTimers();
+    it('stops the channel (never the process) when a QR is emitted', async () => {
+      // Upstream exited the whole process here; in this multi-channel
+      // orchestrator an invalid WhatsApp session must only stop THIS channel.
       const mockExit = vi
         .spyOn(process, 'exit')
         .mockImplementation(() => undefined as never);
@@ -281,21 +312,28 @@ describe('WhatsAppChannel', () => {
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
-      // Start connect but don't await (it won't resolve - process exits)
+      // Start connect but don't await (it never opens — the session is invalid)
       channel.connect().catch(() => {});
 
       // Flush microtasks so connectInternal registers handlers
-      await vi.advanceTimersByTimeAsync(0);
+      await new Promise((r) => setTimeout(r, 0));
 
-      // Emit QR code event
+      // Emit QR code event (socket wants a fresh scan = no valid session)
       fakeSocket._ev.emit('connection.update', { qr: 'some-qr-data' });
 
-      // Advance timer past the 1000ms setTimeout before exit
-      await vi.advanceTimersByTimeAsync(1500);
+      expect(mockExit).not.toHaveBeenCalled();
+      // The channel closes its own socket and stays stopped.
+      expect(fakeSocket.end).toHaveBeenCalled();
+      expect(channel.isConnected()).toBe(false);
 
-      expect(mockExit).toHaveBeenCalledWith(1);
+      // The stop suppresses the reconnect loop: a subsequent close event must
+      // not spawn a new socket (end -> close -> reconnect -> qr would churn).
+      const { makeWASocket } = await import('@whiskeysockets/baileys');
+      const callsBefore = vi.mocked(makeWASocket).mock.calls.length;
+      triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(vi.mocked(makeWASocket).mock.calls.length).toBe(callsBefore);
       mockExit.mockRestore();
-      vi.useRealTimers();
     });
   });
 
@@ -317,7 +355,7 @@ describe('WhatsAppChannel', () => {
       // The channel should attempt to reconnect (calls connectInternal again)
     });
 
-    it('exits on loggedOut disconnect', async () => {
+    it('stops the channel (never the process) on loggedOut disconnect', async () => {
       const mockExit = vi
         .spyOn(process, 'exit')
         .mockImplementation(() => undefined as never);
@@ -327,11 +365,16 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      // Disconnect with loggedOut reason (401)
+      // Disconnect with loggedOut reason (401): session revoked on the phone.
+      const { makeWASocket } = await import('@whiskeysockets/baileys');
+      const callsBefore = vi.mocked(makeWASocket).mock.calls.length;
       triggerDisconnect(401);
+      await new Promise((r) => setTimeout(r, 0));
 
       expect(channel.isConnected()).toBe(false);
-      expect(mockExit).toHaveBeenCalledWith(0);
+      // No process exit (upstream behavior) and no reconnect attempt.
+      expect(mockExit).not.toHaveBeenCalled();
+      expect(vi.mocked(makeWASocket).mock.calls.length).toBe(callsBefore);
       mockExit.mockRestore();
     });
 
