@@ -38,6 +38,15 @@ const envConfig = readEnvFile([
   'LOCAL_LLM_BASE_URL',
   'LOCAL_LLM_MODEL',
   'LOCAL_LLM_API_KEY',
+  // NEAR AI convenience layer over the OpenAI-compatible ('local') backend.
+  // Setting NEAR_AI_API_KEY alone enables fully open-source, TEE-attested
+  // inference against NEAR AI Cloud (no explicit NANOCLAW_BACKEND / LOCAL_LLM_*
+  // needed). NEAR_AI_API_KEY is a secret but — like LOCAL_LLM_API_KEY — the
+  // container talks directly to the endpoint, so it is read here and injected
+  // via the runtime env only (never argv). See docs/OPEN-SOURCE-AI.md.
+  'NEAR_AI_API_KEY',
+  'NEAR_AI_MODEL',
+  'NEAR_AI_BASE_URL',
   // Feature-flag / integration env vars defined further down in this file.
   // systemd doesn't load the install's .env globally, so anything that
   // should be operator-configurable must be listed here for readEnvFile to
@@ -725,22 +734,61 @@ export const GOOGLE_DRIVE_FOLDER_IDS = splitIds(
   envVal('GOOGLE_DRIVE_FOLDER_IDS'),
 );
 
-// Backend selection: 'claude' (default) routes through the Claude Agent SDK;
-// 'local' routes through an OpenAI-compatible chat-completions endpoint
-// (LM Studio, llama.cpp server, vLLM, Ollama in OpenAI mode, etc.).
-// One backend per process — switch by restarting with NANOCLAW_BACKEND set.
+// --- Inference backend selection ---
+//
+// 'claude' (default) routes through the Claude Agent SDK and the credential
+// proxy (hosted Anthropic). 'local' routes through an OpenAI-compatible
+// chat-completions endpoint (NEAR AI Cloud, LM Studio, llama.cpp, vLLM, Ollama
+// in OpenAI mode, etc.). One backend per process — switch by restarting.
+//
+// NEAR AI convenience: setting NEAR_AI_API_KEY (and NOT explicitly overriding
+// NANOCLAW_BACKEND) selects the OpenAI-compatible backend automatically, wired
+// to NEAR AI Cloud's TEE-attested inference — a fully open-source, no-Anthropic
+// path. Explicit NANOCLAW_BACKEND / LOCAL_LLM_* always win over the NEAR AI
+// defaults. See docs/OPEN-SOURCE-AI.md.
+
+// NEAR AI Cloud: OpenAI-compatible, TEE-attested inference. Auth is a Bearer
+// key (Authorization: Bearer <key>); the base URL and a sensible default open
+// model are documented at https://docs.near.ai/cloud/.
+export const NEAR_AI_API_KEY =
+  process.env.NEAR_AI_API_KEY || envConfig.NEAR_AI_API_KEY || undefined;
+export const NEAR_AI_BASE_URL =
+  process.env.NEAR_AI_BASE_URL ||
+  envConfig.NEAR_AI_BASE_URL ||
+  'https://cloud-api.near.ai/v1';
+// Default open model when NEAR AI mode is active and no model is specified.
+// Any model from NEAR AI's catalog (GET <base>/models) works — override via
+// NEAR_AI_MODEL or LOCAL_LLM_MODEL.
+export const NEAR_AI_DEFAULT_MODEL = 'deepseek-ai/DeepSeek-V3.1';
+export const NEAR_AI_MODEL =
+  process.env.NEAR_AI_MODEL || envConfig.NEAR_AI_MODEL || undefined;
+
+// True when the operator opted into NEAR AI (key set) without forcing a
+// different backend. This is the sole trigger that flips the default backend
+// from 'claude' to 'local' and points LOCAL_LLM_* at NEAR AI Cloud.
+const explicitBackend = process.env.NANOCLAW_BACKEND || envConfig.NANOCLAW_BACKEND;
+export const NEAR_AI_MODE = !!NEAR_AI_API_KEY && !explicitBackend;
+
 const rawBackend = (
-  process.env.NANOCLAW_BACKEND ||
-  envConfig.NANOCLAW_BACKEND ||
-  'claude'
+  explicitBackend ||
+  (NEAR_AI_MODE ? 'local' : 'claude')
 ).toLowerCase();
 export const NANOCLAW_BACKEND: 'claude' | 'local' =
   rawBackend === 'local' ? 'local' : 'claude';
+
+// LOCAL_LLM_* are the wire config the 'local' backend actually consumes. When
+// NEAR AI mode is active they default to NEAR AI Cloud's URL / key / model;
+// explicit LOCAL_LLM_* env still take precedence (lets an operator point NEAR
+// AI creds at a proxy, or pin a specific model).
 export const LOCAL_LLM_BASE_URL =
   process.env.LOCAL_LLM_BASE_URL ||
   envConfig.LOCAL_LLM_BASE_URL ||
-  'http://host.docker.internal:1234/v1';
+  (NEAR_AI_MODE ? NEAR_AI_BASE_URL : 'http://host.docker.internal:1234/v1');
 export const LOCAL_LLM_MODEL =
-  process.env.LOCAL_LLM_MODEL || envConfig.LOCAL_LLM_MODEL || undefined;
+  process.env.LOCAL_LLM_MODEL ||
+  envConfig.LOCAL_LLM_MODEL ||
+  (NEAR_AI_MODE ? NEAR_AI_MODEL || NEAR_AI_DEFAULT_MODEL : undefined);
 export const LOCAL_LLM_API_KEY =
-  process.env.LOCAL_LLM_API_KEY || envConfig.LOCAL_LLM_API_KEY || undefined;
+  process.env.LOCAL_LLM_API_KEY ||
+  envConfig.LOCAL_LLM_API_KEY ||
+  (NEAR_AI_MODE ? NEAR_AI_API_KEY : undefined);
