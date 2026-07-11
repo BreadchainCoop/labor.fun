@@ -4,6 +4,13 @@ import { ASSISTANT_NAME } from '../config.js';
 import { logReaction, storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import {
+  attestNonce,
+  DEFAULT_DSTACK_SOCKET,
+  DEFAULT_VERIFY_URL,
+  formatAttestationReply,
+  parseVerifyCommand,
+} from '../tee-attest.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -107,6 +114,18 @@ export interface SignalChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /**
+   * TEE attestation config for the `!verify <nonce>` command. When `enabled`
+   * is false (default — non-TEE deployments), `!verify` is not intercepted and
+   * flows through to the agent like any other message. When enabled, an inbound
+   * `!verify <nonce>` in a registered chat is answered locally with a dstack
+   * TDX attestation (see src/tee-attest.ts) and NOT forwarded to the agent.
+   */
+  tee?: {
+    enabled: boolean;
+    socketPath?: string;
+    verifyUrl?: string;
+  };
 }
 
 interface PendingRequest {
@@ -121,6 +140,7 @@ export class SignalChannel implements Channel {
   private host: string;
   private port: number;
   private opts: SignalChannelOpts;
+  private tee: SignalChannelOpts['tee'];
 
   private socket: net.Socket | null = null;
   private connected = false;
@@ -143,6 +163,7 @@ export class SignalChannel implements Channel {
     this.host = host || '127.0.0.1';
     this.port = parseInt(port || '7583', 10);
     this.opts = opts;
+    this.tee = opts.tee;
   }
 
   async connect(): Promise<void> {
@@ -289,6 +310,13 @@ export class SignalChannel implements Channel {
       return;
     }
 
+    // TEE attestation: intercept `!verify <nonce>` locally (never forwarded to
+    // the agent). Gated on tee.enabled so non-TEE deployments are unaffected.
+    if (this.opts.tee?.enabled && parseVerifyCommand(content) !== null) {
+      void this.handleVerify(chatJid, content);
+      return;
+    }
+
     const quote = data.quote;
     this.opts.onMessage(chatJid, {
       id: msgId,
@@ -304,6 +332,52 @@ export class SignalChannel implements Channel {
     });
 
     logger.info({ chatJid, sender: senderName }, 'Signal message stored');
+  }
+
+  /**
+   * Answer a `!verify <nonce>` command with a dstack TDX attestation. Runs
+   * only when TEE mode is enabled (gated by the caller). Never throws — a
+   * missing socket, bad nonce, or failed dstack call all produce a helpful
+   * reply instead of crashing the receive loop.
+   */
+  private async handleVerify(jid: string, text: string): Promise<void> {
+    const parsed = parseVerifyCommand(text);
+    if (!parsed) return; // not a verify command (defensive; caller pre-checks)
+
+    if (parsed.kind === 'missing') {
+      await this.sendMessage(
+        jid,
+        'Usage: `!verify <nonce>` — the nonce is 8–64 url-safe characters ' +
+          '([A-Za-z0-9_-]). It gets embedded in a fresh TDX quote so you can ' +
+          'confirm the attestation is bound to your challenge.',
+      );
+      return;
+    }
+    if (parsed.kind === 'invalid') {
+      await this.sendMessage(
+        jid,
+        'That nonce is not valid. Use 8–64 url-safe characters ' +
+          '([A-Za-z0-9_-]), e.g. `!verify my-random-1234`.',
+      );
+      return;
+    }
+
+    logger.info({ jid, nonce: parsed.nonce }, 'Signal !verify requested');
+    try {
+      const result = await attestNonce(parsed.nonce, {
+        socketPath: this.tee?.socketPath,
+        verifyUrl: this.tee?.verifyUrl,
+      });
+      await this.sendMessage(jid, formatAttestationReply(result));
+    } catch (err) {
+      // attestNonce is designed not to throw, but never let the receive loop
+      // die on an unexpected failure.
+      logger.error({ jid, err }, 'Signal !verify failed unexpectedly');
+      await this.sendMessage(
+        jid,
+        'Attestation failed unexpectedly. Please try again.',
+      );
+    }
   }
 
   /** Build the recipient/group selector for a JID. */
@@ -446,7 +520,13 @@ export class SignalChannel implements Channel {
 }
 
 registerChannel('signal', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['SIGNAL_ACCOUNT', 'SIGNAL_RPC_TCP']);
+  const envVars = readEnvFile([
+    'SIGNAL_ACCOUNT',
+    'SIGNAL_RPC_TCP',
+    'TEE_MODE',
+    'DSTACK_SOCKET_PATH',
+    'TEE_VERIFY_URL',
+  ]);
   const account = process.env.SIGNAL_ACCOUNT || envVars.SIGNAL_ACCOUNT || '';
   if (!account) {
     logger.warn('Signal: SIGNAL_ACCOUNT not set');
@@ -454,5 +534,26 @@ registerChannel('signal', (opts: ChannelOpts) => {
   }
   const rpcAddr =
     process.env.SIGNAL_RPC_TCP || envVars.SIGNAL_RPC_TCP || '127.0.0.1:7583';
-  return new SignalChannel(account, rpcAddr, opts);
+
+  // TEE mode: enable the `!verify <nonce>` attestation command. The command is
+  // only intercepted when TEE_MODE=true; even then, tee-attest.ts checks the
+  // dstack socket exists before attesting, so a misset flag on a non-TEE host
+  // replies "not running in a TEE" rather than crashing.
+  const teeEnabled =
+    (process.env.TEE_MODE || envVars.TEE_MODE || '').toLowerCase() === 'true';
+  const tee = teeEnabled
+    ? {
+        enabled: true,
+        socketPath:
+          process.env.DSTACK_SOCKET_PATH ||
+          envVars.DSTACK_SOCKET_PATH ||
+          DEFAULT_DSTACK_SOCKET,
+        verifyUrl:
+          process.env.TEE_VERIFY_URL ||
+          envVars.TEE_VERIFY_URL ||
+          DEFAULT_VERIFY_URL,
+      }
+    : undefined;
+
+  return new SignalChannel(account, rpcAddr, { ...opts, tee });
 });

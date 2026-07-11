@@ -21,6 +21,23 @@ vi.mock('../db.js', () => ({
   logReaction: (...a: any[]) => logReaction(...a),
 }));
 
+// Stub the TEE attestation module so `!verify` tests never touch a real socket.
+// The channel still owns command routing + reply-sending, which is what we test.
+const attestNonce = vi.fn(async (..._a: any[]) => ({
+  inTee: true,
+  nonce: 'stub',
+  verifyUrl: 'https://proof.phala.network',
+}));
+vi.mock('../tee-attest.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('../tee-attest.js')>('../tee-attest.js');
+  return {
+    ...actual,
+    attestNonce: (...a: any[]) => attestNonce(...a),
+    formatAttestationReply: () => 'ATTESTATION_REPLY',
+  };
+});
+
 // --- net mock: a fake socket that captures writes and exposes data emission ---
 
 type Handler = (...args: any[]) => any;
@@ -96,7 +113,25 @@ beforeEach(() => {
   socketRef.current = null;
   storeOutboundMessage.mockClear();
   logReaction.mockClear();
+  attestNonce.mockClear();
 });
+
+/** Feed a DM into a channel and drain the fake socket's request writes. */
+function feedDm(content: string) {
+  socketRef.current.feed({
+    jsonrpc: '2.0',
+    method: 'receive',
+    params: {
+      envelope: {
+        source: '+15550001111',
+        sourceNumber: '+15550001111',
+        sourceName: 'Jane',
+        timestamp: 1700000009999,
+        dataMessage: { message: content },
+      },
+    },
+  });
+}
 
 describe('parseSignalStyles', () => {
   it('strips markers and records ranges', () => {
@@ -322,5 +357,93 @@ describe('SignalChannel', () => {
     await ch.addReaction('signal:+15550001111', '999', 'eyes');
     // No write should have gone out (only the request() path writes).
     expect(socketRef.current.writes.length).toBe(0);
+  });
+
+  describe('!verify (TEE attestation)', () => {
+    it('intercepts a valid !verify in TEE mode: attests and replies, never routes to the agent', async () => {
+      const onMessage = vi.fn();
+      const ch = new SignalChannel(
+        '+15559990000',
+        '127.0.0.1:7583',
+        createOpts({
+          onMessage,
+          tee: { enabled: true, socketPath: '/tmp/x.sock' },
+        }),
+      );
+      await ch.connect();
+
+      feedDm('!verify my-nonce-1234');
+      // Let the async handleVerify → sendMessage → request() run.
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Agent never sees a !verify command.
+      expect(onMessage).not.toHaveBeenCalled();
+      // Attestation was requested with the parsed nonce.
+      expect(attestNonce).toHaveBeenCalledWith(
+        'my-nonce-1234',
+        expect.objectContaining({ socketPath: '/tmp/x.sock' }),
+      );
+      // A `send` reply carrying the formatted attestation went out.
+      const req = socketRef.current.lastRequest();
+      expect(req.method).toBe('send');
+      expect(req.params.message).toBe('ATTESTATION_REPLY');
+    });
+
+    it('replies with usage help for a bare !verify (no nonce), no attestation call', async () => {
+      const onMessage = vi.fn();
+      const ch = new SignalChannel(
+        '+15559990000',
+        '127.0.0.1:7583',
+        createOpts({ onMessage, tee: { enabled: true } }),
+      );
+      await ch.connect();
+
+      feedDm('!verify');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(onMessage).not.toHaveBeenCalled();
+      expect(attestNonce).not.toHaveBeenCalled();
+      const req = socketRef.current.lastRequest();
+      expect(req.method).toBe('send');
+      // sendMessage strips backtick markers into Signal MONOSPACE ranges, so
+      // the delivered plain text drops the backticks.
+      expect(req.params.message).toContain('Usage: !verify <nonce>');
+    });
+
+    it('rejects a malformed nonce with guidance, no attestation call', async () => {
+      const ch = new SignalChannel(
+        '+15559990000',
+        '127.0.0.1:7583',
+        createOpts({ tee: { enabled: true } }),
+      );
+      await ch.connect();
+
+      feedDm('!verify short'); // 5 chars, below the 8-char minimum
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(attestNonce).not.toHaveBeenCalled();
+      const req = socketRef.current.lastRequest();
+      expect(req.params.message).toContain('not valid');
+    });
+
+    it('does NOT intercept !verify when TEE mode is disabled — flows to the agent', async () => {
+      const onMessage = vi.fn();
+      const ch = new SignalChannel(
+        '+15559990000',
+        '127.0.0.1:7583',
+        createOpts({ onMessage }), // no tee → disabled
+      );
+      await ch.connect();
+
+      feedDm('!verify my-nonce-1234');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(attestNonce).not.toHaveBeenCalled();
+      // The message is routed to the agent like any other message.
+      expect(onMessage).toHaveBeenCalledWith(
+        'signal:+15550001111',
+        expect.objectContaining({ content: '!verify my-nonce-1234' }),
+      );
+    });
   });
 });
