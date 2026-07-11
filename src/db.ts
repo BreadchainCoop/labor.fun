@@ -956,6 +956,23 @@ export function getMessagesSince(
 }
 
 /**
+ * Look up the stored text content of a single message by its id + chat.
+ * Used by the WhatsApp channel's baileys `getMessage` retry hook: when
+ * WhatsApp asks us to re-encrypt a message we previously sent (common in
+ * self-chats), returning the original content avoids the perpetual
+ * "waiting for this message" state on the recipient side.
+ */
+export function getMessageContentById(
+  id: string,
+  chatJid: string,
+): string | undefined {
+  const row = db
+    .prepare(`SELECT content FROM messages WHERE id = ? AND chat_jid = ?`)
+    .get(id, chatJid) as { content: string } | undefined;
+  return row?.content;
+}
+
+/**
  * Fetch the most recent `limit` messages for a chat, regardless of any cursor,
  * **including the assistant's own messages**. Used to backfill conversational
  * context when starting a FRESH agent session (which has no prior transcript)
