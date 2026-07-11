@@ -27,6 +27,10 @@ import {
   KB_DASHBOARD_URL,
   MCP_SERVERS,
   mcpServerEnvVarNames,
+  LOCAL_LLM_API_KEY,
+  LOCAL_LLM_BASE_URL,
+  LOCAL_LLM_MODEL,
+  NANOCLAW_BACKEND,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
   PROFILE_DIR,
@@ -630,36 +634,54 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
-
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key. The
-  //               placeholder encodes the container name (runTag) so the
-  //               proxy can attribute usage to this run — and, when
-  //               CREDENTIAL_PROXY_AUTH_TOKEN is set, a shared secret the
-  //               proxy checks before forwarding (multi-tenant hardening).
-  //               Format: placeholder-<runTag>, or with an auth token:
-  //               placeholder.<authToken>.<runTag>. See parsePlaceholderApiKey
-  //               in credential-proxy.ts for the matching decode logic and why
-  //               '.' is a safe separator (never appears in a container name).
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  //               The exchange request carries the placeholder via
-  //               `authorization`, not `x-api-key`, so there's no placeholder
-  //               value to attach run attribution/auth-token to — OAuth mode
-  //               intentionally skips both (see credential-proxy.ts).
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
+  // Route API traffic through the credential proxy (containers never see real secrets).
+  // Skipped in local-LLM mode — no Anthropic traffic, no proxy required.
+  if (NANOCLAW_BACKEND !== 'local') {
     args.push(
       '-e',
-      `ANTHROPIC_API_KEY=${composeAuthPlaceholder(containerName)}`,
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
     );
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key. The
+    //               placeholder encodes the container name (runTag) so the
+    //               proxy can attribute usage to this run — and, when
+    //               CREDENTIAL_PROXY_AUTH_TOKEN is set, a shared secret the
+    //               proxy checks before forwarding (multi-tenant hardening).
+    //               Format: placeholder-<runTag>, or with an auth token:
+    //               placeholder.<authToken>.<runTag>. See parsePlaceholderApiKey
+    //               in credential-proxy.ts for the matching decode logic and why
+    //               '.' is a safe separator (never appears in a container name).
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    //               The exchange request carries the placeholder via
+    //               `authorization`, not `x-api-key`, so there's no placeholder
+    //               value to attach run attribution/auth-token to — OAuth mode
+    //               intentionally skips both (see credential-proxy.ts).
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push(
+        '-e',
+        `ANTHROPIC_API_KEY=${composeAuthPlaceholder(containerName)}`,
+      );
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
+  }
+
+  // Backend selection (consumed by container/agent-runner)
+  args.push('-e', `NANOCLAW_BACKEND=${NANOCLAW_BACKEND}`);
+  if (NANOCLAW_BACKEND === 'local') {
+    args.push('-e', `LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL}`);
+    if (LOCAL_LLM_MODEL) {
+      args.push('-e', `LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL}`);
+    }
+    // API key: passthrough flag only (no value) so the secret is never in
+    // argv or the containerArgs debug log. The actual value is injected
+    // through the runtime's process env in runContainerAgent.spawn().
+    if (LOCAL_LLM_API_KEY) {
+      args.push('-e', 'LOCAL_LLM_API_KEY');
+    }
   }
 
   // Model routing: pass orchestrator and subagent models to container.
@@ -1007,6 +1029,15 @@ export async function runContainerAgent(
       }
       if (linearApiKey) {
         extraEnv.LINEAR_API_KEY = linearApiKey;
+      }
+      // Local-LLM backend: inject the OpenAI-compatible endpoint's API key
+      // (secret) into the runtime's process env, matching the bare
+      // `-e LOCAL_LLM_API_KEY` passthrough flag in buildContainerArgs. Only
+      // in local mode; kept out of argv and the containerArgs debug log.
+      const llmApiKey =
+        NANOCLAW_BACKEND === 'local' ? LOCAL_LLM_API_KEY : undefined;
+      if (llmApiKey) {
+        extraEnv.LOCAL_LLM_API_KEY = llmApiKey;
       }
       // Generic remote-MCP bridge (docs/MCP-SERVERS.md): inject each configured
       // server's referenced secret VALUE into the runtime's process env,
