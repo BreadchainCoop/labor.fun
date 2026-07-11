@@ -357,6 +357,66 @@ describe('buildK8sPodOverrides', () => {
     expect(overrides.spec.containers[0].securityContext).toBeUndefined();
   });
 
+  it('sets pod-level securityContext.fsGroup when fsGroup is provided', () => {
+    const overrides: any = buildK8sPodOverrides({
+      podName: 'p',
+      image: 'img',
+      mounts: [
+        {
+          hostPath: '/profiles/acme/groups/main',
+          containerPath: '/workspace/group',
+          readonly: false,
+        },
+      ],
+      env: [],
+      volumeMode: 'pvc',
+      pvcName: 'nanoclaw-data',
+      pvcRoots: [{ hostRoot: '/profiles/acme', subPathPrefix: 'profile' }],
+      fsGroup: 1000,
+    });
+    // fsGroup is pod-level (applies to volumes), NOT container-level.
+    expect(overrides.spec.securityContext).toEqual({ fsGroup: 1000 });
+    expect(overrides.spec.containers[0].securityContext).toBeUndefined();
+  });
+
+  it('omits pod-level securityContext.fsGroup when fsGroup is not provided', () => {
+    const overrides: any = buildK8sPodOverrides({
+      podName: 'p',
+      image: 'img',
+      mounts: [],
+      env: [],
+      volumeMode: 'hostPath',
+      nodeName: 'node-1',
+    });
+    expect(overrides.spec.securityContext).toBeUndefined();
+  });
+
+  it('fsGroup coexists with container-level runAsUser/runAsGroup (pod vs container scoped)', () => {
+    const overrides: any = buildK8sPodOverrides({
+      podName: 'p',
+      image: 'img',
+      mounts: [
+        {
+          hostPath: '/profiles/acme/groups/main',
+          containerPath: '/workspace/group',
+          readonly: false,
+        },
+      ],
+      env: [],
+      volumeMode: 'pvc',
+      pvcName: 'nanoclaw-data',
+      pvcRoots: [{ hostRoot: '/profiles/acme', subPathPrefix: 'profile' }],
+      runAsUser: 1005,
+      runAsGroup: 1005,
+      fsGroup: 1005,
+    });
+    expect(overrides.spec.securityContext).toEqual({ fsGroup: 1005 });
+    expect(overrides.spec.containers[0].securityContext).toEqual({
+      runAsUser: 1005,
+      runAsGroup: 1005,
+    });
+  });
+
   it('filters out env entries flagged valueFromProcessEnv', () => {
     const overrides: any = buildK8sPodOverrides({
       podName: 'p',

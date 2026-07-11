@@ -874,6 +874,19 @@ function buildSpawnCommand(
     const hostUid = process.getuid?.();
     const hostGid = process.getgid?.();
     const runAsRoot = hostUid == null || hostUid === 0 || hostUid === 1000;
+    // The gid the pod's process actually runs as: when we override, it's the
+    // host gid; otherwise the agent image's baked-in `node` user (uid/gid
+    // 1000) applies. Used for fsGroup below so mounted PVC volumes are
+    // writable by that gid.
+    const effectiveGid = runAsRoot ? 1000 : hostGid;
+    // Pod-level fsGroup only matters for a PVC-backed volume whose backing
+    // block storage mounts root-owned (the hosted/multi-node case): without
+    // it, a non-root agent gets EACCES writing to the tenant PVC and the run
+    // fails silently (bot receives the message, never replies). hostPath
+    // volumes resolve on the shared node with normal ownership, so they need
+    // no remap. Skip entirely when the pod runs as true root (uid 0).
+    const fsGroup =
+      K8S_VOLUME_MODE === 'pvc' && hostUid !== 0 ? effectiveGid : undefined;
     const overrides = buildK8sPodOverrides({
       podName: containerName,
       image: CONTAINER_IMAGE,
@@ -893,6 +906,7 @@ function buildSpawnCommand(
       },
       runAsUser: runAsRoot ? undefined : hostUid,
       runAsGroup: runAsRoot ? undefined : hostGid,
+      fsGroup,
     });
     const args = buildKubectlRunArgs({
       podName: containerName,
