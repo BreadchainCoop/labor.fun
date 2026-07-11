@@ -2,10 +2,10 @@
 
 labor.fun ships two inference modes:
 
-| Mode | Backend | Provider | Anthropic in path? | TEE |
-|------|---------|----------|--------------------|-----|
-| **Hosted Anthropic** (default) | `claude` | Anthropic Claude via the credential proxy | Yes | No |
-| **Open-source / TEE** | `local` (OpenAI-compatible) | NEAR AI Cloud, or any OpenAI-compatible endpoint | **No** | Yes (NEAR AI) |
+| Mode                           | Backend                     | Provider                                         | Anthropic in path? | TEE           |
+| ------------------------------ | --------------------------- | ------------------------------------------------ | ------------------ | ------------- |
+| **Hosted Anthropic** (default) | `claude`                    | Anthropic Claude via the credential proxy        | Yes                | No            |
+| **Open-source / TEE**          | `local` (OpenAI-compatible) | NEAR AI Cloud, or any OpenAI-compatible endpoint | **No**             | Yes (NEAR AI) |
 
 The open-source mode runs agent turns against an **OpenAI-compatible** chat-completions endpoint instead of the Claude Agent SDK. Point it at [NEAR AI Cloud](https://cloud.near.ai/) and you get a fully **worker-owned, open-model, TEE-attested** stack with **no Anthropic dependency anywhere in the inference path** — the intended inference layer for the product's TEE mode. It also works with any local/self-hosted OpenAI-compatible server (LM Studio, llama.cpp `server`, vLLM, Ollama in OpenAI mode).
 
@@ -13,7 +13,7 @@ Hosted Anthropic remains the **default** and is unchanged. You opt into open-sou
 
 ## What NEAR AI gives you
 
-NEAR AI Cloud serves open-weight models (Llama, Qwen, DeepSeek, Mixtral, …) inside an **Intel TDX + NVIDIA confidential-GPU enclave**. Data stays encrypted *in use*, not just at rest and in transit, and every response is backed by a verifiable hardware quote binding the exact code and weights that served it. The API is OpenAI-compatible, so labor.fun's existing OpenAI-compatible backend drives it directly.
+NEAR AI Cloud serves open-weight models (Llama, Qwen, DeepSeek, Mixtral, …) inside an **Intel TDX + NVIDIA confidential-GPU enclave**. Data stays encrypted _in use_, not just at rest and in transit, and every response is backed by a verifiable hardware quote binding the exact code and weights that served it. The API is OpenAI-compatible, so labor.fun's existing OpenAI-compatible backend drives it directly.
 
 - **Base URL:** `https://cloud-api.near.ai/v1`
 - **Auth:** `Authorization: Bearer <NEAR_AI_API_KEY>` (standard OpenAI-style key; get one at https://cloud.near.ai/)
@@ -54,16 +54,16 @@ LOCAL_LLM_API_KEY=<key>                                  # optional
 
 One backend per process — switch by restarting.
 
-| Var | Applies to | Default | Notes |
-|-----|-----------|---------|-------|
-| `NANOCLAW_BACKEND` | selection | `claude` (or `local` if `NEAR_AI_API_KEY` set) | `claude` \| `local`. Explicit value wins over the NEAR AI convenience. |
-| `NEAR_AI_API_KEY` | NEAR AI | — | Secret. Setting it (without an explicit backend) selects `local` + NEAR AI Cloud. |
-| `NEAR_AI_MODEL` | NEAR AI | `deepseek-ai/DeepSeek-V3.1` | Any model from the NEAR AI catalog. |
-| `NEAR_AI_BASE_URL` | NEAR AI | `https://cloud-api.near.ai/v1` | Escape hatch (e.g. a regional/proxy URL). |
-| `LOCAL_LLM_BASE_URL` | local | `http://host.docker.internal:1234/v1` (or NEAR AI URL in NEAR AI mode) | The endpoint the backend actually calls. |
-| `LOCAL_LLM_MODEL` | local | — (NEAR AI default in NEAR AI mode) | Model id sent in each request. |
-| `LOCAL_LLM_API_KEY` | local | — (NEAR AI key in NEAR AI mode) | Secret. Bearer token. |
-| `LOCAL_LLM_MAX_ITERATIONS` | local | `20` | Tool-call loop cap inside the container. |
+| Var                        | Applies to | Default                                                                | Notes                                                                             |
+| -------------------------- | ---------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `NANOCLAW_BACKEND`         | selection  | `claude` (or `local` if `NEAR_AI_API_KEY` set)                         | `claude` \| `local`. Explicit value wins over the NEAR AI convenience.            |
+| `NEAR_AI_API_KEY`          | NEAR AI    | —                                                                      | Secret. Setting it (without an explicit backend) selects `local` + NEAR AI Cloud. |
+| `NEAR_AI_MODEL`            | NEAR AI    | `deepseek-ai/DeepSeek-V3.1`                                            | Any model from the NEAR AI catalog.                                               |
+| `NEAR_AI_BASE_URL`         | NEAR AI    | `https://cloud-api.near.ai/v1`                                         | Escape hatch (e.g. a regional/proxy URL).                                         |
+| `LOCAL_LLM_BASE_URL`       | local      | `http://host.docker.internal:1234/v1` (or NEAR AI URL in NEAR AI mode) | The endpoint the backend actually calls.                                          |
+| `LOCAL_LLM_MODEL`          | local      | — (NEAR AI default in NEAR AI mode)                                    | Model id sent in each request.                                                    |
+| `LOCAL_LLM_API_KEY`        | local      | — (NEAR AI key in NEAR AI mode)                                        | Secret. Bearer token.                                                             |
+| `LOCAL_LLM_MAX_ITERATIONS` | local      | `20`                                                                   | Tool-call loop cap inside the container.                                          |
 
 **Resolution order** for every var: `process.env` → install `.env` → NEAR AI convenience default (only when `NEAR_AI_MODE`) → hardcoded default. `NEAR_AI_MODE` is on when `NEAR_AI_API_KEY` is set **and** `NANOCLAW_BACKEND` is not explicitly set. Explicit `LOCAL_LLM_*` override the NEAR AI-derived values, so you can, e.g., keep a NEAR AI key but pin `LOCAL_LLM_MODEL`.
 

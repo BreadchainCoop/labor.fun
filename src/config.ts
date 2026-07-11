@@ -766,12 +766,12 @@ export const NEAR_AI_MODEL =
 // True when the operator opted into NEAR AI (key set) without forcing a
 // different backend. This is the sole trigger that flips the default backend
 // from 'claude' to 'local' and points LOCAL_LLM_* at NEAR AI Cloud.
-const explicitBackend = process.env.NANOCLAW_BACKEND || envConfig.NANOCLAW_BACKEND;
+const explicitBackend =
+  process.env.NANOCLAW_BACKEND || envConfig.NANOCLAW_BACKEND;
 export const NEAR_AI_MODE = !!NEAR_AI_API_KEY && !explicitBackend;
 
 const rawBackend = (
-  explicitBackend ||
-  (NEAR_AI_MODE ? 'local' : 'claude')
+  explicitBackend || (NEAR_AI_MODE ? 'local' : 'claude')
 ).toLowerCase();
 export const NANOCLAW_BACKEND: 'claude' | 'local' =
   rawBackend === 'local' ? 'local' : 'claude';

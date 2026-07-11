@@ -50,7 +50,10 @@ export interface McpBridgeInit {
 
 export class McpBridge {
   private servers: ConnectedServer[] = [];
-  private toolToServer = new Map<string, { server: ConnectedServer; rawName: string }>();
+  private toolToServer = new Map<
+    string,
+    { server: ConnectedServer; rawName: string }
+  >();
   private tools: OpenAITool[] = [];
 
   static async start(init: McpBridgeInit): Promise<McpBridge> {
@@ -104,7 +107,8 @@ export class McpBridge {
           'context,repos,issues,pull_requests,actions,projects',
         ],
         env: {
-          GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_PERSONAL_ACCESS_TOKEN!,
+          GITHUB_PERSONAL_ACCESS_TOKEN:
+            process.env.GITHUB_PERSONAL_ACCESS_TOKEN!,
         },
       });
     }
@@ -157,11 +161,12 @@ export class McpBridge {
 
       // MCP inputSchema is already JSON Schema; OpenAI tools accept the same.
       // Fall back to a permissive empty-object schema for tools with no params.
-      const parameters =
-        (tool.inputSchema as Record<string, unknown> | undefined) || {
-          type: 'object',
-          properties: {},
-        };
+      const parameters = (tool.inputSchema as
+        | Record<string, unknown>
+        | undefined) || {
+        type: 'object',
+        properties: {},
+      };
 
       this.tools.push({
         type: 'function',
@@ -203,8 +208,9 @@ export class McpBridge {
       });
 
       // Flatten content[] to a single string the model can consume.
-      const content = (result as { content?: Array<{ type: string; text?: string }> })
-        .content;
+      const content = (
+        result as { content?: Array<{ type: string; text?: string }> }
+      ).content;
       if (!content || content.length === 0) {
         return '';
       }
