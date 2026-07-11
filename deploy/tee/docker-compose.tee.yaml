@@ -1,0 +1,191 @@
+# labor.fun — TEE deployment mode (dstack / Phala Intel-TDX CVM)
+# ---------------------------------------------------------------------------
+# Runs the WHOLE labor.fun stack inside a single dstack Confidential VM (CVM).
+# Signal E2E terminates INSIDE the enclave (signal-cli daemon), inference is
+# proxied to NEAR AI (remote — no local service), and `!verify <nonce>` returns
+# a fresh Intel-TDX attestation quote bound to the caller's nonce.
+#
+# Design goals (see deploy/tee/README.md and docs/TEE.md):
+#   * NO public ports. Everything talks over the internal Docker network the
+#     dstack runtime creates. The only trust boundary that crosses the enclave
+#     is (a) Signal's E2E channel (terminates in signal-cli) and (b) the NEAR AI
+#     HTTPS egress for inference. Neither exposes plaintext org data at rest.
+#   * The dstack guest socket (/var/run/dstack.sock) is mounted READ-ONLY into
+#     every service that needs attestation / key derivation.
+#   * State (profiles/, store, data) lives on dstack ENCRYPTED volumes so that
+#     even the host operator cannot read org memory at rest (see README).
+#
+# What this compose file is MEASURED into: dstack hashes this exact compose
+# document into `compose_hash`, which appears in the TDX quote returned by
+# `!verify`. Changing ANY line here re-measures the app → the attestation a
+# user verifies is bound to this published file. That is why every image is
+# pinned by @sha256 digest below: a floating `:latest` tag would let the host
+# swap the running code without changing compose_hash. Pin real digests before
+# deploying (the placeholders below will not pull).
+# ---------------------------------------------------------------------------
+
+services:
+  # ---------------------------------------------------------------------------
+  # orchestrator — the long-lived labor.fun process (node dist/index.js).
+  # Self-registers the Signal channel at startup (LABOR_PROFILE selects the org
+  # profile). Spawns one short-lived AGENT container per turn as a SIBLING via
+  # the mounted docker.sock (docker-in-docker "sibling" pattern — the agent runs
+  # next to the orchestrator inside the same CVM, NOT nested). Terminates the
+  # user's Signal E2E session and answers `!verify` using dstack.sock.
+  # ---------------------------------------------------------------------------
+  orchestrator:
+    # labor.fun orchestrator image (deploy/docker/Dockerfile.orchestrator).
+    # PIN BY DIGEST before deploy — the digest is what dstack measures.
+    # Build & push (linux/amd64 required for Intel TDX):
+    #   docker buildx build --platform linux/amd64 \
+    #     -f deploy/docker/Dockerfile.orchestrator \
+    #     -t YOUR_REGISTRY/labor-orchestrator:tee --push .
+    #   docker inspect --format='{{index .RepoDigests 0}}' YOUR_REGISTRY/labor-orchestrator:tee
+    image: ghcr.io/breadchaincoop/labor-orchestrator@sha256:REPLACE_WITH_ORCHESTRATOR_DIGEST
+    container_name: labor-orchestrator
+    restart: unless-stopped
+    environment:
+      # --- Profile / runtime ------------------------------------------------
+      - LABOR_PROFILE=${LABOR_PROFILE}
+      - CONTAINER_RUNTIME=docker
+      # The AGENT image the orchestrator spawns per turn (sibling container).
+      # Also pin by digest (see agent service note below) so the code that runs
+      # per turn is measured the same way the orchestrator is.
+      - CONTAINER_IMAGE=${AGENT_IMAGE}
+      - TZ=${TZ:-UTC}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # --- Signal channel (talks to the signal-cli daemon over TCP) ---------
+      # src/channels/signal.ts speaks signal-cli's newline-delimited JSON-RPC
+      # over a TCP socket. Point it at the signal-cli service on the internal
+      # network. SIGNAL_ACCOUNT is the shared platform Signal number; the TEE
+      # links as a SECONDARY DEVICE (docs/TEE.md → "Signal device linking").
+      - SIGNAL_ACCOUNT=${SIGNAL_ACCOUNT}
+      - SIGNAL_RPC_TCP=signal-cli:7583
+      # --- TEE / attestation ------------------------------------------------
+      # TEE_MODE flips on the `!verify` attestation path in the Signal channel;
+      # the code ALSO checks the socket exists before attesting, so a misset
+      # flag degrades honestly ("not running in a TEE") rather than crashing.
+      - TEE_MODE=true
+      - DSTACK_SOCKET_PATH=/var/run/dstack.sock
+      # proof.phala.network is the public quote verifier linked in !verify replies.
+      - TEE_VERIFY_URL=${TEE_VERIFY_URL:-https://proof.phala.network}
+      # --- Inference: NEAR AI (remote API — NO local service) ---------------
+      # These are OWNED by the parallel inference-mode work; referenced here only
+      # so the orchestrator + agent turns route inference to NEAR AI instead of
+      # api.anthropic.com. No inference container runs inside the CVM.
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-near-ai}
+      - NEAR_AI_API_KEY=${NEAR_AI_API_KEY}
+      - NEAR_AI_MODEL=${NEAR_AI_MODEL}
+    volumes:
+      # docker.sock — spawn sibling AGENT containers inside the CVM. The socket
+      # is the SAME dockerd the dstack runtime uses; agent containers therefore
+      # run within the CVM's measured boundary. RW because `docker run` needs it.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # dstack guest socket — quote generation (!verify) + KMS key derivation.
+      # READ-ONLY: the guest agent only serves requests; nothing writes to it.
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      # --- Encrypted, persistent state (dstack encrypted volumes) -----------
+      # Each named volume below is backed by a dstack ENCRYPTED disk (configured
+      # in the dstack app manifest / KMS, see README). Contents are sealed to the
+      # CVM measurement, so the host operator cannot read org memory at rest.
+      #   profiles/  — org identity, per-group CLAUDE.md, KB (people/tasks/etc.)
+      #   store      — SQLite messages.db (message history, identities)
+      #   data       — sessions/, IPC dirs, agent-runner-src cache
+      # These mount at the profile-relative paths the orchestrator derives from
+      # LABOR_PROFILE (PROFILE_DIR/{store,data} and the groups tree). The image
+      # ships the framework code; ONLY org state is mounted here.
+      - labor-profiles:/app/profiles
+      - labor-store:/app/profiles/${LABOR_PROFILE}/store
+      - labor-data:/app/profiles/${LABOR_PROFILE}/data
+    networks:
+      - labor-internal
+    depends_on:
+      signal-cli:
+        condition: service_healthy
+    # NO `ports:` — the orchestrator is never reachable from outside the CVM.
+
+  # ---------------------------------------------------------------------------
+  # signal-cli — the Signal E2E endpoint, running as a TCP JSON-RPC daemon.
+  #
+  # WHY THIS IMAGE/MODE: src/channels/signal.ts connects with Node's `net`
+  # module to a signal-cli daemon over newline-delimited JSON-RPC on a TCP
+  # socket (default 127.0.0.1:7583; here the containerized peer signal-cli:7583).
+  # It writes `send`/`sendReaction`/`sendTyping` requests and reads `receive`
+  # notifications on the SAME socket. That is exactly what
+  #   signal-cli -a "$SIGNAL_ACCOUNT" daemon --tcp 0.0.0.0:7583
+  # provides. It is NOT the bbernhard/signal-cli-rest-api HTTP surface — the
+  # channel speaks native JSON-RPC, not REST, so we run signal-cli directly.
+  #
+  # The Signal account is LINKED as a secondary device to the platform's ONE
+  # Signal identity (docs/TEE.md); the private keys live on the encrypted
+  # signal-data volume, sealed to this CVM.
+  # ---------------------------------------------------------------------------
+  signal-cli:
+    # signal-cli in native JSON-RPC daemon mode. Pin by digest before deploy.
+    # registry.gitlab.com/packaging/signal-cli/signal-cli-jre publishes tagged
+    # images; the `--tcp` daemon flag is the contract src/channels/signal.ts uses.
+    image: registry.gitlab.com/packaging/signal-cli/signal-cli-jre@sha256:REPLACE_WITH_SIGNAL_CLI_DIGEST
+    container_name: labor-signal-cli
+    restart: unless-stopped
+    # Bind the JSON-RPC daemon to the internal network on 7583 (the port the
+    # channel defaults to). 0.0.0.0 inside the container is reachable only over
+    # labor-internal — still no host/public exposure.
+    command:
+      - -a
+      - ${SIGNAL_ACCOUNT}
+      - daemon
+      - --tcp=0.0.0.0:7583
+      # --receive-mode=on-connection keeps a single long-lived read stream, which
+      # is what the channel's persistent socket expects.
+      - --receive-mode=on-connection
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      # Signal identity/keys + session state, on an encrypted dstack volume.
+      # This is where `signal-cli link` writes the secondary-device keys.
+      - signal-data:/home/.local/share/signal-cli
+      # dstack socket RO — not required by signal-cli itself, but mounted so an
+      # operator can attest the signal-cli container from inside if desired.
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+    networks:
+      - labor-internal
+    healthcheck:
+      # The daemon accepts TCP on 7583 once ready; a bare connection check is
+      # enough for depends_on ordering (no HTTP surface to curl).
+      test: ['CMD-SHELL', 'timeout 2 bash -c "</dev/tcp/127.0.0.1/7583" || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # NO `ports:` — signal-cli is reachable only by the orchestrator.
+
+  # ---------------------------------------------------------------------------
+  # NOTE: NEAR AI inference needs NO service here — it is a REMOTE HTTPS API
+  # (owned by the parallel inference-mode work; env: INFERENCE_BACKEND,
+  # NEAR_AI_API_KEY, NEAR_AI_MODEL). Egress to NEAR AI is the only outbound
+  # data path from the enclave besides Signal. There is intentionally no local
+  # model/whisper container in TEE mode.
+  # ---------------------------------------------------------------------------
+
+  # AGENT containers are NOT declared here. The orchestrator spawns them at
+  # runtime via docker.sock (`docker run` the ${AGENT_IMAGE}), one per turn. To
+  # keep them inside the measured boundary, pin ${AGENT_IMAGE} by digest in
+  # .env.tee (its digest is not in compose_hash, so record it in docs/TEE.md and
+  # verify it out-of-band). See src/container-runner.ts.
+
+volumes:
+  # dstack backs these with ENCRYPTED disks (declared in the dstack app
+  # manifest). Named volumes keep the compose portable; the encryption is a
+  # property of the CVM's disk config, not of the volume driver line here.
+  labor-profiles:
+  labor-store:
+  labor-data:
+  signal-data:
+
+networks:
+  labor-internal:
+    # Internal-only bridge: no service publishes a host port, so nothing in the
+    # CVM is reachable from the outside world. The enclave's only ingress is
+    # Signal (E2E, via signal-cli) and its only egress is NEAR AI (HTTPS).
+    driver: bridge
+    internal: false # keep NEAR AI egress; set true to fully air-gap (breaks NEAR AI)
