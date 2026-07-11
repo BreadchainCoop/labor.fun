@@ -48,6 +48,7 @@ import {
   RegisteredGroup,
 } from '../types.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { whatsappCredsExist } from '../integrations/whatsapp-pairing-broker.js';
 import { ensureWhatsAppSenderAllowlisted } from './whatsapp-allowlist.js';
 import {
   autoAllowlistMatches,
@@ -80,6 +81,9 @@ export class WhatsAppChannel implements Channel {
 
   private sock!: WASocket;
   private connected = false;
+  /** Set when the channel stops itself (invalid/revoked session) — suppresses
+   * the reconnect loop so a dead session can't churn the socket forever. */
+  private stopped = false;
   private lidToPhoneMap: Record<string, string> = {};
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
@@ -250,17 +254,34 @@ export class WhatsAppChannel implements Channel {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        // The socket wants a fresh QR scan — the stored session is missing or
+        // invalid. Upstream nanoclaw exited the process here (WhatsApp was its
+        // only channel); in this multi-channel orchestrator that would kill
+        // Telegram/Slack/etc. too, so stop ONLY this channel. Re-pair via the
+        // dashboard (hosted pairing broker) or /setup (local).
         const msg =
-          'WhatsApp authentication required. Run /setup in Claude Code.';
+          'WhatsApp session missing or invalid — stopping the WhatsApp channel. ' +
+          'Re-pair via the dashboard (hosted) or run /setup (local).';
         logger.error(msg);
-        exec(
-          `osascript -e 'display notification "${msg}" with title "NanoClaw" sound name "Basso"'`,
-        );
-        setTimeout(() => process.exit(1), 1000);
+        if (process.platform === 'darwin') {
+          exec(
+            `osascript -e 'display notification "WhatsApp re-auth needed. Run /setup." with title "NanoClaw" sound name "Basso"'`,
+          );
+        }
+        this.stopped = true;
+        try {
+          this.sock.end(undefined);
+        } catch {
+          // socket may already be closing — nothing to do
+        }
+        return;
       }
 
       if (connection === 'close') {
         this.connected = false;
+        // Intentional stop (bad session / logged out): suppress the reconnect
+        // loop, otherwise end() -> close -> reconnect -> qr -> end() churns.
+        if (this.stopped) return;
         const reason = (
           lastDisconnect?.error as { output?: { statusCode?: number } }
         )?.output?.statusCode;
@@ -285,8 +306,12 @@ export class WhatsAppChannel implements Channel {
             }, 5000);
           });
         } else {
-          logger.info('Logged out. Run /setup to re-authenticate.');
-          process.exit(0);
+          // Logged out = session revoked on the phone. Stop this channel only;
+          // the rest of the orchestrator keeps running (upstream exited here).
+          this.stopped = true;
+          logger.error(
+            'WhatsApp logged out — session revoked. Re-pair via the dashboard (hosted) or /setup (local).',
+          );
         }
       } else if (connection === 'open') {
         this.connected = true;
@@ -672,12 +697,21 @@ export class WhatsAppChannel implements Channel {
   }
 }
 
-registerChannel(
-  'whatsapp',
-  (opts: ChannelOpts) =>
-    new WhatsAppChannel({
-      ...opts,
-      autoRegisterGroups: WHATSAPP_AUTO_REGISTER_GROUPS,
-      autoAllowlistGroups: WHATSAPP_AUTO_ALLOWLIST_GROUPS,
-    }),
-);
+registerChannel('whatsapp', (opts: ChannelOpts) => {
+  // WhatsApp's "credential" is a linked-device session on disk (there is no
+  // bot token). No session → skip, like every other unconfigured channel.
+  // In hosted mode the pairing broker (runWhatsAppPairingBroker, started from
+  // index.ts) creates the session first, then the orchestrator restarts and
+  // this factory finds the creds.
+  if (!whatsappCredsExist()) {
+    logger.warn(
+      'WhatsApp: no linked session (auth/creds.json missing) — pair via the dashboard or /setup',
+    );
+    return null;
+  }
+  return new WhatsAppChannel({
+    ...opts,
+    autoRegisterGroups: WHATSAPP_AUTO_REGISTER_GROUPS,
+    autoAllowlistGroups: WHATSAPP_AUTO_ALLOWLIST_GROUPS,
+  });
+});
