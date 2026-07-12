@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  buildAgentContainerName,
   parseSelfMounts,
   siblingMountSource,
   translateSiblingHostPath,
@@ -153,5 +154,40 @@ describe('siblingMountSource (skip image-dir mounts)', () => {
     expect(siblingMountSource('/app-data/x', self, IMAGE_ROOT)).toBe(
       '/app-data/x',
     );
+  });
+});
+
+describe('buildAgentContainerName (k8s RFC-1123 safe)', () => {
+  const RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+
+  it('produces a valid, ≤63-char name for a long mixed-case Signal group folder', () => {
+    const n = buildAgentContainerName(
+      'signal_Inemj-Z44SEhClgLNmmZz_9VssUy41snEdmP0BcPSrg',
+      1783894672961,
+    );
+    expect(n.length).toBeLessThanOrEqual(63);
+    expect(n).toMatch(RE);
+    expect(n.startsWith('nanoclaw-')).toBe(true);
+    expect(n.endsWith('-1783894672961')).toBe(true);
+  });
+
+  it('leaves a short simple folder readable (no hash needed)', () => {
+    const n = buildAgentContainerName('signal_ron', 1783894672961);
+    expect(n).toBe('nanoclaw-signal-ron-1783894672961');
+    expect(n).toMatch(RE);
+  });
+
+  it('lowercases and collapses separators', () => {
+    const n = buildAgentContainerName('Main__Group', 1700000000000);
+    expect(n).toMatch(RE);
+    expect(n).toContain('main-group');
+  });
+
+  it('distinct long folders get distinct hashes', () => {
+    const a = buildAgentContainerName('signal_' + 'A'.repeat(80), 1);
+    const b = buildAgentContainerName('signal_' + 'B'.repeat(80), 1);
+    expect(a).not.toBe(b);
+    expect(a.length).toBeLessThanOrEqual(63);
+    expect(b.length).toBeLessThanOrEqual(63);
   });
 });
