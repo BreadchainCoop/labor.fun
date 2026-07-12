@@ -92,7 +92,7 @@ beforeEach(() => {
   setRegisteredGroup('third@g.us', THIRD_GROUP);
 
   deps = {
-    sendMessage: async () => {},
+    sendMessage: async () => true,
     canDeliver: () => true,
     deleteMessage: async () => {},
     editMessage: async () => {},
@@ -733,6 +733,7 @@ describe('transcript task approval IPC handlers', () => {
     sent = [];
     deps.sendMessage = async (jid: string, text: string) => {
       sent.push({ jid, text });
+      return true;
     };
     storeChatMetadata('main@g.us', '2026-04-23T00:00:00.000Z');
     storeChatMetadata('other@g.us', '2026-04-23T00:00:00.000Z');

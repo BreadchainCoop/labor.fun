@@ -121,6 +121,7 @@ beforeEach(() => {
   deps = {
     sendMessage: async (jid, text) => {
       sent.push({ jid, text });
+      return true;
     },
     canDeliver: () => true,
     deleteMessage: async () => {},

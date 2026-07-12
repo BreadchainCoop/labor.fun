@@ -836,7 +836,7 @@ describe('WebChannel', () => {
       const ch = new WebChannel(createTestOpts(), createConfig());
       await expect(
         ch.sendMessage('web:acme:no_stream_here', 'hi'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
       // Still recorded outbound.
       expect(storeOutboundMessage).toHaveBeenCalledTimes(1);
     });
