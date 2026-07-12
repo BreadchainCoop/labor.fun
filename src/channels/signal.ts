@@ -1,6 +1,10 @@
 import net from 'net';
 
-import { ASSISTANT_NAME, SIGNAL_AUTO_REGISTER_GROUPS } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  INGRESS_HTTP_PORT,
+  SIGNAL_AUTO_REGISTER_GROUPS,
+} from '../config.js';
 import { logReaction, storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
@@ -11,8 +15,14 @@ import {
   formatAttestationReply,
   parseVerifyCommand,
 } from '../tee-attest.js';
+import {
+  getIngressHttpServer,
+  type IngressHttpServer,
+} from './ingress-http-server.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import { deriveSignalGroupFolder } from './signal-auto.js';
+import { SignalSender, signalSenderConfig } from './signal-sender.js';
+import { verifyIngressSignature } from './slack-http-receiver.js';
 import {
   Channel,
   OnChatMetadata,
@@ -145,6 +155,14 @@ export interface SignalChannelOpts {
     socketPath?: string;
     verifyUrl?: string;
   };
+  // --- Shared-bot INGRESS mode (hosted SaaS) ---
+  // When set, the channel runs WITHOUT a signal-cli socket: the control plane
+  // owns the ONE platform Signal number (a real signal-cli account it drives via
+  // the bbernhard/signal-cli-rest-api gateway) and POSTs each org's forwarded
+  // group messages to /signal/messages (HMAC-signed with ingressSecret). All
+  // outbound is proxied back through the CP (SignalSender). The tenant never
+  // holds Signal creds. Native (BYO signal-cli) mode leaves this unset.
+  ingressSecret?: string;
 }
 
 interface PendingRequest {
@@ -172,6 +190,14 @@ export class SignalChannel implements Channel {
   private reconnectDelay = 1000;
   private closing = false;
 
+  // --- Ingress mode state ---
+  /** True when running in shared-bot ingress mode (no signal-cli socket). */
+  private readonly ingress: boolean;
+  private readonly ingressSecret: string | undefined;
+  private sender: SignalSender | null = null;
+  private ingressServer: IngressHttpServer | null = null;
+  private ingressConnected = false;
+
   // Reactions target a message by (author, timestamp). Inbound message ids are
   // the envelope timestamp, so remember each one's author to reply with a
   // reaction. Capped LRU — only recent messages get ACK reactions anyway.
@@ -185,9 +211,17 @@ export class SignalChannel implements Channel {
     this.port = parseInt(port || '7583', 10);
     this.opts = opts;
     this.tee = opts.tee;
+    // Ingress mode iff an ingress secret is provided. The factory only passes
+    // one when there is NO native signal-cli account, so the two modes never
+    // collide on a single instance.
+    this.ingress = !!opts.ingressSecret;
+    this.ingressSecret = opts.ingressSecret;
   }
 
   async connect(): Promise<void> {
+    if (this.ingress) {
+      return this.connectIngress();
+    }
     return new Promise<void>((resolve) => {
       // Resolve on the FIRST successful connection — even if it arrives via a
       // reconnect rather than this initial dial. signal-cli is often not
@@ -201,6 +235,91 @@ export class SignalChannel implements Channel {
       this.connectResolve = resolve;
       this.openSocket();
     });
+  }
+
+  // ─── Shared-bot INGRESS transport ────────────────────────────────────────
+
+  /**
+   * Connect in ingress mode: register POST /signal/messages on the shared
+   * ingress HTTP server (same port as the slack receiver + telegram/whatsapp
+   * ingress) and wire up the outbound control-plane proxy. No signal-cli socket
+   * is opened — the control plane owns the ONE shared platform Signal number and
+   * forwards this org's bound-group messages here (signed), receiving our
+   * outbound over the proxy.
+   */
+  private async connectIngress(): Promise<void> {
+    const cfg = signalSenderConfig();
+    if (cfg) {
+      this.sender = new SignalSender(cfg);
+    } else {
+      // Inbound still works; outbound no-ops until CONTROL_PLANE_* is set.
+      logger.warn(
+        'Signal ingress: CONTROL_PLANE_URL/TOKEN not set — outbound sends will be dropped',
+      );
+    }
+
+    const secret = this.ingressSecret!;
+    const server = getIngressHttpServer(INGRESS_HTTP_PORT, logger);
+    this.ingressServer = server;
+    server.registerRoute('POST', '/signal/messages', (rawBody, req, res) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const verified = verifyIngressSignature({
+        ingressSecret: secret,
+        rawBody,
+        timestamp: header(req, 'x-labor-ingress-timestamp'),
+        signature: header(req, 'x-labor-ingress-signature'),
+        nowSeconds,
+      });
+      if (!verified) {
+        logger.warn(
+          { url: req.url },
+          'Signal ingress rejected request (signature verification failed)',
+        );
+        res.writeHead(401);
+        res.end('Unauthorized');
+        return;
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(rawBody);
+      } catch {
+        res.writeHead(400);
+        res.end('Bad Request');
+        return;
+      }
+
+      // Ack immediately (200), THEN process — fire-and-forget so slow handlers
+      // never delay the ack (mirrors the slack receiver + telegram/whatsapp
+      // ingress).
+      res.writeHead(200);
+      res.end();
+      this.processRawMessage(payload);
+    });
+
+    await server.start();
+    this.ingressConnected = true;
+    logger.info(
+      { port: INGRESS_HTTP_PORT },
+      'Signal ingress connected (shared-bot mode)',
+    );
+  }
+
+  /**
+   * Feed a CP-forwarded Signal payload into the SAME inbound core the native
+   * signal-cli receive loop uses (handleReceive). The control plane forwards the
+   * RAW single-envelope wrapper verbatim — `{ envelope: { dataMessage, source,
+   * timestamp, ... } }` — which is byte-for-byte the shape signal-cli pushes as a
+   * JSON-RPC `receive` notification's params, so the same core drives chatJid
+   * derivation, auto-register, `!verify`, and onMessage identically across both
+   * transports. Never throws — malformed payloads are logged and dropped.
+   */
+  processRawMessage(payload: unknown): void {
+    try {
+      this.handleReceive(payload);
+    } catch (err) {
+      logger.error({ err }, 'Signal ingress: failed to process message');
+    }
   }
 
   private openSocket(): void {
@@ -347,6 +466,15 @@ export class SignalChannel implements Channel {
     return registered;
   }
 
+  /**
+   * Transport-agnostic inbound core: envelope → chatJid → metadata →
+   * auto-register → `!verify` intercept → onMessage. Consumes a signal-cli
+   * `receive` params object (`{ envelope, account? }`). BOTH transports drive
+   * this SAME method, so triggers / auto-register / `!verify` behave identically:
+   *   - native  → onData() calls handleReceive(msg.params) for each JSON-RPC line;
+   *   - ingress → processRawMessage() calls handleReceive(<CP-forwarded wrapper>),
+   *     which the control plane forwards verbatim as the same `{ envelope }` shape.
+   */
   private handleReceive(params: any): void {
     const envelope = params?.envelope;
     const data = envelope?.dataMessage;
@@ -501,6 +629,23 @@ export class SignalChannel implements Channel {
     text: string,
     _opts?: SendMessageOpts,
   ): Promise<void> {
+    // Ingress mode: route every send through the control-plane proxy. The CP
+    // gateway renders `text_mode:styled` from the raw text, so we forward it
+    // verbatim (no local textStyle parsing/chunking — mirrors WhatsApp ingress).
+    // SignalSender never throws (a CP outage logs a warn, not a crash), matching
+    // the native path's log-and-drop on a failed socket send.
+    if (this.ingress) {
+      if (!this.sender) {
+        logger.warn(
+          { jid },
+          'Signal ingress: no control-plane proxy configured — dropping send',
+        );
+        return;
+      }
+      await this.sender.send(jid, text);
+      return;
+    }
+
     if (!this.connected) {
       logger.warn({ jid }, 'Signal not connected — dropping message');
       return;
@@ -545,6 +690,7 @@ export class SignalChannel implements Channel {
   }
 
   isConnected(): boolean {
+    if (this.ingress) return this.ingressConnected;
     return this.connected;
   }
 
@@ -553,6 +699,15 @@ export class SignalChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    if (this.ingress) {
+      if (this.ingressServer) {
+        await this.ingressServer.stop();
+        this.ingressServer = null;
+      }
+      this.ingressConnected = false;
+      logger.info('Signal ingress stopped');
+      return;
+    }
     this.closing = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -567,6 +722,10 @@ export class SignalChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    // DEGRADATION (ingress): typing is a signal-cli capability with no v1 CP
+    // proxy method ({ groupId, message } only), so typing indicators are a no-op
+    // in shared-bot mode. Native mode is unchanged.
+    if (this.ingress) return;
     if (!this.connected) return;
     try {
       await this.request('sendTyping', {
@@ -601,6 +760,10 @@ export class SignalChannel implements Channel {
     emoji: string,
     remove: boolean,
   ): Promise<void> {
+    // DEGRADATION (ingress): reactions are a signal-cli capability with no v1 CP
+    // proxy method ({ groupId, message } only), so reactions are a no-op in
+    // shared-bot mode. Native mode is unchanged.
+    if (this.ingress) return;
     if (!this.connected) return;
     const author = this.authorByMsgId.get(messageId);
     if (!author) {
@@ -627,26 +790,30 @@ export class SignalChannel implements Channel {
   }
 }
 
+function header(
+  req: { headers: Record<string, string | string[] | undefined> },
+  name: string,
+): string | undefined {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+
 registerChannel('signal', (opts: ChannelOpts) => {
   const envVars = readEnvFile([
     'SIGNAL_ACCOUNT',
     'SIGNAL_RPC_TCP',
+    'SIGNAL_INGRESS_SECRET',
     'TEE_MODE',
     'DSTACK_SOCKET_PATH',
     'TEE_VERIFY_URL',
   ]);
   const account = process.env.SIGNAL_ACCOUNT || envVars.SIGNAL_ACCOUNT || '';
-  if (!account) {
-    logger.warn('Signal: SIGNAL_ACCOUNT not set');
-    return null;
-  }
-  const rpcAddr =
-    process.env.SIGNAL_RPC_TCP || envVars.SIGNAL_RPC_TCP || '127.0.0.1:7583';
 
   // TEE mode: enable the `!verify <nonce>` attestation command. The command is
   // only intercepted when TEE_MODE=true; even then, tee-attest.ts checks the
   // dstack socket exists before attesting, so a misset flag on a non-TEE host
-  // replies "not running in a TEE" rather than crashing.
+  // replies "not running in a TEE" rather than crashing. Shared by both modes —
+  // a TEE-hosted tenant can run ingress and still answer `!verify` locally.
   const teeEnabled =
     (process.env.TEE_MODE || envVars.TEE_MODE || '').toLowerCase() === 'true';
   const tee = teeEnabled
@@ -663,12 +830,45 @@ registerChannel('signal', (opts: ChannelOpts) => {
       }
     : undefined;
 
+  // Mode 1: a native signal-cli account (SIGNAL_ACCOUNT) → BYO native mode,
+  // UNCHANGED. Signal's "credential" is a linked/registered signal-cli account
+  // reachable over its JSON-RPC daemon. A live account ALWAYS wins over ingress.
   // ...opts already carries registerGroup + ensureDmRegistered from ChannelOpts;
   // add the Signal auto-register flag so an unregistered chat's first message
   // can self-register instead of being silently dropped.
-  return new SignalChannel(account, rpcAddr, {
-    ...opts,
-    autoRegisterGroups: SIGNAL_AUTO_REGISTER_GROUPS,
-    tee,
-  });
+  if (account) {
+    const rpcAddr =
+      process.env.SIGNAL_RPC_TCP || envVars.SIGNAL_RPC_TCP || '127.0.0.1:7583';
+    return new SignalChannel(account, rpcAddr, {
+      ...opts,
+      autoRegisterGroups: SIGNAL_AUTO_REGISTER_GROUPS,
+      tee,
+    });
+  }
+
+  // Mode 2: no native account but SIGNAL_INGRESS_SECRET is set → shared-bot
+  // INGRESS mode (hosted SaaS). The control plane owns the ONE platform Signal
+  // number (a real signal-cli account it drives via the bbernhard gateway) and
+  // forwards this org's bound-group messages to POST /signal/messages (signed);
+  // outbound proxies back through the CP. No signal-cli socket, no account.
+  // Config is sourced from process.env first (hosted Kubernetes tenant pods
+  // inject via envFrom secretRef), falling back to .env.
+  const ingressSecret =
+    process.env.SIGNAL_INGRESS_SECRET || envVars.SIGNAL_INGRESS_SECRET || '';
+  if (ingressSecret) {
+    // account/rpcAddr are unused in ingress mode (no local daemon); pass empty.
+    return new SignalChannel('', '', {
+      ...opts,
+      autoRegisterGroups: SIGNAL_AUTO_REGISTER_GROUPS,
+      tee,
+      ingressSecret,
+    });
+  }
+
+  // Mode 3: neither → not configured. Skip (return null), like every other
+  // unconfigured channel.
+  logger.warn(
+    'Signal: SIGNAL_ACCOUNT not set (nor SIGNAL_INGRESS_SECRET for shared-bot ingress mode)',
+  );
+  return null;
 });
