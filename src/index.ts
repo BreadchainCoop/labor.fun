@@ -1462,8 +1462,18 @@ async function main(): Promise<void> {
     await channel.connect();
   }
   if (channels.length === 0) {
-    logger.fatal('No channels connected');
-    process.exit(1);
+    if (process.env.CONTROL_PLANE_URL) {
+      // SaaS tenant instance: a fresh org has no channels until the user
+      // connects one in the dashboard. The control plane delivers credentials
+      // by patching this pod's env Secret and rolling the deployment, so
+      // exiting here would just crashloop until then. Stay alive instead.
+      logger.warn(
+        'No channels connected yet — idling until the control plane delivers channel credentials',
+      );
+    } else {
+      logger.fatal('No channels connected');
+      process.exit(1);
+    }
   }
 
   // Start subsystems (independently of connection handler)
