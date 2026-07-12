@@ -149,7 +149,12 @@ services:
       docker-cli-fetch:
         condition: service_completed_successfully
       signal-cli:
-        condition: service_healthy
+        # service_started, NOT service_healthy: during first-boot linking the
+        # daemon isn't listening yet, and a health gate makes `docker compose
+        # up` fail the app once healthcheck retries exhaust — dstack then stops
+        # the CVM. The orchestrator simply crash-retries (restart:
+        # unless-stopped) until the link is approved, then connects.
+        condition: service_started
     # NO `ports:` — the orchestrator is never reachable from outside the CVM.
 
   # ---------------------------------------------------------------------------
@@ -196,23 +201,32 @@ services:
     image: registry.gitlab.com/packaging/signal-cli/signal-cli-jre@sha256:REPLACE_WITH_SIGNAL_CLI_DIGEST
     container_name: labor-signal-cli
     restart: unless-stopped
-    # Self-linking entrypoint: on first boot (no accounts.json) print a device-link
-    # URI to the logs and block until the primary approves; thereafter go straight
-    # to the JSON-RPC daemon on 7583 (0.0.0.0 inside the container is reachable only
+    # Self-linking entrypoint: while unlinked (no accounts.json), keep minting a
+    # device-link URI into the logs until the primary approves; then run the
+    # JSON-RPC daemon on 7583 (0.0.0.0 inside the container is reachable only
     # over labor-internal — still no host/public exposure).
+    #
+    # The link MUST run in a loop: `signal-cli link` EXITS when its provisioning
+    # URI expires unapproved (~60s server-side). A single-shot link under
+    # `set -e` kills the container every minute, compose marks the service
+    # failed, and dstack STOPS THE WHOLE CVM ("App Compose Service FAILED").
+    # Each loop cycle logs a FRESH URI between the delimiters — always scrape
+    # the newest block and approve it quickly (it is valid for ~a minute).
     entrypoint: ['/bin/bash', '-c']
     command:
       - |
-        set -eu
+        set -u
         # $$ escapes compose interpolation so the SHELL expands these at runtime.
         CFG="$$HOME/.local/share/signal-cli/accounts.json"
-        if [ -s "$$CFG" ]; then
-          echo "===SIGNAL ALREADY LINKED (accounts.json present) — starting daemon==="
-        else
+        while [ ! -s "$$CFG" ]; do
           echo "===LINK URI BELOW==="
-          signal-cli link -n "labor.fun TEE (${LABOR_PROFILE})"
+          signal-cli link -n "labor.fun TEE (${LABOR_PROFILE})" || true
           echo "===LINK URI ABOVE==="
-        fi
+          [ -s "$$CFG" ] && break
+          echo "[link] URI expired unapproved or link errored; minting a fresh one in 5s"
+          sleep 5
+        done
+        echo "===SIGNAL LINKED — starting daemon==="
         # --receive-mode=on-connection keeps a single long-lived read stream, which
         # is what the channel's persistent socket expects.
         exec signal-cli -a "$$SIGNAL_ACCOUNT" daemon --tcp=0.0.0.0:7583 --receive-mode=on-connection

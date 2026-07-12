@@ -82,6 +82,16 @@ phala deploy \
 
 ### 4. Link Signal as a secondary device
 
+> **Two hard-won operational notes:**
+> 1. **Deploy with `--no-dev-os`.** The phala CLI silently selects the DEV OS
+>    image when it finds an SSH public key, and a dev OS that doesn't match the
+>    host node's dstack version never boots — the CVM flaps starting→stopped
+>    with no surfaced error.
+> 2. **Each link URI is valid ~60 s.** The signal-cli service mints a fresh
+>    `sgnl://linkdevice?...` URI every cycle (see the compose comment). Scrape
+>    the NEWEST `===LINK URI BELOW===` block from `phala logs` and approve it
+>    immediately — stale URIs from earlier cycles silently fail.
+
 A production CVM has **no public ports and no shell** (SSH needs `--dev-os`,
 which weakens attestation), so you can't `docker exec` into it. Instead the
 `signal-cli` service **self-links on first boot**: when `signal-data` has no
