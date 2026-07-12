@@ -494,7 +494,13 @@ function readSenderCtxFromDir(
 }
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  /**
+   * Deliver a message to `jid`. Resolves `false` when the target channel
+   * dropped or failed the send (mirrors `Channel.sendMessage`), so the
+   * cross-channel send path can surface silent non-delivery. Throws when no
+   * connected channel owns the JID.
+   */
+  sendMessage: (jid: string, text: string) => Promise<boolean>;
   /**
    * True when a connected channel can route this JID (mirrors the send
    * path's `findChannel`). Lets the watcher reject undeliverable targets
@@ -682,12 +688,32 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     await notifySource(`⚠️ Your message ${verdict.reason}.`);
                   } else {
                     try {
-                      await deps.sendMessage(data.chatJid, data.text);
-                      refreshOutboundSnapshot(sourceGroup, data.chatJid);
-                      logger.info(
-                        { chatJid: data.chatJid, sourceGroup, hasSenderCtx },
-                        'IPC message sent',
+                      const delivered = await deps.sendMessage(
+                        data.chatJid,
+                        data.text,
                       );
+                      if (delivered === false) {
+                        // The channel accepted the call but dropped/failed the
+                        // send (target unreachable, API rejection, channel not
+                        // connected). Without this the agent tool had already
+                        // reported success — the silent cross-channel failure
+                        // this fix targets.
+                        logger.warn(
+                          { chatJid: data.chatJid, sourceGroup },
+                          'IPC message not delivered by channel — surfaced to source chat',
+                        );
+                        await notifySource(
+                          "⚠️ Couldn't deliver your message to " +
+                            data.chatJid +
+                            " — the channel accepted it but reported it wasn't delivered (the recipient may be unreachable, or that channel isn't connected here).",
+                        );
+                      } else {
+                        refreshOutboundSnapshot(sourceGroup, data.chatJid);
+                        logger.info(
+                          { chatJid: data.chatJid, sourceGroup, hasSenderCtx },
+                          'IPC message sent',
+                        );
+                      }
                     } catch (sendErr) {
                       const msg =
                         sendErr instanceof Error

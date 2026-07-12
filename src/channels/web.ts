@@ -196,12 +196,13 @@ export class WebChannel implements Channel {
     jid: string,
     text: string,
     _opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const messageId = randomUUID();
     const timestamp = new Date().toISOString();
     const responses = this.streams.get(jid);
+    const delivered = !!responses && responses.length > 0;
 
-    if (!responses || responses.length === 0) {
+    if (!delivered) {
       // v1 limitation: no offline queue. If the visitor has no open SSE stream
       // (closed the tab, etc.) the reply is dropped — matching the other
       // channels' best-effort, fire-and-forget semantics.
@@ -211,7 +212,7 @@ export class WebChannel implements Channel {
       );
     } else {
       const frame = this.sseFrame({ type: 'message', text, timestamp });
-      for (const res of responses) {
+      for (const res of responses!) {
         try {
           res.write(frame);
         } catch (err) {
@@ -225,6 +226,8 @@ export class WebChannel implements Channel {
     } catch (err) {
       logger.warn({ err, jid }, 'storeOutboundMessage failed (continuing)');
     }
+
+    return delivered;
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {

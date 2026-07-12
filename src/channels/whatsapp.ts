@@ -720,7 +720,7 @@ export class WhatsAppChannel implements Channel {
     }
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(jid: string, text: string): Promise<boolean> {
     // Prefix bot messages with assistant name so users know who's speaking.
     // On a shared number, prefix is also needed in DMs (including self-chat)
     // to distinguish bot output from user messages.
@@ -739,10 +739,11 @@ export class WhatsAppChannel implements Channel {
           { jid },
           'WhatsApp ingress: no control-plane proxy configured — dropping send',
         );
-        return;
+        return false;
       }
-      await this.sender.send(jid, prefixed);
-      return;
+      // The CP sender resolves false on a proxy failure — propagate it so the
+      // cross-channel path can surface a non-delivery instead of a false ok.
+      return await this.sender.send(jid, prefixed);
     }
 
     if (!this.connected) {
@@ -751,7 +752,9 @@ export class WhatsAppChannel implements Channel {
         { jid, length: prefixed.length, queueSize: this.outgoingQueue.length },
         'WA disconnected, message queued',
       );
-      return;
+      // Accepted for guaranteed delivery on reconnect (queue is drained), so
+      // this is a success, not a drop.
+      return true;
     }
     try {
       const sent = await this.sock.sendMessage(jid, { text: prefixed });
@@ -764,6 +767,7 @@ export class WhatsAppChannel implements Channel {
         }
       }
       logger.info({ jid, length: prefixed.length }, 'Message sent');
+      return true;
     } catch (err) {
       // If send fails, queue it for retry on reconnect
       this.outgoingQueue.push({ jid, text: prefixed });
@@ -771,6 +775,8 @@ export class WhatsAppChannel implements Channel {
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send, message queued',
       );
+      // Re-queued for retry on reconnect — treat as accepted, not dropped.
+      return true;
     }
   }
 

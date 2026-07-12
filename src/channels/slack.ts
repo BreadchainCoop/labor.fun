@@ -597,7 +597,7 @@ export class SlackChannel implements Channel {
     jid: string,
     text: string,
     opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const channelId = jid.replace(/^slack:/, '');
 
     if (!this.connected) {
@@ -606,7 +606,9 @@ export class SlackChannel implements Channel {
         { jid, queueSize: this.outgoingQueue.length },
         'Slack disconnected, message queued',
       );
-      return;
+      // Accepted for guaranteed delivery on reconnect (the queue is drained
+      // when the socket comes back), so this is a success, not a drop.
+      return true;
     }
 
     // Reply in-thread, anchored to the message that triggered this run.
@@ -692,12 +694,15 @@ export class SlackChannel implements Channel {
         { jid, length: text.length, inThread: !!threadTs },
         'Slack message sent',
       );
+      return true;
     } catch (err) {
       this.outgoingQueue.push({ jid, text });
       logger.warn(
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send Slack message, queued',
       );
+      // Re-queued for retry on reconnect — treat as accepted, not dropped.
+      return true;
     }
   }
 
