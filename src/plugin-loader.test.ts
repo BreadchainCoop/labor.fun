@@ -35,6 +35,7 @@ describe('loadProfilePlugins', () => {
       registerChatFlow: vi.fn(),
       readEnvFile: vi.fn(() => ({})),
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      profileDir: '/tmp/fake-profile',
     };
   }
 
@@ -237,5 +238,100 @@ describe('loadProfilePlugins', () => {
 
     expect(loaded).toEqual([]);
     expect(api.registerIntegration).not.toHaveBeenCalled();
+  });
+
+  // --- M2a: per-plugin config plumbing (register receives config as arg #2) ---
+
+  it('passes each plugin its own config entry as the SECOND argument', async () => {
+    // A plugin that records the (api, config) it was called with into a global
+    // the test can read back. Two plugins, one config entry each.
+    const catalog = makeCatalogDir({
+      'alpha.mjs':
+        'export const id = "alpha";' +
+        'export default (api, config) => { globalThis.__alphaCfg = config; api.registerIntegration({ name: "alpha", start(){} }); };',
+      'beta.mjs':
+        'export const id = "beta";' +
+        'export default (api, config) => { globalThis.__betaCfg = config; api.registerIntegration({ name: "beta", start(){} }); };',
+    });
+    const api = fakeApi();
+    const loaded = await loadProfilePlugins({
+      pluginsDir: '/nonexistent/plugins',
+      catalogDir: catalog,
+      enabledPlugins: ['alpha', 'beta'],
+      pluginConfig: {
+        alpha: { foo: 1, who: ['alice'] },
+        beta: { bar: 'x' },
+      },
+      api,
+    });
+    expect(loaded.sort()).toEqual(['alpha.mjs', 'beta.mjs']);
+    expect((globalThis as Record<string, unknown>).__alphaCfg).toEqual({
+      foo: 1,
+      who: ['alice'],
+    });
+    expect((globalThis as Record<string, unknown>).__betaCfg).toEqual({
+      bar: 'x',
+    });
+    delete (globalThis as Record<string, unknown>).__alphaCfg;
+    delete (globalThis as Record<string, unknown>).__betaCfg;
+  });
+
+  it('(d) register receives {} (not undefined) when the plugin has no config', async () => {
+    const catalog = makeCatalogDir({
+      'noconf.mjs':
+        'export const id = "noconf";' +
+        'export default (api, config) => { globalThis.__noconfCfg = config; api.registerIntegration({ name: "noconf", start(){} }); };',
+    });
+    const api = fakeApi();
+    const loaded = await loadProfilePlugins({
+      pluginsDir: '/nonexistent/plugins',
+      catalogDir: catalog,
+      enabledPlugins: ['noconf'],
+      pluginConfig: {}, // nothing for this id
+      api,
+    });
+    expect(loaded).toEqual(['noconf.mjs']);
+    // Always an object — a plugin can safely destructure it.
+    expect((globalThis as Record<string, unknown>).__noconfCfg).toEqual({});
+    delete (globalThis as Record<string, unknown>).__noconfCfg;
+  });
+
+  it('(e) a legacy 1-arg register(api) plugin still registers fine (ignores arg #2)', async () => {
+    const dir = makePluginsDir({
+      // Classic one-arg signature — the second config argument is simply unused.
+      'legacy.mjs':
+        'export default (api) => api.registerIntegration({ name: "legacy", start(){} });',
+    });
+    const api = fakeApi();
+    const loaded = await loadProfilePlugins({
+      pluginsDir: dir,
+      catalogDir: '/nonexistent/catalog',
+      enabledPlugins: undefined, // gating off → profile plugin registers
+      pluginConfig: { legacy: { unused: true } },
+      api,
+    });
+    expect(loaded).toEqual(['legacy.mjs']);
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'legacy' }),
+    );
+  });
+
+  it('coerces a non-object config entry (array/scalar) to {} before passing it', async () => {
+    const catalog = makeCatalogDir({
+      'strict.mjs':
+        'export const id = "strict";' +
+        'export default (api, config) => { globalThis.__strictCfg = config; api.registerIntegration({ name: "strict", start(){} }); };',
+    });
+    const api = fakeApi();
+    await loadProfilePlugins({
+      pluginsDir: '/nonexistent/plugins',
+      catalogDir: catalog,
+      enabledPlugins: ['strict'],
+      // A malformed per-id entry (array) must not reach the plugin as-is.
+      pluginConfig: { strict: ['not', 'an', 'object'] as unknown as object },
+      api,
+    });
+    expect((globalThis as Record<string, unknown>).__strictCfg).toEqual({});
+    delete (globalThis as Record<string, unknown>).__strictCfg;
   });
 });

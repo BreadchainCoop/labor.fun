@@ -83,6 +83,7 @@ const envConfig = readEnvFile([
   'LABOR_PROFILE',
   'ENABLED_SKILLS',
   'ENABLED_PLUGINS',
+  'PLUGIN_CONFIG_JSON',
   'GATED_ACTION_CLASSES',
   'APPROVAL_TIMEOUT_MINUTES',
   'APPROVAL_EXPIRY_TICK_MS',
@@ -249,6 +250,77 @@ export const ENABLED_PLUGINS: string[] | undefined = (() => {
   if (!profileSet && !envSet) return undefined;
   return Array.from(new Set([...fromProfile, ...fromEnv].filter(Boolean)));
 })();
+
+// --- Per-plugin CONFIG (M2 of per-tenant plugins) ---
+// A JSON object keyed by plugin id, each value that plugin's own config object.
+// The loader passes `PLUGIN_CONFIG[<plugin id>] ?? {}` to a plugin's register
+// function as a second argument, so one catalog plugin can be parameterized
+// per-org WITHOUT forking its code. Two sources are merged AT THE ID LEVEL:
+//   - base:  the active profile's `pluginConfig` (profile.config.json), and
+//   - over:  the `PLUGIN_CONFIG_JSON` env var (hosted per-tenant injection),
+// where env's entry for a given plugin id REPLACES the profile's entry for that
+// id wholesale (a shallow, id-level merge — never a deep merge of the two config
+// objects). This mirrors how the control plane patches a tenant's env to
+// reconfigure a plugin without touching profile files.
+//
+// Malformed `PLUGIN_CONFIG_JSON` throws loudly at startup: a silently-ignored
+// tenant config looks like a working plugin that mysteriously runs on defaults.
+//
+// Pure + exported so the merge/parse/throw semantics are directly unit-testable
+// without re-importing this whole module under a synthetic profile.
+export function mergePluginConfig(
+  profilePluginConfig: unknown,
+  envRaw: string | undefined,
+): Record<string, unknown> {
+  // Base: the profile's pluginConfig. Present-but-not-an-object → fail loudly
+  // (a stray array/string here is a config typo, not "no config").
+  let fromProfile: Record<string, unknown> = {};
+  if (profilePluginConfig !== undefined) {
+    if (
+      typeof profilePluginConfig !== 'object' ||
+      profilePluginConfig === null ||
+      Array.isArray(profilePluginConfig)
+    ) {
+      throw new Error(
+        'profile.config.json `pluginConfig` must be an object keyed by plugin id.',
+      );
+    }
+    fromProfile = profilePluginConfig as Record<string, unknown>;
+  }
+
+  // Over: the env var (hosted per-tenant injection). Malformed → throw.
+  let fromEnv: Record<string, unknown> = {};
+  if (envRaw && envRaw.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(envRaw);
+    } catch (err) {
+      throw new Error(
+        `PLUGIN_CONFIG_JSON env var is not valid JSON: ${(err as Error).message}`,
+        { cause: err },
+      );
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error(
+        'PLUGIN_CONFIG_JSON env var must be a JSON object keyed by plugin id.',
+      );
+    }
+    fromEnv = parsed as Record<string, unknown>;
+  }
+
+  // Shallow, id-level merge: env's entry for an id replaces the profile's entry
+  // for that id wholesale (not a deep object merge).
+  return { ...fromProfile, ...fromEnv };
+}
+
+export const PLUGIN_CONFIG: Record<string, unknown> = mergePluginConfig(
+  PROFILE.pluginConfig,
+  envVal('PLUGIN_CONFIG_JSON'),
+);
 
 // Absolute path to the baked first-party plugin CATALOG. Two layouts:
 //   - orchestrator image: /app/catalog-plugins (Dockerfile.orchestrator COPYs
