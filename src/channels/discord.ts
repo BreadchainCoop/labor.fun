@@ -14,12 +14,19 @@ import {
   DISCORD_DM_ALLOWED_GUILD_IDS,
   DISCORD_DM_ALLOWED_ROLE_IDS,
   DISCORD_DM_ROLE_REFRESH_INTERVAL,
+  INGRESS_HTTP_PORT,
   TRIGGER_PATTERN,
 } from '../config.js';
 import { storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { DiscordSender, discordSenderConfig } from './discord-sender.js';
+import {
+  getIngressHttpServer,
+  type IngressHttpServer,
+} from './ingress-http-server.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { verifyIngressSignature } from './slack-http-receiver.js';
 import {
   Channel,
   OnChatMetadata,
@@ -34,6 +41,72 @@ export interface DiscordChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   deregisterGroup: (jid: string) => void;
+  // --- Shared-bot INGRESS mode (hosted SaaS) ---
+  // When set, the channel runs WITHOUT a bot token / discord.js Client: the
+  // control plane POSTs raw Discord message JSON to /discord/messages
+  // (HMAC-signed with ingressSecret) and all outbound is proxied back through
+  // the CP. Gateway (BYO-token) mode leaves this unset.
+  ingressSecret?: string;
+  // Optional bot identity hint for ingress mode. Without a token there is no
+  // ready-event user id, so @mention translation and reply-to-bot detection
+  // need this to work; when absent, those features degrade to OFF (see
+  // processRawMessage / handleInboundMessage). Trigger-word (ASSISTANT_NAME)
+  // mentions still work regardless.
+  botId?: string;
+}
+
+/**
+ * Transport-agnostic view of the fields the per-message logic needs off an
+ * inbound Discord message. The gateway handler adapts a discord.js `Message`
+ * into this shape; the ingress path fills it from the raw Discord message JSON
+ * the control plane forwards. Keeping the core handler keyed off THIS shape
+ * (not a discord.js Message) is what lets both transports share the exact same
+ * trigger / auto-register / naming / delivery logic.
+ */
+interface InboundDiscordAttachment {
+  name?: string | null;
+  url?: string;
+  contentType?: string | null;
+}
+interface InboundDiscordAuthor {
+  id: string;
+  bot?: boolean;
+  username?: string;
+  displayName?: string;
+}
+interface InboundDiscordReplyTo {
+  messageId: string;
+  content?: string;
+  senderName?: string;
+  isBot?: boolean;
+}
+interface InboundDiscord {
+  channelId: string;
+  // Whether this message is in a guild (server) vs a DM. Derived from the
+  // presence of a guild on the source message — NOT from a guild id (which a
+  // DM lacks and which the CP may omit). Drives isGroup + chat-name shape.
+  guildPresent: boolean;
+  guildId?: string | null;
+  guildName?: string | null;
+  channelName?: string | null;
+  parentId?: string | null;
+  parentName?: string | null;
+  isThread: boolean;
+  messageId: string;
+  content: string;
+  timestamp: string; // ISO 8601
+  author: InboundDiscordAuthor;
+  memberDisplayName?: string;
+  attachments: InboundDiscordAttachment[];
+  // Bot-role mention ids present on this message that the bot itself holds —
+  // gateway resolves these from guild member roles; ingress leaves it empty
+  // (no member cache), which degrades role-mention triggering to off.
+  mentionedBotRoleIds: string[];
+  // Whether the message @-mentions the bot user directly (by <@id> token or
+  // resolved user mention). Gateway computes this off the Client user; ingress
+  // computes it from the botId hint (off when the hint is absent).
+  mentionsBotUser: boolean;
+  replyTo?: InboundDiscordReplyTo;
 }
 
 const DM_FOLDER_PREFIX = 'discord_dm_';
@@ -236,6 +309,34 @@ export function toHistoryMessage(
   };
 }
 
+/**
+ * Discord channel. Runs in one of two transports, chosen by the factory:
+ *
+ *   • GATEWAY (BYO bot token) — a discord.js Client over the Gateway WS. Full
+ *     fidelity: threading, attachment download hints, member/role fetches, DMs.
+ *
+ *   • INGRESS (shared-bot, hosted SaaS) — NO discord.js Client and NO token.
+ *     The control plane owns the platform bot; it forwards signed message JSON
+ *     to POST /discord/messages (on the shared INGRESS_HTTP_PORT listener) and
+ *     the channel proxies ALL outbound (send/edit/delete/typing/reaction) back
+ *     through the CP via {@link DiscordSender} → POST /api/instance/discord/send.
+ *
+ * Inbound parsing, trigger translation, auto-register, chat naming, and
+ * onMessage delivery are transport-agnostic ({@link handleInboundMessage}); the
+ * gateway and ingress paths only differ in how they FILL the InboundDiscord and
+ * how they SEND. Documented ingress-only degradations (no Client/token/cache):
+ *
+ *   - @bot-USER mention triggering works only when the DISCORD_BOT_ID hint is
+ *     set; @bot-ROLE mention triggering is off (no guild member-role cache).
+ *   - reply-to context uses only the CP-embedded referenced_message (no
+ *     on-demand fetch of an uncached referenced message).
+ *   - role-based DM auto-allowlisting is off (no guild member fetch).
+ *   - attachment DOWNLOAD is unavailable; CDN URLs are still surfaced inline.
+ *   - outbound threading is the CP's concern (no local thread handles); a
+ *     `dc-dm:<userId>` send can't be resolved to a channel and is dropped.
+ *   - reactions/typing target the recorded thread channel of a re-routed
+ *     message when known, else the jid's channel.
+ */
 export class DiscordChannel implements Channel {
   name = 'discord';
 
@@ -260,12 +361,27 @@ export class DiscordChannel implements Channel {
   private messageChannelOverride = new Map<string, string>();
   private static readonly MESSAGE_CHANNEL_OVERRIDE_MAX = 500;
 
+  // --- Ingress mode state ---
+  private readonly ingress: boolean;
+  private readonly ingressSecret: string | undefined;
+  private readonly ingressBotId: string | undefined;
+  private sender: DiscordSender | null = null;
+  private ingressServer: IngressHttpServer | null = null;
+  private ingressConnected = false;
+
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
     this.opts = opts;
+    // Ingress mode iff no token and an ingress secret is provided.
+    this.ingress = !botToken && !!opts.ingressSecret;
+    this.ingressSecret = opts.ingressSecret;
+    this.ingressBotId = opts.botId;
   }
 
   async connect(): Promise<void> {
+    if (this.ingress) {
+      return this.connectIngress();
+    }
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -280,248 +396,8 @@ export class DiscordChannel implements Channel {
       partials: [Partials.Channel, Partials.Message, Partials.Reaction],
     });
 
-    this.client.on(Events.MessageCreate, async (message: Message) => {
-      // Ignore bot messages (including own)
-      if (message.author.bot) return;
-
-      const channelId = message.channelId;
-      // If the message is in a Discord thread whose parent channel is a
-      // registered group, route it through the parent's jid so the agent
-      // sees a stable chat identity across the thread and its parent.
-      let effectiveChannelId = channelId;
-      const inboundChannel = message.channel as {
-        isThread?: () => boolean;
-        parentId?: string | null;
-      };
-      const inboundIsThread =
-        typeof inboundChannel.isThread === 'function' &&
-        inboundChannel.isThread();
-      if (inboundIsThread && inboundChannel.parentId) {
-        const parentJid = `dc:${inboundChannel.parentId}`;
-        if (this.opts.registeredGroups()[parentJid]) {
-          effectiveChannelId = inboundChannel.parentId;
-        }
-      }
-      const chatJid = `dc:${effectiveChannelId}`;
-      let content = message.content;
-      const timestamp = message.createdAt.toISOString();
-      const senderName =
-        message.member?.displayName ||
-        message.author.displayName ||
-        message.author.username;
-      const sender = message.author.id;
-      const msgId = message.id;
-
-      // Determine chat name. When the inbound message is in a thread but
-      // we're routing it under the parent's jid, use the parent's name so
-      // onChatMetadata's name upsert doesn't overwrite the parent group's
-      // stored name with the thread's transient title.
-      let chatName: string;
-      if (message.guild) {
-        if (inboundIsThread && effectiveChannelId !== channelId) {
-          const parent = (
-            inboundChannel as { parent?: { name?: string } | null }
-          ).parent;
-          const parentName = parent?.name ?? 'unknown';
-          chatName = `${message.guild.name} #${parentName}`;
-        } else {
-          const textChannel = message.channel as TextChannel;
-          chatName = `${message.guild.name} #${textChannel.name}`;
-        }
-      } else {
-        chatName = senderName;
-      }
-
-      // Translate Discord @bot mentions into TRIGGER_PATTERN format.
-      // Discord encodes mentions as <@userId> (user), <@!userId> (nick
-      // variant) and <@&roleId> (role). We treat any of these as a bot
-      // mention when they resolve to the bot's user OR to a role the bot
-      // itself holds — Discord's autocomplete will frequently pick a
-      // role mention when a role shares the bot's display name.
-      if (this.client?.user) {
-        const botId = this.client.user.id;
-        const botRoleIds = new Set<string>();
-        const me = message.guild?.members?.me;
-        if (me) {
-          for (const roleId of me.roles.cache.keys()) {
-            botRoleIds.add(roleId);
-          }
-        }
-        const roleKeys = message.mentions.roles?.keys
-          ? [...message.mentions.roles.keys()]
-          : [];
-        const mentionedBotRoleIds = roleKeys.filter((roleId) =>
-          botRoleIds.has(roleId),
-        );
-        const isBotMentioned =
-          message.mentions.users.has(botId) ||
-          content.includes(`<@${botId}>`) ||
-          content.includes(`<@!${botId}>`) ||
-          mentionedBotRoleIds.length > 0;
-
-        if (isBotMentioned) {
-          // Strip both user and bot-role mention tokens to avoid clutter.
-          content = content.replace(new RegExp(`<@!?${botId}>`, 'g'), '');
-          for (const roleId of mentionedBotRoleIds) {
-            content = content.replace(new RegExp(`<@&${roleId}>`, 'g'), '');
-          }
-          content = content.trim();
-          // Prepend trigger if not already present
-          if (!TRIGGER_PATTERN.test(content)) {
-            content = `@${ASSISTANT_NAME} ${content}`;
-          }
-        }
-      }
-
-      // Handle attachments — include the CDN URL alongside the filename so
-      // the agent can fetch and read file contents (RTF, TXT, PDF, CSV, etc.)
-      // via WebFetch. Images include the URL for potential vision processing.
-      // Video and audio are noted by name only since they cannot be fetched
-      // and processed as text.
-      if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map(
-          (att) => {
-            const contentType = att.contentType || '';
-            if (contentType.startsWith('image/')) {
-              return `[Image: ${att.name || 'image'} | ${att.url}]`;
-            } else if (contentType.startsWith('video/')) {
-              return `[Video: ${att.name || 'video'}]`;
-            } else if (contentType.startsWith('audio/')) {
-              return `[Audio: ${att.name || 'audio'}]`;
-            } else {
-              return `[File: ${att.name || 'file'} | ${att.url}]`;
-            }
-          },
-        );
-        if (content) {
-          content = `${content}\n${attachmentDescriptions.join('\n')}`;
-        } else {
-          content = attachmentDescriptions.join('\n');
-        }
-      }
-
-      // Handle reply context. In addition to the human-readable annotation
-      // (appended at the END so an @-mention trigger at the start of the
-      // user's message is still matched by the anchored trigger regex —
-      // prepending would silently block a reply that also @-mentions the
-      // bot), capture the STRUCTURED reply fields so the agent's context
-      // renders the quoted message. Without these, a reply only showed up as
-      // "[In reply to X]" with no idea WHICH message or its content (#95-adjacent).
-      let replyToMessageId: string | undefined;
-      let replyToContent: string | undefined;
-      let replyToSenderName: string | undefined;
-      let isReplyToBot = false;
-      if (message.reference?.messageId) {
-        replyToMessageId = message.reference.messageId;
-        try {
-          const repliedTo = await message.channel.messages.fetch(
-            message.reference.messageId,
-          );
-          replyToSenderName =
-            repliedTo.member?.displayName ||
-            repliedTo.author.displayName ||
-            repliedTo.author.username;
-          replyToContent = repliedTo.content || undefined;
-          isReplyToBot = repliedTo.author.id === this.client?.user?.id;
-          content = `${content}\n[In reply to ${replyToSenderName}]`;
-        } catch {
-          // Referenced message may have been deleted / is uncached. Keep the
-          // id we have so the reply linkage isn't lost entirely.
-        }
-      }
-
-      // Store chat metadata for discovery
-      const isGroup = message.guild !== null;
-      this.opts.onChatMetadata(
-        chatJid,
-        timestamp,
-        chatName,
-        'discord',
-        isGroup,
-      );
-
-      // Only deliver full message for registered groups. If this is a DM
-      // from an as-yet-unregistered chat AND the sender holds an allowlisted
-      // Discord role in a shared guild, auto-register the DM and continue.
-      let group = this.opts.registeredGroups()[chatJid];
-      if (!group) {
-        const isDm = message.guild === null;
-        if (
-          isDm &&
-          this.client &&
-          DISCORD_DM_ALLOWED_ROLE_IDS.length > 0 &&
-          (await userHasAllowedRole(this.client, sender))
-        ) {
-          const folder = `${DM_FOLDER_PREFIX}${channelId}`;
-          const newGroup: RegisteredGroup = {
-            name: `DM @${senderName}`,
-            folder,
-            trigger: `@${ASSISTANT_NAME}`,
-            added_at: new Date().toISOString(),
-            requiresTrigger: false,
-          };
-          this.opts.registerGroup(chatJid, newGroup);
-          group = this.opts.registeredGroups()[chatJid];
-          logger.info(
-            { chatJid, senderName, sender, folder },
-            'Auto-allowlisted DM via Discord role',
-          );
-        }
-        if (!group) {
-          logger.debug(
-            { chatJid, chatName },
-            'Message from unregistered Discord channel',
-          );
-          return;
-        }
-      }
-
-      // Remember this message so the next outbound reply lands in a thread:
-      // either the thread it already lives in, or a new thread started on it.
-      this.lastReplyAnchor.set(chatJid, message);
-      // Also index by message id so a reply can be pinned to the exact
-      // triggering message (concurrency-safe), with simple LRU eviction.
-      this.inboundById.set(msgId, message);
-      if (this.inboundById.size > DiscordChannel.INBOUND_BY_ID_MAX) {
-        const oldestKey = this.inboundById.keys().next().value;
-        if (oldestKey !== undefined) this.inboundById.delete(oldestKey);
-      }
-      // If we re-routed this thread message under its parent's jid, record
-      // the message's real channel so reactions/typing target the thread,
-      // not the parent. (Map.set re-inserts to the end, giving us oldest-
-      // first iteration for the simple LRU eviction below.)
-      if (inboundIsThread && effectiveChannelId !== channelId) {
-        this.messageChannelOverride.set(msgId, channelId);
-        if (
-          this.messageChannelOverride.size >
-          DiscordChannel.MESSAGE_CHANNEL_OVERRIDE_MAX
-        ) {
-          const oldestKey = this.messageChannelOverride.keys().next().value;
-          if (oldestKey !== undefined) {
-            this.messageChannelOverride.delete(oldestKey);
-          }
-        }
-      }
-
-      // Deliver message — startMessageLoop() will pick it up
-      this.opts.onMessage(chatJid, {
-        id: msgId,
-        chat_jid: chatJid,
-        sender,
-        sender_name: senderName,
-        content,
-        timestamp,
-        is_from_me: false,
-        reply_to_message_id: replyToMessageId,
-        reply_to_message_content: replyToContent,
-        reply_to_sender_name: replyToSenderName,
-        is_reply_to_bot: isReplyToBot,
-      });
-
-      logger.info(
-        { chatJid, chatName, sender: senderName },
-        'Discord message stored',
-      );
+    this.client.on(Events.MessageCreate, (message: Message) => {
+      void this.handleGatewayMessage(message);
     });
 
     // Handle errors gracefully
@@ -557,6 +433,502 @@ export class DiscordChannel implements Channel {
 
       this.client!.login(this.botToken);
     });
+  }
+
+  // ─── Gateway → transport-agnostic adapter ────────────────────────────────
+  // Resolves the async / Client-cache-dependent bits (replied-to message,
+  // bot-role mentions) off a discord.js Message, packs them into an
+  // InboundDiscord, then hands off to the shared handleInboundMessage core.
+  // This keeps trigger-matching / auto-register / naming / delivery identical
+  // between gateway and ingress transports.
+  private async handleGatewayMessage(message: Message): Promise<void> {
+    // Ignore bot messages (including own)
+    if (message.author.bot) return;
+
+    const inboundChannel = message.channel as {
+      isThread?: () => boolean;
+      parentId?: string | null;
+      name?: string | null;
+      parent?: { name?: string } | null;
+    };
+    const isThread =
+      typeof inboundChannel.isThread === 'function' &&
+      inboundChannel.isThread();
+
+    // Compute bot-user / bot-role mention flags off the Client + guild cache.
+    let mentionsBotUser = false;
+    let mentionedBotRoleIds: string[] = [];
+    if (this.client?.user) {
+      const botId = this.client.user.id;
+      const botRoleIds = new Set<string>();
+      const me = message.guild?.members?.me;
+      if (me) {
+        for (const roleId of me.roles.cache.keys()) botRoleIds.add(roleId);
+      }
+      const roleKeys = message.mentions.roles?.keys
+        ? [...message.mentions.roles.keys()]
+        : [];
+      mentionedBotRoleIds = roleKeys.filter((roleId) => botRoleIds.has(roleId));
+      mentionsBotUser =
+        message.mentions.users.has(botId) ||
+        message.content.includes(`<@${botId}>`) ||
+        message.content.includes(`<@!${botId}>`);
+    }
+
+    // Resolve reply context (async fetch of the referenced message).
+    let replyTo: InboundDiscordReplyTo | undefined;
+    if (message.reference?.messageId) {
+      replyTo = { messageId: message.reference.messageId };
+      try {
+        const repliedTo = await message.channel.messages.fetch(
+          message.reference.messageId,
+        );
+        replyTo.senderName =
+          repliedTo.member?.displayName ||
+          repliedTo.author.displayName ||
+          repliedTo.author.username;
+        replyTo.content = repliedTo.content || undefined;
+        replyTo.isBot = repliedTo.author.id === this.client?.user?.id;
+      } catch {
+        // Referenced message may have been deleted / is uncached. Keep the id
+        // we have so the reply linkage isn't lost entirely.
+      }
+    }
+
+    const inbound: InboundDiscord = {
+      channelId: message.channelId,
+      guildPresent: !!message.guild,
+      guildId: message.guild?.id ?? null,
+      guildName: message.guild?.name ?? null,
+      channelName: (message.channel as TextChannel).name ?? null,
+      parentId: inboundChannel.parentId ?? null,
+      parentName: inboundChannel.parent?.name ?? null,
+      isThread,
+      messageId: message.id,
+      content: message.content,
+      timestamp: message.createdAt.toISOString(),
+      author: {
+        id: message.author.id,
+        bot: message.author.bot,
+        username: message.author.username,
+        displayName: message.author.displayName,
+      },
+      memberDisplayName: message.member?.displayName,
+      attachments: [...message.attachments.values()].map((att) => ({
+        name: att.name,
+        url: att.url,
+        contentType: att.contentType,
+      })),
+      mentionedBotRoleIds,
+      mentionsBotUser,
+      replyTo,
+    };
+
+    await this.handleInboundMessage(inbound, message);
+  }
+
+  // ─── Transport-agnostic per-message core ─────────────────────────────────
+  // Takes an InboundDiscord (NOT a discord.js Message). The gateway adapter
+  // fills it from a Message; the ingress path fills it from the raw forwarded
+  // JSON. `gatewayMessage`, when present (gateway only), is used purely for
+  // the outbound-threading bookkeeping (anchor maps) — ingress has no Message
+  // and threads outbound via the CP proxy instead.
+  private async handleInboundMessage(
+    inbound: InboundDiscord,
+    gatewayMessage?: Message,
+  ): Promise<void> {
+    // Ignore bot messages (including own).
+    if (inbound.author.bot) return;
+
+    const channelId = inbound.channelId;
+    // If the message is in a Discord thread whose parent channel is a
+    // registered group, route it through the parent's jid so the agent sees a
+    // stable chat identity across the thread and its parent.
+    let effectiveChannelId = channelId;
+    if (inbound.isThread && inbound.parentId) {
+      const parentJid = `dc:${inbound.parentId}`;
+      if (this.opts.registeredGroups()[parentJid]) {
+        effectiveChannelId = inbound.parentId;
+      }
+    }
+    const chatJid = `dc:${effectiveChannelId}`;
+    let content = inbound.content;
+    const timestamp = inbound.timestamp;
+    const senderName =
+      inbound.memberDisplayName ||
+      inbound.author.displayName ||
+      inbound.author.username ||
+      inbound.author.id;
+    const sender = inbound.author.id;
+    const msgId = inbound.messageId;
+    const isGuild = inbound.guildPresent;
+
+    // Determine chat name. When the inbound message is in a thread but we're
+    // routing it under the parent's jid, use the parent's name so
+    // onChatMetadata's name upsert doesn't overwrite the parent group's stored
+    // name with the thread's transient title.
+    let chatName: string;
+    if (isGuild) {
+      if (inbound.isThread && effectiveChannelId !== channelId) {
+        const parentName = inbound.parentName ?? 'unknown';
+        chatName = `${inbound.guildName} #${parentName}`;
+      } else {
+        chatName = `${inbound.guildName} #${inbound.channelName ?? 'unknown'}`;
+      }
+    } else {
+      chatName = senderName;
+    }
+
+    // Translate Discord @bot mentions into TRIGGER_PATTERN format. Discord
+    // encodes mentions as <@userId> (user), <@!userId> (nick variant) and
+    // <@&roleId> (role). We treat any of these as a bot mention when they
+    // resolve to the bot's user OR to a role the bot itself holds — Discord's
+    // autocomplete frequently picks a role mention when a role shares the bot's
+    // display name. In ingress mode without a botId hint mentionsBotUser is
+    // false and mentionedBotRoleIds is empty (no member cache), so @mention
+    // translation degrades to off (documented). Trigger-word mentions still
+    // work regardless.
+    const isBotMentioned =
+      inbound.mentionsBotUser || inbound.mentionedBotRoleIds.length > 0;
+    if (isBotMentioned) {
+      // Strip both user and bot-role mention tokens to avoid clutter. Use the
+      // botId hint (gateway resolves it into mentionsBotUser; ingress passes
+      // the raw id) so the <@id> token is removed on either transport.
+      const botId = this.client?.user?.id ?? this.ingressBotId;
+      if (botId) {
+        content = content.replace(new RegExp(`<@!?${botId}>`, 'g'), '');
+      }
+      for (const roleId of inbound.mentionedBotRoleIds) {
+        content = content.replace(new RegExp(`<@&${roleId}>`, 'g'), '');
+      }
+      content = content.trim();
+      // Prepend trigger if not already present.
+      if (!TRIGGER_PATTERN.test(content)) {
+        content = `@${ASSISTANT_NAME} ${content}`;
+      }
+    }
+
+    // Handle attachments — include the CDN URL alongside the filename so the
+    // agent can fetch and read file contents (RTF, TXT, PDF, CSV, etc.) via
+    // WebFetch. Images include the URL for potential vision processing. Video
+    // and audio are noted by name only since they cannot be fetched as text.
+    if (inbound.attachments.length > 0) {
+      const attachmentDescriptions = inbound.attachments.map((att) => {
+        const contentType = att.contentType || '';
+        if (contentType.startsWith('image/')) {
+          return `[Image: ${att.name || 'image'} | ${att.url}]`;
+        } else if (contentType.startsWith('video/')) {
+          return `[Video: ${att.name || 'video'}]`;
+        } else if (contentType.startsWith('audio/')) {
+          return `[Audio: ${att.name || 'audio'}]`;
+        } else {
+          return `[File: ${att.name || 'file'} | ${att.url}]`;
+        }
+      });
+      if (content) {
+        content = `${content}\n${attachmentDescriptions.join('\n')}`;
+      } else {
+        content = attachmentDescriptions.join('\n');
+      }
+    }
+
+    // Handle reply context. The human-readable annotation is appended at the
+    // END so an @-mention trigger at the start of the user's message is still
+    // matched by the anchored trigger regex (prepending would silently block a
+    // reply that also @-mentions the bot). The STRUCTURED reply fields let the
+    // agent's context render the quoted message.
+    let replyToMessageId: string | undefined;
+    let replyToContent: string | undefined;
+    let replyToSenderName: string | undefined;
+    let isReplyToBot = false;
+    if (inbound.replyTo) {
+      replyToMessageId = inbound.replyTo.messageId;
+      replyToContent = inbound.replyTo.content;
+      replyToSenderName = inbound.replyTo.senderName;
+      isReplyToBot = !!inbound.replyTo.isBot;
+      if (replyToSenderName) {
+        content = `${content}\n[In reply to ${replyToSenderName}]`;
+      }
+    }
+
+    // Store chat metadata for discovery
+    this.opts.onChatMetadata(chatJid, timestamp, chatName, 'discord', isGuild);
+
+    // Only deliver full message for registered groups. If this is a DM from an
+    // as-yet-unregistered chat AND the sender holds an allowlisted Discord role
+    // in a shared guild, auto-register the DM and continue. Role-based DM
+    // allowlisting is gateway-only (needs the guild member cache); in ingress
+    // mode userHasAllowedRole has no Client so it's skipped (documented).
+    let group = this.opts.registeredGroups()[chatJid];
+    if (!group) {
+      const isDm = !isGuild;
+      if (
+        isDm &&
+        this.client &&
+        DISCORD_DM_ALLOWED_ROLE_IDS.length > 0 &&
+        (await userHasAllowedRole(this.client, sender))
+      ) {
+        const folder = `${DM_FOLDER_PREFIX}${channelId}`;
+        const newGroup: RegisteredGroup = {
+          name: `DM @${senderName}`,
+          folder,
+          trigger: `@${ASSISTANT_NAME}`,
+          added_at: new Date().toISOString(),
+          requiresTrigger: false,
+        };
+        this.opts.registerGroup(chatJid, newGroup);
+        group = this.opts.registeredGroups()[chatJid];
+        logger.info(
+          { chatJid, senderName, sender, folder },
+          'Auto-allowlisted DM via Discord role',
+        );
+      }
+      if (!group) {
+        logger.debug(
+          { chatJid, chatName },
+          'Message from unregistered Discord channel',
+        );
+        return;
+      }
+    }
+
+    // Outbound-threading bookkeeping — gateway only. These anchor maps hold
+    // discord.js Message handles used to start/target a thread on the next
+    // reply. Ingress has no Message; its outbound goes through the CP proxy by
+    // channelId, so threading is the CP's concern and these are skipped.
+    if (gatewayMessage) {
+      // Remember this message so the next outbound reply lands in a thread:
+      // either the thread it already lives in, or a new thread started on it.
+      this.lastReplyAnchor.set(chatJid, gatewayMessage);
+      // Also index by message id so a reply can be pinned to the exact
+      // triggering message (concurrency-safe), with simple LRU eviction.
+      this.inboundById.set(msgId, gatewayMessage);
+      if (this.inboundById.size > DiscordChannel.INBOUND_BY_ID_MAX) {
+        const oldestKey = this.inboundById.keys().next().value;
+        if (oldestKey !== undefined) this.inboundById.delete(oldestKey);
+      }
+      // If we re-routed this thread message under its parent's jid, record the
+      // message's real channel so reactions/typing target the thread, not the
+      // parent. (Map.set re-inserts to the end → oldest-first LRU eviction.)
+      if (inbound.isThread && effectiveChannelId !== channelId) {
+        this.messageChannelOverride.set(msgId, channelId);
+        if (
+          this.messageChannelOverride.size >
+          DiscordChannel.MESSAGE_CHANNEL_OVERRIDE_MAX
+        ) {
+          const oldestKey = this.messageChannelOverride.keys().next().value;
+          if (oldestKey !== undefined) {
+            this.messageChannelOverride.delete(oldestKey);
+          }
+        }
+      }
+    } else if (inbound.isThread && effectiveChannelId !== channelId) {
+      // Ingress: still record the real channel of a re-routed thread message so
+      // reactions/typing proxy to the thread rather than the parent.
+      this.messageChannelOverride.set(msgId, channelId);
+      if (
+        this.messageChannelOverride.size >
+        DiscordChannel.MESSAGE_CHANNEL_OVERRIDE_MAX
+      ) {
+        const oldestKey = this.messageChannelOverride.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.messageChannelOverride.delete(oldestKey);
+        }
+      }
+    }
+
+    // Deliver message — startMessageLoop() will pick it up
+    this.opts.onMessage(chatJid, {
+      id: msgId,
+      chat_jid: chatJid,
+      sender,
+      sender_name: senderName,
+      content,
+      timestamp,
+      is_from_me: false,
+      reply_to_message_id: replyToMessageId,
+      reply_to_message_content: replyToContent,
+      reply_to_sender_name: replyToSenderName,
+      is_reply_to_bot: isReplyToBot,
+    });
+
+    logger.info(
+      { chatJid, chatName, sender: senderName },
+      'Discord message stored',
+    );
+  }
+
+  // ─── Shared-bot INGRESS transport ────────────────────────────────────────
+
+  /**
+   * Connect in ingress mode: register /discord/messages on the shared ingress
+   * HTTP server (same port as the slack + telegram receivers) and wire up the
+   * outbound control-plane proxy. No discord.js Client is constructed.
+   */
+  private async connectIngress(): Promise<void> {
+    const cfg = discordSenderConfig();
+    if (cfg) {
+      this.sender = new DiscordSender(cfg);
+    } else {
+      // Inbound still works; outbound will no-op until CONTROL_PLANE_* is set.
+      logger.warn(
+        'Discord ingress: CONTROL_PLANE_URL/TOKEN not set — outbound sends will be dropped',
+      );
+    }
+
+    const secret = this.ingressSecret!;
+    const server = getIngressHttpServer(INGRESS_HTTP_PORT, logger);
+    this.ingressServer = server;
+    server.registerRoute('POST', '/discord/messages', (rawBody, req, res) => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const verified = verifyIngressSignature({
+        ingressSecret: secret,
+        rawBody,
+        timestamp: header(req, 'x-labor-ingress-timestamp'),
+        signature: header(req, 'x-labor-ingress-signature'),
+        nowSeconds,
+      });
+      if (!verified) {
+        logger.warn(
+          { url: req.url },
+          'Discord ingress rejected request (signature verification failed)',
+        );
+        res.writeHead(401);
+        res.end('Unauthorized');
+        return;
+      }
+
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(rawBody);
+      } catch {
+        res.writeHead(400);
+        res.end('Bad Request');
+        return;
+      }
+
+      // Ack immediately (200), THEN process async — fire-and-forget so slow
+      // handlers never delay the ack (mirrors the slack/telegram receivers).
+      res.writeHead(200);
+      res.end();
+      void this.processRawMessage(parsed);
+    });
+
+    await server.start();
+    this.ingressConnected = true;
+    logger.info(
+      { port: INGRESS_HTTP_PORT, botId: this.ingressBotId },
+      'Discord ingress connected (shared-bot mode)',
+    );
+  }
+
+  /**
+   * Translate a raw Discord message object (forwarded by the control plane)
+   * into the transport-agnostic handleInboundMessage core. The CP forwards the
+   * Discord Gateway MESSAGE_CREATE payload; we read the same fields the gateway
+   * adapter reads off a discord.js Message.
+   *
+   * Degradations vs gateway (no Client / member cache / API):
+   *  - @bot-user mention triggering works only when the botId hint is set.
+   *  - @bot-ROLE mention triggering is off (no member-role cache).
+   *  - reply-to context uses only what the CP embedded (referenced_message);
+   *    no on-demand fetch of an uncached referenced message.
+   *  - role-based DM auto-allowlisting is off (no guild member fetch).
+   *  - attachment DOWNLOAD is not available (URLs are still surfaced to the
+   *    agent inline, same as gateway).
+   */
+  private async processRawMessage(raw: Record<string, unknown>): Promise<void> {
+    try {
+      // The CP may wrap the message ({ message: {...} }) or forward it bare.
+      const msg = (
+        raw.message && typeof raw.message === 'object' ? raw.message : raw
+      ) as Record<string, any>;
+      const channelId: string | undefined = msg.channel_id ?? msg.channelId;
+      const author = msg.author as Record<string, any> | undefined;
+      if (!channelId || !author?.id) return;
+
+      const guildId: string | null =
+        msg.guild_id ?? msg.guildId ?? raw.guild_id ?? raw.guildId ?? null;
+
+      // Thread routing hints: the CP may enrich with parent/thread info. Absent
+      // that, a message carries no parent so it's treated as a top-level chan.
+      const parentId: string | null = msg.parent_id ?? msg.parentId ?? null;
+      const isThread: boolean = Boolean(
+        msg.is_thread ?? msg.isThread ?? (parentId ? true : false),
+      );
+
+      // Detect a direct @bot-user mention from the mentions array or the raw
+      // <@id> token, using the botId hint (off when the hint is absent).
+      const botId = this.ingressBotId;
+      let mentionsBotUser = false;
+      if (botId) {
+        const content = typeof msg.content === 'string' ? msg.content : '';
+        const mentions = Array.isArray(msg.mentions) ? msg.mentions : [];
+        mentionsBotUser =
+          mentions.some((m: any) => (m?.id ?? m) === botId) ||
+          content.includes(`<@${botId}>`) ||
+          content.includes(`<@!${botId}>`);
+      }
+
+      // Reply context from an embedded referenced_message (no fetch in ingress).
+      let replyTo: InboundDiscordReplyTo | undefined;
+      const refId: string | undefined =
+        msg.referenced_message?.id ??
+        (msg.message_reference as Record<string, any> | undefined)?.message_id;
+      if (refId) {
+        const ref = msg.referenced_message as Record<string, any> | undefined;
+        const refAuthor = ref?.author as Record<string, any> | undefined;
+        replyTo = {
+          messageId: refId,
+          content: ref?.content || undefined,
+          senderName: refAuthor
+            ? ref?.member?.nick ||
+              refAuthor.global_name ||
+              refAuthor.username ||
+              undefined
+            : undefined,
+          isBot: botId ? refAuthor?.id === botId : false,
+        };
+      }
+
+      const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+
+      const inbound: InboundDiscord = {
+        channelId,
+        guildPresent: guildId !== null,
+        guildId,
+        guildName: msg.guild_name ?? raw.guild_name ?? null,
+        channelName: msg.channel_name ?? raw.channel_name ?? null,
+        parentId,
+        parentName: msg.parent_name ?? raw.parent_name ?? null,
+        isThread,
+        messageId: String(msg.id ?? ''),
+        content: typeof msg.content === 'string' ? msg.content : '',
+        timestamp: msg.timestamp
+          ? new Date(msg.timestamp).toISOString()
+          : new Date().toISOString(),
+        author: {
+          id: String(author.id),
+          bot: Boolean(author.bot),
+          username: author.username,
+          displayName: author.global_name ?? author.displayName,
+        },
+        memberDisplayName: msg.member?.nick ?? undefined,
+        attachments: attachments.map((a: any) => ({
+          name: a.filename ?? a.name,
+          url: a.url,
+          contentType: a.content_type ?? a.contentType,
+        })),
+        // No member-role cache in ingress → role-mention triggering off.
+        mentionedBotRoleIds: [],
+        mentionsBotUser,
+        replyTo,
+      };
+
+      await this.handleInboundMessage(inbound);
+    } catch (err) {
+      logger.error({ err }, 'Discord ingress: failed to process message');
+    }
   }
 
   /**
@@ -655,6 +1027,14 @@ export class DiscordChannel implements Channel {
     text: string,
     opts?: SendMessageOpts,
   ): Promise<void> {
+    // Ingress mode: proxy the send through the control plane. Threading is the
+    // CP's concern (no local Message/thread handles), so we send by channelId.
+    // `dc-dm:<userId>` DM-by-user-id can't be resolved without a Client — the
+    // CP proxy expects a channelId — so it degrades to a warn (documented).
+    if (this.ingress) {
+      return this.sendMessageIngress(jid, text);
+    }
+
     if (!this.client) {
       logger.warn('Discord client not initialized');
       return;
@@ -721,6 +1101,51 @@ export class DiscordChannel implements Channel {
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
     }
+  }
+
+  /**
+   * INGRESS send: proxy the message through the control plane by channelId.
+   * Chunks at Discord's 2000-char limit (same as the gateway path) and logs
+   * each accepted chunk as an outbound row. Never throws — a proxy failure is a
+   * logged warning (the DiscordSender already degrades to `ok:false`).
+   *
+   * Degradations vs gateway: no thread targeting (the CP owns threading), and a
+   * `dc-dm:<userId>` jid can't be resolved to a channel without a Client, so it
+   * is dropped with a warn.
+   */
+  private async sendMessageIngress(jid: string, text: string): Promise<void> {
+    if (jid.startsWith(DISCORD_DM_JID_PREFIX)) {
+      logger.warn(
+        { jid },
+        'Discord ingress: dc-dm:<userId> sends require a bot Client — dropping (send via a dc:<channelId> instead)',
+      );
+      return;
+    }
+    if (!this.sender) {
+      logger.warn({ jid }, 'Discord ingress: no CP proxy — dropping send');
+      return;
+    }
+    const channelId = jid.replace(/^dc:/, '');
+    const MAX_LENGTH = 2000;
+    const storeSent = (id: string, chunk: string) => {
+      try {
+        storeOutboundMessage(jid, id, chunk, ASSISTANT_NAME);
+      } catch (err) {
+        logger.warn({ err, jid }, 'storeOutboundMessage failed (continuing)');
+      }
+    };
+    const sendChunk = async (chunk: string) => {
+      const r = await this.sender!.send(channelId, chunk);
+      if (r.ok && r.id) storeSent(r.id, chunk);
+    };
+    if (text.length <= MAX_LENGTH) {
+      await sendChunk(text);
+    } else {
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        await sendChunk(text.slice(i, i + MAX_LENGTH));
+      }
+    }
+    logger.info({ jid, length: text.length }, 'Discord message sent (ingress)');
   }
 
   /**
@@ -988,6 +1413,7 @@ export class DiscordChannel implements Channel {
   }
 
   isConnected(): boolean {
+    if (this.ingress) return this.ingressConnected;
     return this.client !== null && this.client.isReady();
   }
 
@@ -999,6 +1425,15 @@ export class DiscordChannel implements Channel {
     if (this.dmRefreshTimer) {
       clearInterval(this.dmRefreshTimer);
       this.dmRefreshTimer = null;
+    }
+    if (this.ingress) {
+      if (this.ingressServer) {
+        await this.ingressServer.stop();
+        this.ingressServer = null;
+      }
+      this.ingressConnected = false;
+      logger.info('Discord ingress stopped');
+      return;
     }
     if (this.client) {
       this.client.destroy();
@@ -1017,8 +1452,14 @@ export class DiscordChannel implements Channel {
     messageId: string,
     emoji: string,
   ): Promise<void> {
-    if (!this.client) return;
     const resolved = EMOJI_MAP[emoji] || emoji;
+    if (this.ingress) {
+      if (!this.sender) return;
+      const channelId = this.resolveMessageChannelId(jid, messageId);
+      await this.sender.addReaction(channelId, messageId, resolved);
+      return;
+    }
+    if (!this.client) return;
     try {
       const channelId = this.resolveMessageChannelId(jid, messageId);
       const channel = await this.client.channels.fetch(channelId);
@@ -1042,8 +1483,14 @@ export class DiscordChannel implements Channel {
     messageId: string,
     emoji: string,
   ): Promise<void> {
-    if (!this.client || !this.client.user) return;
     const resolved = EMOJI_MAP[emoji] || emoji;
+    if (this.ingress) {
+      if (!this.sender) return;
+      const channelId = this.resolveMessageChannelId(jid, messageId);
+      await this.sender.removeReaction(channelId, messageId, resolved);
+      return;
+    }
+    if (!this.client || !this.client.user) return;
     const botId = this.client.user.id;
     try {
       const channelId = this.resolveMessageChannelId(jid, messageId);
@@ -1061,7 +1508,14 @@ export class DiscordChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.client || !isTyping) return;
+    if (!isTyping) return;
+    if (this.ingress) {
+      if (!this.sender) return;
+      const channelId = jid.replace(/^dc:/, '');
+      await this.sender.typing(channelId);
+      return;
+    }
+    if (!this.client) return;
     try {
       // Prefer the channel the most recent inbound message arrived in —
       // for thread-routed messages that's the thread itself, where the
@@ -1089,13 +1543,47 @@ export class DiscordChannel implements Channel {
   }
 }
 
+function header(
+  req: { headers: Record<string, string | string[] | undefined> },
+  name: string,
+): string | undefined {
+  const v = req.headers[name];
+  return Array.isArray(v) ? v[0] : v;
+}
+
 registerChannel('discord', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['DISCORD_BOT_TOKEN']);
+  // Config is sourced from process.env first (hosted: Kubernetes tenant pods
+  // inject these via envFrom secretRef), falling back to .env for
+  // self-hosted/dev; process.env wins over .env. Matches telegram.ts / slack.ts.
+  const envVars = readEnvFile([
+    'DISCORD_BOT_TOKEN',
+    'DISCORD_INGRESS_SECRET',
+    'DISCORD_BOT_ID',
+  ]);
   const token =
     process.env.DISCORD_BOT_TOKEN || envVars.DISCORD_BOT_TOKEN || '';
-  if (!token) {
-    logger.warn('Discord: DISCORD_BOT_TOKEN not set');
-    return null;
+  const ingressSecret =
+    process.env.DISCORD_INGRESS_SECRET || envVars.DISCORD_INGRESS_SECRET || '';
+
+  // Mode 1: BYO bot token → gateway mode (UNCHANGED behavior).
+  if (token) {
+    return new DiscordChannel(token, opts);
   }
-  return new DiscordChannel(token, opts);
+
+  // Mode 2: no token but an ingress secret → shared-bot ingress mode (hosted).
+  // The control plane owns the token; the tenant receives signed message JSON
+  // and proxies outbound back through the CP. An optional bot-id hint lets
+  // @mention-by-user translation + reply-to-bot detection work.
+  if (ingressSecret) {
+    const botId =
+      process.env.DISCORD_BOT_ID || envVars.DISCORD_BOT_ID || undefined;
+    return new DiscordChannel('', { ...opts, ingressSecret, botId });
+  }
+
+  // Mode 3: neither → not configured (keep the existing warn intent, add a
+  // hint about the ingress alternative).
+  logger.warn(
+    'Discord: DISCORD_BOT_TOKEN not set (nor DISCORD_INGRESS_SECRET for shared-bot ingress mode)',
+  );
+  return null;
 });
