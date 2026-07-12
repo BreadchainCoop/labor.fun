@@ -44,6 +44,16 @@ vi.mock('@slack/bolt', () => ({
       },
       chat: {
         postMessage: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+      },
+      // Native AI Assistant surface (assistant.threads.*) — scope assistant:write.
+      assistant: {
+        threads: {
+          setStatus: vi.fn().mockResolvedValue(undefined),
+          setSuggestedPrompts: vi.fn().mockResolvedValue(undefined),
+          setTitle: vi.fn().mockResolvedValue(undefined),
+        },
       },
       conversations: {
         list: vi.fn().mockResolvedValue({
@@ -139,15 +149,44 @@ async function triggerMessageEvent(
   if (handler) await handler({ event });
 }
 
+function createAssistantThreadStartedEvent(overrides?: {
+  channelId?: string;
+  threadTs?: string;
+  userId?: string;
+}) {
+  return {
+    type: 'assistant_thread_started' as const,
+    assistant_thread: {
+      user_id: overrides?.userId ?? 'U_USER_456',
+      context: { channel_id: overrides?.channelId ?? 'D_ASSISTANT_1' },
+      channel_id: overrides?.channelId ?? 'D_ASSISTANT_1',
+      thread_ts: overrides?.threadTs ?? '1704067100.000000',
+    },
+    event_ts: '1704067100.000100',
+  };
+}
+
+async function triggerAssistantThreadStarted(
+  event: ReturnType<typeof createAssistantThreadStartedEvent>,
+) {
+  const handler = currentApp().eventHandlers.get('assistant_thread_started');
+  if (handler) await handler({ event });
+}
+
 // --- Tests ---
 
 describe('SlackChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Assistant surface is opt-in; keep it OFF for every existing test so the
+    // default (existing) behavior is exercised unchanged. Assistant tests set
+    // it explicitly.
+    delete process.env.SLACK_ASSISTANT_ENABLED;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    delete process.env.SLACK_ASSISTANT_ENABLED;
   });
 
   // --- Connection lifecycle ---
@@ -1228,6 +1267,196 @@ describe('SlackChannel', () => {
     it('has name "slack"', () => {
       const channel = new SlackChannel(createTestOpts());
       expect(channel.name).toBe('slack');
+    });
+  });
+
+  // --- Native AI Assistant surface (SLACK_ASSISTANT_ENABLED) ---
+
+  describe('AI Assistant surface', () => {
+    const ASSISTANT_JID = 'slack:D_ASSISTANT_1';
+    const ASSISTANT_THREAD_TS = '1704067100.000000';
+
+    // Registered opts including the assistant DM channel so its messages are
+    // delivered to onMessage (and thus reach the status-setting path).
+    function assistantOpts(
+      overrides?: Partial<SlackChannelOpts>,
+    ): SlackChannelOpts {
+      return createTestOpts({
+        registeredGroups: vi.fn(() => ({
+          [ASSISTANT_JID]: {
+            name: 'Assistant DM',
+            folder: 'assistant-dm',
+            trigger: '@Jonesy',
+            added_at: '2024-01-01T00:00:00.000Z',
+          },
+        })),
+        ...overrides,
+      });
+    }
+
+    it('registers the assistant_thread_started handler only when enabled', () => {
+      new SlackChannel(createTestOpts());
+      expect(
+        currentApp().eventHandlers.has('assistant_thread_started'),
+      ).toBe(false);
+
+      process.env.SLACK_ASSISTANT_ENABLED = 'true';
+      new SlackChannel(createTestOpts());
+      expect(
+        currentApp().eventHandlers.has('assistant_thread_started'),
+      ).toBe(true);
+    });
+
+    it('on assistant_thread_started: greets and sets suggested prompts', async () => {
+      process.env.SLACK_ASSISTANT_ENABLED = 'true';
+      const channel = new SlackChannel(assistantOpts());
+      await channel.connect();
+
+      await triggerAssistantThreadStarted(
+        createAssistantThreadStartedEvent({
+          channelId: 'D_ASSISTANT_1',
+          threadTs: ASSISTANT_THREAD_TS,
+        }),
+      );
+
+      // Greeting posted into the assistant thread.
+      const posts = currentApp().client.chat.postMessage.mock.calls;
+      const greeting = posts.find(
+        (c: any[]) => c[0].thread_ts === ASSISTANT_THREAD_TS,
+      );
+      expect(greeting).toBeDefined();
+      expect(greeting[0].channel).toBe('D_ASSISTANT_1');
+      expect(String(greeting[0].text)).toContain('Jonesy');
+
+      // Suggested prompts set (2–4 on-brand prompts) via assistant.threads.
+      const setPrompts =
+        currentApp().client.assistant.threads.setSuggestedPrompts;
+      expect(setPrompts).toHaveBeenCalledTimes(1);
+      const promptArg = setPrompts.mock.calls[0][0];
+      expect(promptArg.channel_id).toBe('D_ASSISTANT_1');
+      expect(promptArg.thread_ts).toBe(ASSISTANT_THREAD_TS);
+      expect(promptArg.prompts.length).toBeGreaterThanOrEqual(2);
+      expect(promptArg.prompts.length).toBeLessThanOrEqual(4);
+      for (const p of promptArg.prompts) {
+        expect(typeof p.title).toBe('string');
+        expect(typeof p.message).toBe('string');
+      }
+
+      // Optional title set.
+      expect(
+        currentApp().client.assistant.threads.setTitle,
+      ).toHaveBeenCalled();
+    });
+
+    it('on an assistant-thread user message: sets thinking status, delivers to onMessage, clears status on reply', async () => {
+      process.env.SLACK_ASSISTANT_ENABLED = 'true';
+      const onMessage = vi.fn();
+      const channel = new SlackChannel(assistantOpts({ onMessage }));
+      await channel.connect();
+
+      // Open the assistant thread so the channel learns its thread_ts.
+      await triggerAssistantThreadStarted(
+        createAssistantThreadStartedEvent({
+          channelId: 'D_ASSISTANT_1',
+          threadTs: ASSISTANT_THREAD_TS,
+        }),
+      );
+
+      // User replies inside the assistant thread (message.im with thread_ts).
+      await triggerMessageEvent(
+        createMessageEvent({
+          channel: 'D_ASSISTANT_1',
+          channelType: 'im',
+          user: 'U_USER_456',
+          text: "What's on our agenda?",
+          ts: '1704067200.000000',
+          threadTs: ASSISTANT_THREAD_TS,
+        }),
+      );
+
+      // Status set to "is thinking…".
+      const setStatus = currentApp().client.assistant.threads.setStatus;
+      expect(setStatus).toHaveBeenCalled();
+      const thinkingCall = setStatus.mock.calls.find(
+        (c: any[]) => c[0].status && c[0].status.length > 0,
+      );
+      expect(thinkingCall).toBeDefined();
+      expect(thinkingCall[0].channel_id).toBe('D_ASSISTANT_1');
+      expect(thinkingCall[0].thread_ts).toBe(ASSISTANT_THREAD_TS);
+
+      // Message delivered through the existing agent path (onMessage).
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      const [jid, delivered] = onMessage.mock.calls[0];
+      expect(jid).toBe(ASSISTANT_JID);
+      expect(delivered.content).toContain("What's on our agenda?");
+
+      // Agent reply comes back through sendMessage, anchored to the message.
+      await channel.sendMessage(ASSISTANT_JID, 'Here is the agenda.', {
+        replyToMessageId: '1704067200.000000',
+      });
+
+      // Status cleared (empty string) exactly once when the reply lands.
+      const clearCall = setStatus.mock.calls.find(
+        (c: any[]) => c[0].status === '',
+      );
+      expect(clearCall).toBeDefined();
+      expect(clearCall[0].thread_ts).toBe(ASSISTANT_THREAD_TS);
+
+      // Reply actually posted into the assistant thread.
+      const replyPost = currentApp().client.chat.postMessage.mock.calls.find(
+        (c: any[]) =>
+          c[0].text === 'Here is the agenda.' &&
+          c[0].thread_ts === ASSISTANT_THREAD_TS,
+      );
+      expect(replyPost).toBeDefined();
+    });
+
+    it('flag OFF: no assistant handler, no assistant.threads.* calls, normal path preserved', async () => {
+      // SLACK_ASSISTANT_ENABLED unset (default) — see beforeEach.
+      const onMessage = vi.fn();
+      const channel = new SlackChannel(assistantOpts({ onMessage }));
+      await channel.connect();
+
+      // No assistant_thread_started handler is even registered.
+      expect(
+        currentApp().eventHandlers.has('assistant_thread_started'),
+      ).toBe(false);
+
+      // A DM that (were the flag on) would be an assistant-thread message still
+      // flows through the normal path and touches NONE of the assistant APIs.
+      await triggerMessageEvent(
+        createMessageEvent({
+          channel: 'D_ASSISTANT_1',
+          channelType: 'im',
+          user: 'U_USER_456',
+          text: 'Hello there',
+          ts: '1704067200.000000',
+          threadTs: ASSISTANT_THREAD_TS,
+        }),
+      );
+
+      // Normal delivery preserved.
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      expect(onMessage.mock.calls[0][1].content).toContain('Hello there');
+
+      // Zero assistant.threads.* calls.
+      expect(
+        currentApp().client.assistant.threads.setStatus,
+      ).not.toHaveBeenCalled();
+      expect(
+        currentApp().client.assistant.threads.setSuggestedPrompts,
+      ).not.toHaveBeenCalled();
+      expect(
+        currentApp().client.assistant.threads.setTitle,
+      ).not.toHaveBeenCalled();
+
+      // A normal reply still sends, without any status calls.
+      await channel.sendMessage(ASSISTANT_JID, 'Hi back', {
+        replyToMessageId: '1704067200.000000',
+      });
+      expect(
+        currentApp().client.assistant.threads.setStatus,
+      ).not.toHaveBeenCalled();
     });
   });
 });
