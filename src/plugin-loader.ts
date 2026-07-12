@@ -4,7 +4,12 @@ import { pathToFileURL } from 'url';
 
 import { registerChannel } from './channels/registry.js';
 import { registerChatFlow } from './chat-flows/registry.js';
-import { CATALOG_PLUGINS_DIR, ENABLED_PLUGINS, PROFILE_DIR } from './config.js';
+import {
+  CATALOG_PLUGINS_DIR,
+  ENABLED_PLUGINS,
+  PLUGIN_CONFIG,
+  PROFILE_DIR,
+} from './config.js';
 import { readEnvFile } from './env.js';
 import { registerIntegration } from './integrations/registry.js';
 import { logger } from './logger.js';
@@ -23,10 +28,28 @@ export interface PluginApi {
   /** Read keys from the install's .env without leaking them to process.env. */
   readEnvFile: typeof readEnvFile;
   logger: typeof logger;
+  /**
+   * Absolute path to the active profile's directory (the org instance root
+   * holding `profile.config.json`, `groups/`, `store/`, `data/`). Catalog
+   * plugins live OUTSIDE the profile (`/app/catalog-plugins`), so they cannot
+   * derive this from `import.meta.url` the way a profile-dir plugin can — the
+   * framework supplies it here so a catalog plugin can locate the shared KB and
+   * IPC dirs. See docs/PLUGINS.md.
+   */
+  profileDir: string;
 }
 
-/** A profile plugin module: `export default function register(api) {...}`. */
-export type PluginRegister = (api: PluginApi) => void | Promise<void>;
+/**
+ * A profile/catalog plugin module: `export default function register(api,
+ * config) {...}`. `config` is the plugin's own config object
+ * (`PLUGIN_CONFIG[<id>] ?? {}` — always an object, never undefined). The second
+ * argument is BACKWARD COMPATIBLE: a legacy `register(api)` that ignores it
+ * keeps working unchanged.
+ */
+export type PluginRegister = (
+  api: PluginApi,
+  config: Record<string, unknown>,
+) => void | Promise<void>;
 
 function defaultApi(): PluginApi {
   return {
@@ -35,6 +58,7 @@ function defaultApi(): PluginApi {
     registerChatFlow,
     readEnvFile,
     logger,
+    profileDir: PROFILE_DIR,
   };
 }
 
@@ -132,12 +156,18 @@ export async function loadProfilePlugins(opts?: {
    * ENABLED_PLUGINS.
    */
   enabledPlugins?: string[] | undefined;
+  /**
+   * Override the per-plugin config map (tests). Absent → config's PLUGIN_CONFIG.
+   * Keyed by plugin id; each plugin receives its own entry (or `{}`).
+   */
+  pluginConfig?: Record<string, unknown>;
   api?: PluginApi;
 }): Promise<string[]> {
   const pluginsDir = opts?.pluginsDir ?? path.join(PROFILE_DIR, 'plugins');
   const catalogDir = opts?.catalogDir ?? CATALOG_PLUGINS_DIR;
   const enabled =
     opts && 'enabledPlugins' in opts ? opts.enabledPlugins : ENABLED_PLUGINS;
+  const pluginConfig = opts?.pluginConfig ?? PLUGIN_CONFIG;
   const api = opts?.api ?? defaultApi();
 
   // Import both sources up front. Catalog first so a same-named profile plugin
@@ -169,11 +199,26 @@ export async function loadProfilePlugins(opts?: {
       );
       continue;
     }
+    // Per-plugin config: the plugin's own entry, or {} when it has none. Always
+    // an object so a plugin can destructure it safely.
+    const rawCfg = pluginConfig[p.id];
+    const cfg: Record<string, unknown> =
+      rawCfg && typeof rawCfg === 'object' && !Array.isArray(rawCfg)
+        ? (rawCfg as Record<string, unknown>)
+        : {};
+    const cfgKeys = Object.keys(cfg);
     try {
-      await p.register(api);
+      await p.register(api, cfg);
       loaded.push(p.file);
       logger.info(
-        { plugin: p.file, id: p.id, source: p.source },
+        {
+          plugin: p.file,
+          id: p.id,
+          source: p.source,
+          // KEYS ONLY — a plugin's config may hold emails / people names, so
+          // never log the values, only which knobs were supplied (or none).
+          configKeys: cfgKeys.length ? cfgKeys : undefined,
+        },
         'Registered plugin',
       );
     } catch (err) {
