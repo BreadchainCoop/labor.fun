@@ -2,7 +2,8 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execFileSync, spawn } from 'child_process';
+import os from 'os';
 import fs from 'fs';
 import path from 'path';
 
@@ -13,6 +14,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_RUNTIME,
+  DOCKER_SIBLING_MODE,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
@@ -171,6 +173,104 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+/** One entry of the orchestrator's own container mount table (docker inspect). */
+interface SelfMount {
+  dest: string;
+  src: string;
+}
+
+/**
+ * Parse `docker inspect --format '{{json .Mounts}}'` output into a
+ * container-destination → host-source map, sorted longest-destination-first so
+ * the deepest matching prefix wins (e.g. /app/profiles/<org>/store, a separate
+ * volume, is chosen over /app/profiles). Pure — unit-tested without a daemon.
+ */
+export function parseSelfMounts(inspectJson: string): SelfMount[] {
+  let raw: Array<{ Destination?: string; Source?: string }>;
+  try {
+    raw = JSON.parse(inspectJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((m) => m.Destination && m.Source)
+    .map((m) => ({
+      dest: m.Destination!.replace(/\/+$/, ''),
+      src: m.Source!.replace(/\/+$/, ''),
+    }))
+    .sort((a, b) => b.dest.length - a.dest.length);
+}
+
+/**
+ * Translate an orchestrator-internal bind-mount source (e.g.
+ * /app/profiles/<org>/groups/<folder>) to the real HOST path, using the
+ * orchestrator's own mount table. Longest-destination-prefix wins. Paths not
+ * under any mounted destination (and the /dev/null stub) pass through
+ * unchanged. Pure — unit-tested. See DOCKER_SIBLING_MODE.
+ */
+export function translateSiblingHostPath(
+  hostPath: string,
+  selfMounts: SelfMount[],
+): string {
+  if (hostPath === '/dev/null') return hostPath;
+  for (const { dest, src } of selfMounts) {
+    if (hostPath === dest) return src;
+    if (hostPath.startsWith(dest + '/')) {
+      return src + hostPath.slice(dest.length);
+    }
+  }
+  return hostPath;
+}
+
+// Cached self mount table — resolved once per process (the orchestrator's own
+// mounts don't change while it runs). Empty array => translation is a no-op.
+let selfMountsCache: SelfMount[] | null = null;
+
+/**
+ * Resolve the orchestrator's own container mount table via `docker inspect`
+ * (used only in DOCKER_SIBLING_MODE). The container's hostname is its short id,
+ * which `docker inspect` accepts; DOCKER_SELF_CONTAINER overrides it. On any
+ * failure this returns [] and every mount passes through unchanged (so a
+ * misconfigured deploy degrades to today's behavior instead of crashing).
+ */
+function getSelfMounts(): SelfMount[] {
+  if (selfMountsCache) return selfMountsCache;
+  const selfRef = process.env.DOCKER_SELF_CONTAINER || os.hostname();
+  try {
+    const out = execFileSync(
+      CONTAINER_RUNTIME_BIN,
+      ['inspect', selfRef, '--format', '{{json .Mounts}}'],
+      { encoding: 'utf-8' },
+    );
+    const parsed = parseSelfMounts(out);
+    if (parsed.length === 0) {
+      logger.warn(
+        { selfRef },
+        'docker-sibling: self mount table empty — agent mounts will not be host-translated',
+      );
+    }
+    selfMountsCache = parsed;
+  } catch (err) {
+    logger.error(
+      { selfRef, err },
+      'docker-sibling: failed to inspect self container; agent mounts left untranslated',
+    );
+    selfMountsCache = [];
+  }
+  return selfMountsCache;
+}
+
+/**
+ * Map a mount's source to a host-resolvable path when DOCKER_SIBLING_MODE is
+ * on; otherwise return it unchanged (host-based docker + kubernetes paths are
+ * untouched).
+ */
+function mountSource(hostPath: string): string {
+  if (!DOCKER_SIBLING_MODE) return hostPath;
+  return translateSiblingHostPath(hostPath, getSelfMounts());
 }
 
 function buildVolumeMounts(
@@ -764,10 +864,14 @@ function buildContainerArgs(
   }
 
   for (const mount of mounts) {
+    // In DOCKER_SIBLING_MODE the orchestrator's own /app/... source paths are
+    // rewritten to real host paths so the host daemon can bind them; a no-op
+    // otherwise.
+    const src = mountSource(mount.hostPath);
     if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
+      args.push(...readonlyMountArgs(src, mount.containerPath));
     } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+      args.push('-v', `${src}:${mount.containerPath}`);
     }
   }
 
