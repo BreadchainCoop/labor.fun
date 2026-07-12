@@ -30,7 +30,9 @@ const attestNonce = vi.fn(async (..._a: any[]) => ({
 }));
 vi.mock('../tee-attest.js', async () => {
   const actual =
-    await vi.importActual<typeof import('../tee-attest.js')>('../tee-attest.js');
+    await vi.importActual<typeof import('../tee-attest.js')>(
+      '../tee-attest.js',
+    );
   return {
     ...actual,
     attestNonce: (...a: any[]) => attestNonce(...a),
