@@ -224,18 +224,53 @@ pvcRoot entry in `pvcRootMappings()` is currently unreachable — `PROFILE_DIR`
 matches first since `DATA_DIR` is nested under it — so everything lands under
 `profile/…`; harmless, but don't rely on a separate `data/` top-level tree.)
 
-### Main-group / project-root mount is not supported under PVC mode
+### Cooperative / main groups under kubernetes (project-root mount is dropped)
 
-A **main** group (or any group when `FLAT_ACCESS=true`, cooperative mode) mounts
-the framework **project root** (`process.cwd()`, i.e. the orchestrator image's
-`/app`) read-only into the agent pod. Under PVC mode that host path has no
-counterpart on the tenant PVC — the project code lives in the image, not the
-PVC — so the mount cannot be satisfied, and the main-group `projectRoot/store`
-stub mkdir would hit the read-only image dir as a non-root user. A hosted tenant
-therefore runs its group as a **non-main** group (`FLAT_ACCESS=false`), which is
-the normal single-tenant case. Supporting a main-group project mount on PVC
-would require baking the project tree onto the PVC too (or a second read-only
-image-backed volume) — out of scope for the current primitives.
+A **main** group (or any group when `FLAT_ACCESS=true`, cooperative mode — the
+default) mounts, on the **docker** backend, the framework **project root**
+(`process.cwd()`, i.e. the orchestrator image's `/app`) read-only at
+`/workspace/project`, and the writable store nested at `/workspace/project/store`.
+Docker creates that nested mountpoint leniently, so both mounts coexist.
+
+On kubernetes each bind becomes a **separate** volumeMount. Mounting the project
+root read-only at `/workspace/project` and then the store at
+`/workspace/project/store` makes the kubelet try to create the
+`/workspace/project/store` mountpoint **under** the read-only `/workspace/project`
+mount, which fails with
+`mkdirat …/rootfs/workspace/project/store: read-only file system` (the pod exits
+128 and every message is dropped). Under PVC mode the project-root bind is doubly
+wrong: `process.cwd()` is the read-only image dir with no counterpart on the
+tenant PVC (its `project/` subPath is empty), so even if it mounted it would
+expose nothing useful.
+
+**Fix (`buildVolumeMounts`, gated on `CONTAINER_RUNTIME === 'kubernetes'`):** the
+kubernetes path **skips** the read-only `/workspace/project` bind and its
+now-pointless `/dev/null` `.env` shadow — mirroring the `DOCKER_SIBLING_MODE`/TEE
+image-dir skip (the agent pod ships its own image with the framework code, so it
+does not need the orchestrator's project bind). With `/workspace/project` gone,
+the store at `/workspace/project/store` is no longer nested under a read-only
+parent; the kubelet creates `/workspace/project(/store)` on the writable rootfs
+and the pod starts cleanly. The docker backend (host + sibling/TEE) is
+byte-for-byte unchanged and still gets the read-only project root.
+
+**What a main group loses on kubernetes** (vs. docker main): the read-only
+`/workspace/project` tree — most notably `/workspace/project/rules/` and the
+cross-group `/workspace/project/groups/*/CLAUDE.md` paths that some container
+skills reference. This degrades acceptably: no agent-runner *code* reads
+`/workspace/project` (only SKILL.md documentation pointers do), the rules are
+also summarized in the synced container skills, and the agent still mounts its
+own group `CLAUDE.md` at `/workspace/group`, `/workspace/global`, all other group
+folders read-only at `/workspace/all-groups`, the shared KB at
+`/workspace/shared-kb`, and — unchanged — the writable SQLite store at
+`/workspace/project/store`. `test -d /workspace/project` still reports `MAIN`
+because the store mount creates that parent directory. Group digests
+(`DATA_DIR/group_digests`, visible to docker main via the project bind in the
+legacy/hostPath layout) are no longer surfaced at `/workspace/project`, but the
+raw cross-group data remains reachable via `/workspace/all-groups`.
+
+The upshot: **`FLAT_ACCESS=true` (cooperative mode) is safe to run on kubernetes,
+including hosted PVC tenants** — it no longer requires the `FLAT_ACCESS=false`
+workaround.
 
 ## Credential proxy reachability
 
