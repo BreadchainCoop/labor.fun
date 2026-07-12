@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   parseSelfMounts,
+  siblingMountSource,
   translateSiblingHostPath,
 } from './container-runner.js';
 
@@ -114,5 +115,43 @@ describe('translateSiblingHostPath', () => {
     expect(
       translateSiblingHostPath('/app/profiles/decentral-park/groups/g', []),
     ).toBe('/app/profiles/decentral-park/groups/g');
+  });
+});
+
+describe('siblingMountSource (skip image-dir mounts)', () => {
+  const self = parseSelfMounts(INSPECT_JSON);
+  const IMAGE_ROOT = '/app';
+
+  it('translates a volume-backed source', () => {
+    expect(
+      siblingMountSource(
+        '/app/profiles/decentral-park/groups/signal_ron',
+        self,
+        IMAGE_ROOT,
+      ),
+    ).toBe(
+      '/var/lib/docker/volumes/tee_labor-profiles/_data/decentral-park/groups/signal_ron',
+    );
+  });
+
+  it('SKIPS the project-root image dir (returns null)', () => {
+    expect(siblingMountSource('/app', self, IMAGE_ROOT)).toBeNull();
+  });
+
+  it('SKIPS an untranslated path under the image dir (e.g. baked rules)', () => {
+    expect(siblingMountSource('/app/rules', self, IMAGE_ROOT)).toBeNull();
+  });
+
+  it('keeps /dev/null and genuine external host paths', () => {
+    expect(siblingMountSource('/dev/null', self, IMAGE_ROOT)).toBe('/dev/null');
+    expect(siblingMountSource('/etc/gws-creds.json', self, IMAGE_ROOT)).toBe(
+      '/etc/gws-creds.json',
+    );
+  });
+
+  it('does not skip a sibling dir that only shares a prefix string', () => {
+    expect(siblingMountSource('/app-data/x', self, IMAGE_ROOT)).toBe(
+      '/app-data/x',
+    );
   });
 });
