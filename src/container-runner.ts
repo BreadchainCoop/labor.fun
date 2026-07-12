@@ -348,26 +348,50 @@ function buildVolumeMounts(
   const groupDir = resolveGroupFolderPath(group.folder);
 
   if (isMain) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (store, group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
-    mounts.push({
-      hostPath: projectRoot,
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
-
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the credential proxy, never exposed to containers.
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
+    // The read-only project-root bind (framework code at /workspace/project)
+    // and its /dev/null .env shadow are DOCKER-ONLY. Under docker each bind is
+    // independent, so nesting the writable store at /workspace/project/store
+    // under the read-only /workspace/project bind is fine (docker creates the
+    // nested mountpoint leniently). Under CONTAINER_RUNTIME=kubernetes every
+    // bind becomes a SEPARATE subPath volumeMount: mounting projectRoot
+    // read-only at /workspace/project and then the store at
+    // /workspace/project/store makes the kubelet try to create the
+    // /workspace/project/store mountpoint UNDER the read-only /workspace/project
+    // mount, which fails with
+    // "mkdirat .../workspace/project/store: read-only file system" (exit 128)
+    // and drops every message. So on kubernetes we SKIP the project-root bind
+    // (and, with nothing mounted there, its now-pointless .env shadow) —
+    // mirroring the DOCKER_SIBLING_MODE/TEE image-dir skip: the agent pod ships
+    // its OWN image with the framework code and reads guidance from the synced
+    // container skills, its own /workspace/group CLAUDE.md, /workspace/global,
+    // /workspace/all-groups and /workspace/shared-kb. With /workspace/project
+    // gone the store below is no longer nested under a read-only parent, so the
+    // kubelet creates /workspace/project(/store) cleanly on the writable
+    // rootfs. Docker (host + sibling/TEE) is byte-for-byte unchanged.
+    // See docs/KUBERNETES.md ("Cooperative / main groups under kubernetes").
+    if (CONTAINER_RUNTIME !== 'kubernetes') {
+      // Main gets the project root read-only. Writable paths the agent needs
+      // (store, group folder, IPC, .claude/) are mounted separately below.
+      // Read-only prevents the agent from modifying host application code
+      // (src/, dist/, package.json, etc.) which would bypass the sandbox
+      // entirely on next restart.
       mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
+        hostPath: projectRoot,
+        containerPath: '/workspace/project',
         readonly: true,
       });
+
+      // Shadow .env so the agent cannot read secrets from the mounted project
+      // root. Credentials are injected by the credential proxy, never exposed
+      // to containers.
+      const envFile = path.join(projectRoot, '.env');
+      if (fs.existsSync(envFile)) {
+        mounts.push({
+          hostPath: '/dev/null',
+          containerPath: '/workspace/project/.env',
+          readonly: true,
+        });
+      }
     }
 
     // Main gets writable access to the store (SQLite DB) so it can
@@ -386,10 +410,13 @@ function buildVolumeMounts(
     // Idempotent, and a no-op in the legacy root layout (STORE_DIR == stub).
     //
     // This stub is a Docker nested-bind-mount workaround only. Under
-    // CONTAINER_RUNTIME=kubernetes the store is a separate volumeMount (no
-    // nesting), so no stub is needed — and projectRoot is the read-only image
-    // dir (/app), NOT writable by the non-root orchestrator user, so creating
-    // it would throw EACCES and drop every run. Skip it under kubernetes, and
+    // CONTAINER_RUNTIME=kubernetes the store is a separate volumeMount and the
+    // read-only /workspace/project bind is not created at all (see above), so
+    // /workspace/project/store is no longer nested under a read-only parent —
+    // the kubelet creates /workspace/project(/store) on the writable rootfs and
+    // no stub is needed. Creating the stub on host would also throw EACCES
+    // (projectRoot is the read-only image dir, not writable by the non-root
+    // orchestrator user) and drop every run. Skip it under kubernetes, and
     // treat a failure elsewhere as non-fatal (best-effort) rather than
     // crashing the run.
     if (CONTAINER_RUNTIME !== 'kubernetes') {
@@ -1033,11 +1060,15 @@ function buildK8sEnvVars(
 
 /**
  * PVC-mode subPath roots: every host path buildVolumeMounts() can produce
- * falls under one of these three (PROFILE_DIR for the profile/store/groups
- * tree, DATA_DIR for sessions/IPC/agent-runner-src, process.cwd() for the
- * read-only project-root mount). See docs/KUBERNETES.md "Path translation
- * is the hard part" — a host path outside all three (e.g. an
- * additionalMounts entry pointing elsewhere) fails loudly in
+ * falls under one of these (PROFILE_DIR for the profile/store/groups tree,
+ * DATA_DIR for sessions/IPC/agent-runner-src). The process.cwd() → `project`
+ * root is retained as a defensive mapping but is now dormant on the kubernetes
+ * path: the read-only project-root mount it used to translate is skipped for
+ * main/cooperative groups under kubernetes (see buildVolumeMounts — it nested
+ * the writable store under a read-only mount and crashed the pod). See
+ * docs/KUBERNETES.md "Cooperative / main groups under kubernetes" and "Path
+ * translation is the hard part" — a host path outside every known root (e.g.
+ * an additionalMounts entry pointing elsewhere) fails loudly in
  * translateMountForK8s rather than mounting silently wrong.
  */
 function pvcRootMappings(): PvcRootMapping[] {
