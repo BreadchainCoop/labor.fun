@@ -1,6 +1,6 @@
 import net from 'net';
 
-import { ASSISTANT_NAME } from '../config.js';
+import { ASSISTANT_NAME, SIGNAL_AUTO_REGISTER_GROUPS } from '../config.js';
 import { logReaction, storeOutboundMessage } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
@@ -12,6 +12,7 @@ import {
   parseVerifyCommand,
 } from '../tee-attest.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { deriveSignalGroupFolder } from './signal-auto.js';
 import {
   Channel,
   OnChatMetadata,
@@ -114,6 +115,24 @@ export interface SignalChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  // Needed for SIGNAL_AUTO_REGISTER_GROUPS; auto-registration is silently
+  // disabled when the orchestrator doesn't provide it.
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
+  // SIGNAL_AUTO_REGISTER_GROUPS — register a chat the moment the first inbound
+  // message from a still-unregistered chat reaches the bot (Signal, like
+  // WhatsApp, has no join event, so the message IS the hook). Applies to both
+  // group chats (`signal:group:<id>`) and 1:1 DMs (`signal:<e164>`).
+  // Default: off.
+  autoRegisterGroups?: boolean;
+  // Auto-register a 1:1 DM whose sender is a known KB person, so any teammate
+  // can DM the bot without a per-DM admin step (fallback when
+  // autoRegisterGroups is off). Returns true when the DM is (now) registered
+  // and the message should be processed; false for unknown senders (dropped).
+  ensureDmRegistered?: (
+    jid: string,
+    platform: string,
+    senderId: string,
+  ) => boolean;
   /**
    * TEE attestation config for the `!verify <nonce>` command. When `enabled`
    * is false (default — non-TEE deployments), `!verify` is not intercepted and
@@ -267,6 +286,54 @@ export class SignalChannel implements Channel {
     }
   }
 
+  /**
+   * Auto-register a Signal chat when SIGNAL_AUTO_REGISTER_GROUPS is on.
+   * Returns the registered group (existing or newly created), or undefined when
+   * the feature is off or registration was rejected. Idempotent.
+   *
+   * Signal's only hook is the inbound message (there is no join event), so this
+   * covers both group chats and DMs — mirroring WhatsApp. Groups keep the
+   * default (trigger required); DMs are registered with `requiresTrigger:false`
+   * so a 1:1 behaves like a solo chat.
+   */
+  private maybeAutoRegisterGroup(
+    chatJid: string,
+    isGroup: boolean,
+    senderName: string | undefined,
+  ): RegisteredGroup | undefined {
+    const existing = this.opts.registeredGroups()[chatJid];
+    if (existing) return existing;
+    if (!this.opts.autoRegisterGroups || !this.opts.registerGroup) {
+      return undefined;
+    }
+
+    const existingFolders = new Set(
+      Object.values(this.opts.registeredGroups()).map((g) => g.folder),
+    );
+    // Groups carry no subject in the receive envelope; DMs use the sender's
+    // profile name. Fall back to the JID when neither is available.
+    const name = isGroup ? undefined : senderName || undefined;
+    const folder = deriveSignalGroupFolder(chatJid, name, existingFolders);
+    this.opts.registerGroup(chatJid, {
+      name: name || chatJid,
+      folder,
+      trigger: `@${ASSISTANT_NAME}`,
+      added_at: new Date().toISOString(),
+      // Groups require the trigger word; DMs don't (matches WhatsApp's choice).
+      requiresTrigger: isGroup,
+    });
+    // Re-read instead of trusting our input: registerGroup validates the folder
+    // and may reject the registration.
+    const registered = this.opts.registeredGroups()[chatJid];
+    if (registered) {
+      logger.info(
+        { chatJid, name: registered.name, folder: registered.folder },
+        'Signal chat auto-registered',
+      );
+    }
+    return registered;
+  }
+
   private handleReceive(params: any): void {
     const envelope = params?.envelope;
     const data = envelope?.dataMessage;
@@ -304,7 +371,35 @@ export class SignalChannel implements Channel {
       isGroup,
     );
 
-    const group = this.opts.registeredGroups()[chatJid];
+    // Only deliver full messages for registered chats. When the chat is
+    // unregistered we try two self-heal paths before dropping (mirrors
+    // WhatsApp + Slack):
+    //   1. SIGNAL_AUTO_REGISTER_GROUPS (autoRegisterGroups): register the chat
+    //      on its first inbound message — groups AND DMs — then process it.
+    //   2. ensureDmRegistered: fall back for a DM whose sender resolves to a
+    //      known KB person, so a teammate can start a 1:1 without enabling the
+    //      blanket auto-register flag.
+    // Neither enabled → drop (unchanged behavior).
+    let group: RegisteredGroup | undefined =
+      this.opts.registeredGroups()[chatJid];
+    if (!group) {
+      group = this.maybeAutoRegisterGroup(chatJid, isGroup, senderName);
+      if (
+        !group &&
+        !isGroup &&
+        this.opts.ensureDmRegistered?.(chatJid, 'signal', author)
+      ) {
+        // ensureDmRegistered registered the DM out-of-band — re-read the row so
+        // the just-registered chat flows through the rest of handleReceive.
+        group = this.opts.registeredGroups()[chatJid];
+      }
+      if (group) {
+        logger.info(
+          { chatJid, isGroup },
+          'Signal chat auto-registered on inbound message',
+        );
+      }
+    }
     if (!group) {
       logger.debug({ chatJid }, 'Message from unregistered Signal chat');
       return;
@@ -555,5 +650,12 @@ registerChannel('signal', (opts: ChannelOpts) => {
       }
     : undefined;
 
-  return new SignalChannel(account, rpcAddr, { ...opts, tee });
+  // ...opts already carries registerGroup + ensureDmRegistered from ChannelOpts;
+  // add the Signal auto-register flag so an unregistered chat's first message
+  // can self-register instead of being silently dropped.
+  return new SignalChannel(account, rpcAddr, {
+    ...opts,
+    autoRegisterGroups: SIGNAL_AUTO_REGISTER_GROUPS,
+    tee,
+  });
 });

@@ -449,3 +449,202 @@ describe('SignalChannel', () => {
     });
   });
 });
+
+// ─── Auto-registration (SIGNAL_AUTO_REGISTER_GROUPS + ensureDmRegistered) ────
+
+/**
+ * A mutable registry so a registerGroup / ensureDmRegistered call is visible to
+ * the channel's re-read of registeredGroups()[chatJid] within the same receive.
+ */
+function autoHarness(overrides?: Partial<SignalChannelOpts>): {
+  opts: SignalChannelOpts;
+  groups: Record<string, any>;
+  registerGroup: ReturnType<typeof vi.fn>;
+  onMessage: ReturnType<typeof vi.fn>;
+} {
+  const groups: Record<string, any> = {};
+  const registerGroup = vi.fn((jid: string, g: any) => {
+    groups[jid] = g;
+  });
+  const onMessage = vi.fn();
+  const opts: SignalChannelOpts = {
+    onMessage,
+    onChatMetadata: vi.fn(),
+    registeredGroups: () => groups,
+    registerGroup,
+    ...overrides,
+  };
+  return { opts, groups, registerGroup, onMessage };
+}
+
+/** Feed an inbound message from an arbitrary sender / optional group. */
+function feed(opts: {
+  source: string;
+  sourceName?: string;
+  message: string;
+  groupId?: string;
+  timestamp?: number;
+}): void {
+  socketRef.current.feed({
+    jsonrpc: '2.0',
+    method: 'receive',
+    params: {
+      envelope: {
+        source: opts.source,
+        sourceNumber: opts.source,
+        sourceName: opts.sourceName,
+        timestamp: opts.timestamp ?? 1700000012345,
+        dataMessage: {
+          message: opts.message,
+          ...(opts.groupId
+            ? { groupInfo: { groupId: opts.groupId, type: 'DELIVER' } }
+            : {}),
+        },
+      },
+    },
+  });
+}
+
+describe('SignalChannel auto-registration', () => {
+  it('auto-registers an unregistered GROUP and then processes the message (requiresTrigger true)', async () => {
+    const { opts, registerGroup, onMessage } = autoHarness({
+      autoRegisterGroups: true,
+    });
+    const ch = new SignalChannel('+15559990000', '127.0.0.1:7583', opts);
+    await ch.connect();
+
+    feed({
+      source: '+15550002222',
+      sourceName: 'Bob',
+      message: 'hi team',
+      groupId: 'R0lE',
+    });
+
+    expect(registerGroup).toHaveBeenCalledTimes(1);
+    expect(registerGroup).toHaveBeenCalledWith(
+      'signal:group:R0lE',
+      expect.objectContaining({
+        folder: 'signal_R0lE',
+        requiresTrigger: true,
+      }),
+    );
+    // The just-registered group's message flows through to onMessage.
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:group:R0lE',
+      expect.objectContaining({ content: 'hi team' }),
+    );
+  });
+
+  it('auto-registers an unregistered DM (requiresTrigger false) and processes it', async () => {
+    const { opts, registerGroup, onMessage } = autoHarness({
+      autoRegisterGroups: true,
+    });
+    const ch = new SignalChannel('+15559990000', '127.0.0.1:7583', opts);
+    await ch.connect();
+
+    feed({ source: '+15550009999', sourceName: 'Zed', message: 'hello' });
+
+    expect(registerGroup).toHaveBeenCalledWith(
+      'signal:+15550009999',
+      expect.objectContaining({
+        name: 'Zed',
+        folder: 'signal_zed',
+        requiresTrigger: false,
+      }),
+    );
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:+15550009999',
+      expect.objectContaining({ content: 'hello' }),
+    );
+  });
+
+  it('drops an unregistered chat when auto-register is OFF and no ensureDmRegistered match', async () => {
+    const { opts, registerGroup, onMessage } = autoHarness({
+      autoRegisterGroups: false,
+    });
+    const ch = new SignalChannel('+15559990000', '127.0.0.1:7583', opts);
+    await ch.connect();
+
+    feed({ source: '+15550009999', sourceName: 'Zed', message: 'hello' });
+
+    expect(registerGroup).not.toHaveBeenCalled();
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('registers a DM from a known KB person via ensureDmRegistered even with auto-register off', async () => {
+    const groups: Record<string, any> = {};
+    const ensureDmRegistered = vi.fn((jid: string) => {
+      groups[jid] = {
+        name: 'Known Person DM',
+        folder: 'signal_dm_known',
+        trigger: '@Breadbrich Engels',
+        added_at: '2024-01-01T00:00:00.000Z',
+        requiresTrigger: false,
+      };
+      return true;
+    });
+    const onMessage = vi.fn();
+    const opts: SignalChannelOpts = {
+      onMessage,
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => groups,
+      autoRegisterGroups: false,
+      ensureDmRegistered,
+    };
+    const ch = new SignalChannel('+15559990000', '127.0.0.1:7583', opts);
+    await ch.connect();
+
+    feed({ source: '+15550007777', sourceName: 'Known', message: 'yo' });
+
+    expect(ensureDmRegistered).toHaveBeenCalledWith(
+      'signal:+15550007777',
+      'signal',
+      '+15550007777',
+    );
+    expect(onMessage).toHaveBeenCalledWith(
+      'signal:+15550007777',
+      expect.objectContaining({ content: 'yo' }),
+    );
+  });
+
+  it('does NOT use ensureDmRegistered for group chats', async () => {
+    const ensureDmRegistered = vi.fn(() => true);
+    const { opts, onMessage } = autoHarness({
+      autoRegisterGroups: false,
+      ensureDmRegistered,
+    });
+    const ch = new SignalChannel('+15559990000', '127.0.0.1:7583', opts);
+    await ch.connect();
+
+    feed({ source: '+15550002222', message: 'group hi', groupId: 'R0lE' });
+
+    expect(ensureDmRegistered).not.toHaveBeenCalled();
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('still intercepts !verify after a chat auto-registers (never routes to the agent)', async () => {
+    const { opts, onMessage } = autoHarness({
+      autoRegisterGroups: true,
+      tee: { enabled: true, socketPath: '/tmp/x.sock' },
+    });
+    const ch = new SignalChannel('+15559990000', '127.0.0.1:7583', opts);
+    await ch.connect();
+
+    feed({
+      source: '+15550009999',
+      sourceName: 'Zed',
+      message: '!verify my-nonce-1234',
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Auto-registered, but the verify command is answered locally, not routed.
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(attestNonce).toHaveBeenCalledWith(
+      'my-nonce-1234',
+      expect.objectContaining({ socketPath: '/tmp/x.sock' }),
+    );
+    const req = socketRef.current.lastRequest();
+    expect(req.method).toBe('send');
+    expect(req.params.message).toBe('ATTESTATION_REPLY');
+  });
+});
