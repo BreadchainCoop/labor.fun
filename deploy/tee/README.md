@@ -13,8 +13,9 @@ with `!verify <nonce>`.
 
 | Service | Role | Ports |
 |---|---|---|
-| `orchestrator` | labor.fun (`node dist/index.js`); Signal channel + `!verify`; spawns agent containers | none |
-| `signal-cli` | signal-cli daemon in **TCP JSON-RPC** mode (`--tcp=0.0.0.0:7583`) — the E2E endpoint | none |
+| `docker-cli-fetch` | init container: fetches + sha256-verifies the static docker CLI onto a shared volume (the orchestrator image ships none), then exits | none |
+| `orchestrator` | labor.fun (`node dist/index.js`); runs as **root** and installs the fetched docker CLI on boot; Signal channel + `!verify`; spawns agent containers | none |
+| `signal-cli` | signal-cli daemon in **TCP JSON-RPC** mode (`--tcp=0.0.0.0:7583`) — the E2E endpoint; **self-links** on first boot (see step 4) | none |
 | *agent* | short-lived per-turn sandbox, spawned by the orchestrator via `docker.sock` | none |
 | NEAR AI | **remote** inference API (no local container) | egress only |
 
@@ -81,19 +82,36 @@ phala deploy \
 
 ### 4. Link Signal as a secondary device
 
-The platform's **primary** Signal device (held by the CP gateway) links the
-CVM as a new device. Full flow — including the split-brain rule for which side
-handles which groups — is in `docs/TEE.md` ("Signal device linking"). In short,
-from inside the running `signal-cli` container:
+A production CVM has **no public ports and no shell** (SSH needs `--dev-os`,
+which weakens attestation), so you can't `docker exec` into it. Instead the
+`signal-cli` service **self-links on first boot**: when `signal-data` has no
+`accounts.json` yet, its entrypoint runs `signal-cli link` and prints the
+device-link URI to the container logs, wrapped in delimiter lines:
 
-```bash
-# In the CVM, generate a device-link URI and have the primary approve it:
-docker exec labor-signal-cli \
-  signal-cli link -n "labor.fun TEE ($LABOR_PROFILE)"
-# → outputs an sgnl://linkdevice?... URI; scan/approve it from the primary.
+```
+===LINK URI BELOW===
+sgnl://linkdevice?uuid=...&pub_key=...
+===LINK URI ABOVE===
 ```
 
-Keys land on the encrypted `signal-data` volume, sealed to this CVM.
+Read the newest URI from the logs (this needs public logs — deploy with
+`phala deploy ... --public-logs`, or enable it on a running CVM with
+`phala deploy --public-logs`):
+
+```bash
+phala logs labor-signal-cli   # scrape the latest ===LINK URI BELOW=== block
+```
+
+Then approve that URI from the platform's **primary** Signal device (held by
+the CP gateway). `signal-cli link` blocks until approval, so the container stays
+alive (unhealthy, not exited) for the whole window — the generous healthcheck
+`start_period` keeps it from flapping, and each restart regenerates a fresh URI.
+Full flow — including the split-brain rule for which side handles which groups —
+is in `docs/TEE.md` ("Signal device linking").
+
+Once approved, keys land on the encrypted `signal-data` volume, sealed to this
+CVM. **Note:** any compose change re-measures the app and resets the
+`signal-data` volume, so you'll need to re-link after an upgrade (see below).
 
 ### 5. Verify from any Signal chat
 
