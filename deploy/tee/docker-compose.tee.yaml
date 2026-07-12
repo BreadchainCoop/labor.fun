@@ -217,12 +217,22 @@ services:
       - |
         set -u
         # $$ escapes compose interpolation so the SHELL expands these at runtime.
-        CFG="$$HOME/.local/share/signal-cli/accounts.json"
-        while [ ! -s "$$CFG" ]; do
+        # is_linked: signal-cli 0.14.x writes the account manifest to
+        # data/accounts.json (INSIDE data/), NOT the top level — plus listAccounts
+        # (offline, empty on a fresh dir). Checking the wrong path loops forever
+        # even AFTER a successful link (verified live on the first CVM).
+        DDIR="$$HOME/.local/share/signal-cli"
+        is_linked() {
+          signal-cli listAccounts 2>/dev/null | grep -q "$$SIGNAL_ACCOUNT" && return 0
+          [ -s "$$DDIR/data/accounts.json" ] && return 0
+          [ -s "$$DDIR/accounts.json" ] && return 0
+          return 1
+        }
+        while ! is_linked; do
           echo "===LINK URI BELOW==="
           signal-cli link -n "labor.fun TEE (${LABOR_PROFILE})" || true
           echo "===LINK URI ABOVE==="
-          [ -s "$$CFG" ] && break
+          is_linked && break
           echo "[link] URI expired unapproved or link errored; minting a fresh one in 5s"
           sleep 5
         done
