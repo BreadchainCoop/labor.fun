@@ -643,6 +643,21 @@ export const WHATSAPP_AUTO_REGISTER_GROUPS =
 export const WHATSAPP_AUTO_ALLOWLIST_GROUPS =
   envVal('WHATSAPP_AUTO_ALLOWLIST_GROUPS') || '';
 
+// --- Signal auto-registration (src/channels/signal.ts) ---
+// SIGNAL_AUTO_REGISTER_GROUPS: when 'true', the first inbound message from a
+// still-unregistered Signal chat registers it automatically (no manual
+// registration step). Signal — like WhatsApp — gives no join event, so the
+// inbound message IS the hook; this applies to both group chats
+// (`signal:group:<id>`) and DMs (`signal:<e164>`). Registering a DM on first
+// message lets a teammate start a 1:1 without an admin step. Groups require the
+// trigger word (matching WhatsApp's auto-register choice); DMs do not.
+//
+// SECURITY: enabling this makes the bot respond in ANY Signal group it is added
+// to (and any DM it receives) — only turn it on for trusted deployments.
+// Default: off — unregistered Signal chats are ignored, exactly as before.
+export const SIGNAL_AUTO_REGISTER_GROUPS =
+  envVal('SIGNAL_AUTO_REGISTER_GROUPS') === 'true';
+
 // --- Microsoft Teams channel (src/channels/teams.ts) ---
 // Non-secret feature flags, exported for anything outside the channel module
 // that needs to know Teams is configured (e.g. setup/status tooling). The App
