@@ -354,9 +354,7 @@ export class WhatsAppChannel implements Channel {
    * Returns null when neither yields a routable chat JID (so the caller drops
    * status broadcasts, empty payloads, etc.).
    */
-  private parseIngressMessage(
-    payload: unknown,
-  ): IngressWhatsAppMessage | null {
+  private parseIngressMessage(payload: unknown): IngressWhatsAppMessage | null {
     if (!payload || typeof payload !== 'object') return null;
     const p = payload as Record<string, any>;
 
@@ -367,8 +365,7 @@ export class WhatsAppChannel implements Channel {
         chatJid: p.chatJid,
         rawChatJid: typeof p.rawChatJid === 'string' ? p.rawChatJid : undefined,
         sender: typeof p.sender === 'string' ? p.sender : '',
-        senderName:
-          typeof p.senderName === 'string' ? p.senderName : undefined,
+        senderName: typeof p.senderName === 'string' ? p.senderName : undefined,
         content: typeof p.content === 'string' ? p.content : '',
         id: typeof p.id === 'string' ? p.id : '',
         messageTimestamp: Number(p.messageTimestamp) || 0,
@@ -647,7 +644,13 @@ export class WhatsAppChannel implements Channel {
 
     // Always notify about chat metadata for group discovery.
     const isGroup = chatJid.endsWith('@g.us');
-    this.opts.onChatMetadata(chatJid, timestamp, undefined, 'whatsapp', isGroup);
+    this.opts.onChatMetadata(
+      chatJid,
+      timestamp,
+      undefined,
+      'whatsapp',
+      isGroup,
+    );
 
     const senderName = m.senderName || sender.split('@')[0];
 

@@ -297,7 +297,9 @@ describe('WhatsApp ingress mode', () => {
       await vi.waitFor(() => expect(registerGroup).toHaveBeenCalled());
       expect(registerGroup).toHaveBeenCalledWith(
         'newgroup@g.us',
-        expect.objectContaining({ folder: expect.stringMatching(/^whatsapp_/) }),
+        expect.objectContaining({
+          folder: expect.stringMatching(/^whatsapp_/),
+        }),
       );
       expect(opts.onMessage).toHaveBeenCalledWith(
         'newgroup@g.us',
