@@ -169,13 +169,13 @@ export class GithubMentionsChannel implements Channel {
     jid: string,
     text: string,
     _opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const parts = parseGithubJid(jid);
     if (!parts) {
       this.log.warn({ jid }, 'GitHub sendMessage: unparseable jid');
-      return;
+      return false;
     }
-    if (!text.trim()) return;
+    if (!text.trim()) return true; // nothing to post — a no-op success
     // The issues comment endpoint works for both issues AND pull requests.
     const path = `/repos/${parts.owner}/${parts.repo}/issues/${parts.number}/comments`;
     const res = await this.deps.request('POST', path, { body: text });
@@ -184,7 +184,7 @@ export class GithubMentionsChannel implements Channel {
         { jid, status: res.status },
         'GitHub sendMessage: comment post failed',
       );
-      return; // leave the thread unread so the next poll retries it
+      return false; // leave the thread unread so the next poll retries it
     }
     // The reply landed — only now mark the originating notification read, so the
     // poll stops re-delivering it. Until this point an interrupted run retries.
@@ -193,6 +193,7 @@ export class GithubMentionsChannel implements Channel {
       this.pending.delete(jid);
       await this.markRead(p.threadId);
     }
+    return true;
   }
 
   /** One polling pass over unread, participating notifications. */

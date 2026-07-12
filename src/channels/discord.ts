@@ -1026,7 +1026,7 @@ export class DiscordChannel implements Channel {
     jid: string,
     text: string,
     opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Ingress mode: proxy the send through the control plane. Threading is the
     // CP's concern (no local Message/thread handles), so we send by channelId.
     // `dc-dm:<userId>` DM-by-user-id can't be resolved without a Client — the
@@ -1037,7 +1037,7 @@ export class DiscordChannel implements Channel {
 
     if (!this.client) {
       logger.warn('Discord client not initialized');
-      return;
+      return false;
     }
 
     // `dc-dm:<userId>` — send a DM directly to a Discord user by their user ID.
@@ -1048,10 +1048,11 @@ export class DiscordChannel implements Channel {
       const userId = jid.slice(DISCORD_DM_JID_PREFIX.length);
       try {
         await this.dmUser(userId, text);
+        return true;
       } catch (err) {
         logger.error({ jid, err }, 'Failed to send Discord message');
+        return false;
       }
-      return;
     }
 
     try {
@@ -1063,7 +1064,7 @@ export class DiscordChannel implements Channel {
       const target = await this.resolveReplyTarget(jid, anchorMessage);
       if (!target || typeof target !== 'object' || !('send' in target)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
-        return;
+        return false;
       }
       const textChannel = target as TextChannel | ThreadChannel;
 
@@ -1098,8 +1099,10 @@ export class DiscordChannel implements Channel {
       // stale thread the user has since moved on from.
       this.lastReplyAnchor.delete(jid);
       logger.info({ jid, length: text.length }, 'Discord message sent');
+      return true;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+      return false;
     }
   }
 
@@ -1113,17 +1116,20 @@ export class DiscordChannel implements Channel {
    * `dc-dm:<userId>` jid can't be resolved to a channel without a Client, so it
    * is dropped with a warn.
    */
-  private async sendMessageIngress(jid: string, text: string): Promise<void> {
+  private async sendMessageIngress(
+    jid: string,
+    text: string,
+  ): Promise<boolean> {
     if (jid.startsWith(DISCORD_DM_JID_PREFIX)) {
       logger.warn(
         { jid },
         'Discord ingress: dc-dm:<userId> sends require a bot Client — dropping (send via a dc:<channelId> instead)',
       );
-      return;
+      return false;
     }
     if (!this.sender) {
       logger.warn({ jid }, 'Discord ingress: no CP proxy — dropping send');
-      return;
+      return false;
     }
     const channelId = jid.replace(/^dc:/, '');
     const MAX_LENGTH = 2000;
@@ -1134,18 +1140,34 @@ export class DiscordChannel implements Channel {
         logger.warn({ err, jid }, 'storeOutboundMessage failed (continuing)');
       }
     };
-    const sendChunk = async (chunk: string) => {
+    // Track proxy acceptance: the CP degrades to `ok:false` on failure, which
+    // we must surface rather than swallow (the whole point of this fix).
+    const sendChunk = async (chunk: string): Promise<boolean> => {
       const r = await this.sender!.send(channelId, chunk);
       if (r.ok && r.id) storeSent(r.id, chunk);
+      return r.ok;
     };
+    let delivered = true;
     if (text.length <= MAX_LENGTH) {
-      await sendChunk(text);
+      delivered = await sendChunk(text);
     } else {
       for (let i = 0; i < text.length; i += MAX_LENGTH) {
-        await sendChunk(text.slice(i, i + MAX_LENGTH));
+        if (!(await sendChunk(text.slice(i, i + MAX_LENGTH))))
+          delivered = false;
       }
     }
-    logger.info({ jid, length: text.length }, 'Discord message sent (ingress)');
+    if (delivered) {
+      logger.info(
+        { jid, length: text.length },
+        'Discord message sent (ingress)',
+      );
+    } else {
+      logger.warn(
+        { jid, length: text.length },
+        'Discord ingress: control-plane reported send not delivered',
+      );
+    }
+    return delivered;
   }
 
   /**

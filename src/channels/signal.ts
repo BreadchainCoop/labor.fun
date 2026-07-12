@@ -628,7 +628,7 @@ export class SignalChannel implements Channel {
     jid: string,
     text: string,
     _opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     // Ingress mode: route every send through the control-plane proxy. The CP
     // gateway renders `text_mode:styled` from the raw text, so we forward it
     // verbatim (no local textStyle parsing/chunking — mirrors WhatsApp ingress).
@@ -640,15 +640,16 @@ export class SignalChannel implements Channel {
           { jid },
           'Signal ingress: no control-plane proxy configured — dropping send',
         );
-        return;
+        return false;
       }
-      await this.sender.send(jid, text);
-      return;
+      // The CP sender resolves false on a proxy failure — propagate it so the
+      // cross-channel path can surface a non-delivery instead of a false ok.
+      return await this.sender.send(jid, text);
     }
 
     if (!this.connected) {
       logger.warn({ jid }, 'Signal not connected — dropping message');
-      return;
+      return false;
     }
     const target = this.target(jid);
     try {
@@ -674,8 +675,10 @@ export class SignalChannel implements Channel {
         }
       }
       logger.info({ jid, length: text.length }, 'Signal message sent');
+      return true;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Signal message');
+      return false;
     }
   }
 

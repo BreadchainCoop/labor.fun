@@ -776,7 +776,7 @@ describe('SlackChannel', () => {
       // Should not throw
       await expect(
         channel.sendMessage('slack:C0123456789', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(true);
     });
 
     it('splits long messages at 4000 character boundary', async () => {

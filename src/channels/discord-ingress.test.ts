@@ -442,7 +442,7 @@ describe('Discord ingress mode', () => {
 
       await expect(
         channel.sendMessage(`dc:${CHANNEL_ID}`, 'Hello'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
     });
 
     it('does not throw / log an outbound row when Discord returns ok:false', async () => {
@@ -461,7 +461,7 @@ describe('Discord ingress mode', () => {
 
       await expect(
         channel.sendMessage(`dc:${CHANNEL_ID}`, 'Hello'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
       // ok:false → no id → no outbound row logged (but no crash).
       expect(storeOutboundMessage).not.toHaveBeenCalled();
     });
@@ -517,9 +517,7 @@ describe('Discord ingress mode', () => {
       channels.push(channel);
 
       // `dc:` with an empty channel id → channelId '' → sender asserts + drops.
-      await expect(
-        channel.sendMessage('dc:', 'orphan'),
-      ).resolves.toBeUndefined();
+      await expect(channel.sendMessage('dc:', 'orphan')).resolves.toBe(false);
       expect((global.fetch as any).mock.calls.length).toBe(0);
     });
   });

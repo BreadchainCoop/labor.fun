@@ -185,7 +185,7 @@ export class TeamsChannel implements Channel {
     jid: string,
     text: string,
     _opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const reference = this.conversationRefs.get(jid);
     if (!reference) {
       // No inbound activity has been seen for this jid yet (or the process
@@ -199,7 +199,7 @@ export class TeamsChannel implements Channel {
         { jid },
         'Teams: no conversation reference cached for jid — message dropped',
       );
-      return;
+      return false;
     }
 
     const chunks = this.splitMessage(text);
@@ -224,8 +224,10 @@ export class TeamsChannel implements Channel {
         );
       }
       logger.info({ jid, length: text.length }, 'Teams message sent');
+      return true;
     } catch (err) {
       logger.warn({ jid, err }, 'Failed to send Teams message');
+      return false;
     }
   }
 

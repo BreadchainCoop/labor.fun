@@ -1101,11 +1101,11 @@ export class TelegramChannel implements Channel {
     jid: string,
     text: string,
     opts?: SendMessageOpts,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const api = this.api();
     if (!api) {
       logger.warn('Telegram bot not initialized');
-      return;
+      return false;
     }
 
     try {
@@ -1152,8 +1152,10 @@ export class TelegramChannel implements Channel {
         { jid, length: text.length, threadId },
         'Telegram message sent',
       );
+      return true;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      return false;
     }
   }
 
