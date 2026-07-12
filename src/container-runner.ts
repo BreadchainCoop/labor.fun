@@ -3,6 +3,7 @@
  * Spawns agent execution in containers and handles IPC
  */
 import { ChildProcess, execFileSync, spawn } from 'child_process';
+import { createHash } from 'crypto';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
@@ -167,6 +168,34 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+}
+
+/**
+ * Build the per-run agent container/pod name. It must be valid for BOTH docker
+ * and Kubernetes, and k8s is the strict one: an RFC 1123 label — lowercase
+ * alphanumeric + '-', start/end alphanumeric, ≤63 chars. Group folders derived
+ * from a Signal base64 group id are mixed-case AND long (e.g.
+ * `signal_Inemj-Z44SEhClgLNmmZz_9VssUy41snEdmP0BcPSrg`), which the old
+ * `nanoclaw-<folder>-<ts>` produced as an invalid pod name → the agent spawn
+ * failed with "Invalid value ... must be no more than 63 characters". Lowercase
+ * the folder and, when the full name would overflow 63 chars, truncate it and
+ * append a short stable hash for uniqueness. Pure — unit-tested.
+ */
+export function buildAgentContainerName(folder: string, nowMs: number): string {
+  const prefix = 'nanoclaw-';
+  const suffix = `-${nowMs}`;
+  const budget = 63 - prefix.length - suffix.length;
+  let base = folder
+    .replace(/[^a-zA-Z0-9-]/g, '-')
+    .toLowerCase()
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (base.length > budget) {
+    const h = createHash('sha1').update(folder).digest('hex').slice(0, 8);
+    base = base.slice(0, budget - 9).replace(/-+$/, '') + '-' + h;
+  }
+  if (!base) base = '0';
+  return `${prefix}${base}${suffix}`;
 }
 
 interface VolumeMount {
@@ -1107,8 +1136,7 @@ export async function runContainerAgent(
   input = { ...input, mcpServers: input.mcpServers ?? MCP_SERVERS };
 
   const mounts = buildVolumeMounts(group, input.isMain);
-  const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const containerName = buildAgentContainerName(group.folder, Date.now());
   const { bin: runtimeBin, args: containerArgs } = buildSpawnCommand(
     mounts,
     containerName,
