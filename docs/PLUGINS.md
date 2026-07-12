@@ -70,6 +70,118 @@ Each pairs with a container skill under
 
 ---
 
+## 0b. The plugin catalog (first-party, enable + configure per tenant)
+
+Profile plugins (§0) live in a tenant's own `<profile>/plugins/` dir — one org's
+private code. The **catalog** is the complement: a menu of **vetted, first-party
+plugins that ship with the framework** (`container/catalog-plugins/`, baked into
+the orchestrator image at `/app/catalog-plugins`). Every hosted tenant carries
+the same menu; each tenant chooses which items to run and how to configure them.
+
+This is the **"mechanisms-open / policy-closed"** split:
+
+- **mechanism** (the plugin code) ships to everyone in the image, and
+- **policy** (which tenant runs which plugin, with what config) is per-tenant
+  config — never a code change.
+
+### The full contract
+
+A catalog plugin is gated by **two** config surfaces, each with a profile form
+and an env form. The env form always **wins** (it is how the hosted control plane
+injects per-tenant policy without editing profile files):
+
+| What | `profile.config.json` | Env var | Shape |
+|---|---|---|---|
+| **Which** plugins register | `enabledPlugins` | `ENABLED_PLUGINS` | array of ids / comma-or-JSON-array list |
+| **How** each plugin is configured | `pluginConfig` | `PLUGIN_CONFIG_JSON` | object keyed by plugin id → that plugin's config object |
+
+```jsonc
+// profiles/<org>/profile.config.json
+{
+  "enabledPlugins": ["weekly-agenda", "admin-email"],
+  "pluginConfig": {
+    "weekly-agenda": { "facilitatorPool": ["alice", "bob"], "meetingDay": 3 },
+    "admin-email": { "githubRepo": "acme/admin", "notifyChannelJid": "slack:C123" }
+  }
+}
+```
+
+```bash
+# …or, hosted per-tenant injection (env wins over the profile):
+ENABLED_PLUGINS=weekly-agenda,admin-email
+PLUGIN_CONFIG_JSON={"weekly-agenda":{"facilitatorPool":["carol"]}}
+```
+
+**Gating (`ENABLED_PLUGINS`).** `enabledPlugins`/`ENABLED_PLUGINS` merge to a
+single set of ids. A plugin registers only if its `id` is in that set — from
+*either* source (catalog or profile dir). Backward-compat is exact: when the list
+is **absent everywhere**, gating is **off** and the legacy behavior is preserved —
+every profile-dir plugin registers and the catalog stays dark. An explicit list
+(even `[]`) turns gating **on**. See `src/config.ts` (`ENABLED_PLUGINS`) and
+`src/plugin-loader.ts`.
+
+**Config (`PLUGIN_CONFIG`).** `pluginConfig` (base) and `PLUGIN_CONFIG_JSON`
+(override) merge **at the plugin-id level**: the env's entry for an id *replaces*
+the profile's entry for that id wholesale (a shallow, id-level merge — not a deep
+merge of the two config objects). The loader hands each plugin
+`PLUGIN_CONFIG[<id>] ?? {}` as the **second argument** to its register function:
+
+```js
+// container/catalog-plugins/<id>.mjs
+export const id = 'weekly-agenda';
+export const kind = 'integration';
+export default function register(api, config) {
+  // api: registerChannel / registerIntegration / registerChatFlow /
+  //      readEnvFile / logger / profileDir
+  // config: this tenant's config for THIS plugin (always an object, never undefined)
+}
+```
+
+A legacy one-arg `register(api)` still works unchanged (it just ignores the
+config). Config **keys** are logged on register; **values are never logged** (a
+config may hold emails or people names). Malformed `PLUGIN_CONFIG_JSON` throws
+loudly at startup — a silently-ignored tenant config looks like a working plugin
+mysteriously running on defaults.
+
+Catalog plugins take `profileDir` from `api` (not `import.meta.url`): they live
+*outside* the profile, so they cannot derive the profile root the way a
+profile-dir plugin can. That is how the ported `weekly-agenda` / `admin-email`
+plugins locate their KB config and IPC dirs.
+
+The two ported plugins and their full config-key schema (types + defaults) are in
+[`container/catalog-plugins/README.md`](../container/catalog-plugins/README.md).
+
+### How the hosted SaaS delivers this
+
+The control plane never delivers **code** to a running tenant — the plugin code is
+already in the (published, immutable) orchestrator image every tenant shares.
+Enabling/reconfiguring a plugin is purely an **env change**:
+
+1. The operator toggles a plugin (or edits its config) for a tenant in the control
+   plane.
+2. The control plane patches that tenant's env — `ENABLED_PLUGINS` and/or
+   `PLUGIN_CONFIG_JSON` — and **rolls the pod**.
+3. On restart the plugin loader reads the new env and registers/configures
+   accordingly. No image rebuild, no code push, no profile-file edit on the host.
+
+This keeps the delivery path for policy (a two-key env patch) completely separate
+from the delivery path for mechanism (publishing a new image with new catalog
+code), which is what lets the same image serve every tenant.
+
+### TEE note (measured deployments)
+
+In a TEE deployment the catalog plugins ship **inside the MEASURED orchestrator
+image** — their code is vouched for by the image digest, which the attestation
+already covers. `ENABLED_PLUGINS` and `PLUGIN_CONFIG_JSON` ride the **sealed
+`.env.tee`** env, not the compose file. So **enabling or configuring a catalog
+plugin does NOT change `compose_hash`** — only the (already-published) image digest
+attests to the plugin code, and the sealed env carries the per-tenant policy. A
+tenant can turn a first-party plugin on/off and reconfigure it without
+re-measuring the compose, because no new code enters the enclave — it was always
+in the measured image, merely dormant until its id was enabled.
+
+---
+
 ## 1. Channels
 
 A channel is an I/O adapter (Slack, Telegram, Discord, …). Implement the
