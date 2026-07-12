@@ -1152,7 +1152,8 @@ export class DiscordChannel implements Channel {
       delivered = await sendChunk(text);
     } else {
       for (let i = 0; i < text.length; i += MAX_LENGTH) {
-        if (!(await sendChunk(text.slice(i, i + MAX_LENGTH)))) delivered = false;
+        if (!(await sendChunk(text.slice(i, i + MAX_LENGTH))))
+          delivered = false;
       }
     }
     if (delivered) {

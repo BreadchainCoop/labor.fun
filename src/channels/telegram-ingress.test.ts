@@ -457,9 +457,9 @@ describe('Telegram ingress mode', () => {
       const { channel } = await startIngress(opts);
       channels.push(channel);
 
-      await expect(
-        channel.sendMessage('tg:100200300', 'Hello'),
-      ).resolves.toBe(false);
+      await expect(channel.sendMessage('tg:100200300', 'Hello')).resolves.toBe(
+        false,
+      );
     });
 
     it('setTyping proxies sendChatAction', async () => {

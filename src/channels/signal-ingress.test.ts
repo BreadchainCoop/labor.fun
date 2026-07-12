@@ -430,9 +430,9 @@ describe('Signal ingress mode', () => {
       const { channel } = await startIngress(opts);
       channels.push(channel);
 
-      await expect(
-        channel.sendMessage(GROUP_JID, 'Hello'),
-      ).resolves.toBe(false);
+      await expect(channel.sendMessage(GROUP_JID, 'Hello')).resolves.toBe(
+        false,
+      );
     });
 
     it('does not throw when the proxy returns a non-2xx', async () => {
@@ -448,9 +448,9 @@ describe('Signal ingress mode', () => {
       const { channel } = await startIngress(opts);
       channels.push(channel);
 
-      await expect(
-        channel.sendMessage(GROUP_JID, 'Hello'),
-      ).resolves.toBe(false);
+      await expect(channel.sendMessage(GROUP_JID, 'Hello')).resolves.toBe(
+        false,
+      );
     });
 
     it('drops the send (no fetch) when CONTROL_PLANE_* is unset', async () => {

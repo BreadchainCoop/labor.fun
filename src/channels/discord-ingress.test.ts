@@ -517,9 +517,7 @@ describe('Discord ingress mode', () => {
       channels.push(channel);
 
       // `dc:` with an empty channel id → channelId '' → sender asserts + drops.
-      await expect(
-        channel.sendMessage('dc:', 'orphan'),
-      ).resolves.toBe(false);
+      await expect(channel.sendMessage('dc:', 'orphan')).resolves.toBe(false);
       expect((global.fetch as any).mock.calls.length).toBe(0);
     });
   });
