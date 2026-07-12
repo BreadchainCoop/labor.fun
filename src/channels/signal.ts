@@ -167,6 +167,8 @@ export class SignalChannel implements Channel {
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Resolver for the pending connect() promise; called on first connect. */
+  private connectResolve?: () => void;
   private reconnectDelay = 1000;
   private closing = false;
 
@@ -187,11 +189,21 @@ export class SignalChannel implements Channel {
 
   async connect(): Promise<void> {
     return new Promise<void>((resolve) => {
-      this.openSocket(resolve);
+      // Resolve on the FIRST successful connection — even if it arrives via a
+      // reconnect rather than this initial dial. signal-cli is often not
+      // listening yet when the orchestrator first connects (notably TEE mode,
+      // where signal-cli links as a device on boot and only starts its daemon
+      // afterwards). The initial openSocket() then fails and scheduleReconnect()
+      // reopens the socket without this resolver; storing it here means the
+      // eventual success still unblocks `await channel.connect()` in main().
+      // Without this, main() hangs before startMessageLoop() and inbound
+      // messages are stored but never processed.
+      this.connectResolve = resolve;
+      this.openSocket();
     });
   }
 
-  private openSocket(onReady?: () => void): void {
+  private openSocket(): void {
     const socket = net.createConnection(
       { host: this.host, port: this.port },
       () => {
@@ -205,7 +217,8 @@ export class SignalChannel implements Channel {
         console.log(
           `  Register a chat ID like \`signal:${this.account}\` (DM) or \`signal:group:<id>\`\n`,
         );
-        onReady?.();
+        this.connectResolve?.();
+        this.connectResolve = undefined;
       },
     );
     socket.setEncoding('utf8');
