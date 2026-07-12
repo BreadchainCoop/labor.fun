@@ -47,6 +47,9 @@ oauth_config:
       - groups:read         # list/resolve private channel metadata
       - users:read          # resolve user IDs to display names (users.info)
       - reactions:write     # add/remove emoji reactions (addReaction/removeReaction)
+      - assistant:write     # native AI Assistant surface (assistant.threads.setStatus /
+                            # setSuggestedPrompts / setTitle). Only needed when
+                            # SLACK_ASSISTANT_ENABLED=true; harmless to grant otherwise.
 
 settings:
   # Socket Mode — no public URL/webhook needed. Required: src/channels/slack.ts
@@ -62,7 +65,13 @@ settings:
     bot_events:
       - message.channels   # messages in public channels
       - message.groups     # messages in private channels
-      - message.im         # direct messages to the bot
+      - message.im         # direct messages to the bot (also carries assistant-pane messages)
+      # Native AI Assistant surface (only used when SLACK_ASSISTANT_ENABLED=true;
+      # subscribing when disabled is harmless — src/channels/slack.ts never
+      # registers the handler unless the flag is on). Requires the app's
+      # "Agent & Assistants" feature to be enabled (see note below).
+      - assistant_thread_started          # user opened the assistant pane → greeting + suggested prompts
+      - assistant_thread_context_changed  # user switched the channel the pane is anchored to
 
   org_deploy_enabled: false
   token_rotation_enabled: false
@@ -77,3 +86,15 @@ settings:
 #     `/invite @<ASSISTANT_NAME>` in that channel.
 #   - The channel ID (from the channel URL, e.g. C0123456789) becomes the JID
 #     `slack:C0123456789` used at registration time — see docs/HOSTED.md.
+#
+# Native AI Assistant surface (optional — split-view assistant pane, suggested
+# prompts, "is thinking…" status):
+#   - Set SLACK_ASSISTANT_ENABLED=true in .env (default off; when off the app
+#     behaves exactly as before and never calls assistant.threads.*).
+#   - In the app config, enable "Agent & Assistants" under Features (this is what
+#     surfaces the assistant pane and lets assistant_thread_started fire).
+#   - The `assistant:write` scope + the two assistant_thread_* events above are
+#     already in this manifest. Reinstall the app after enabling so the new scope
+#     is granted. Events: assistant_thread_started, assistant_thread_context_changed,
+#     message.im. Web API: assistant.threads.setStatus / setSuggestedPrompts /
+#     setTitle (docs.slack.dev/ai).

@@ -76,6 +76,17 @@ Quick summary of what's needed:
 
 Wait for the user to provide both tokens.
 
+**Optional — native AI Assistant surface** (split-view assistant pane, suggested
+prompts, "is thinking…" status). Off by default. To enable:
+- Set `SLACK_ASSISTANT_ENABLED=true` in `.env`.
+- Enable the app's **Agent & Assistants** feature.
+- Add the `assistant:write` scope and subscribe to the `assistant_thread_started`
+  and `assistant_thread_context_changed` events, then **reinstall** the app.
+- Events: `assistant_thread_started`, `assistant_thread_context_changed`,
+  `message.im`. Web API: `assistant.threads.setStatus` / `setSuggestedPrompts` /
+  `setTitle`. See `docs/slack-app-manifest.yml` and https://docs.slack.dev/ai/.
+When off, behavior is unchanged and none of these are required.
+
 ### Configure environment
 
 Add to `.env`:
