@@ -22,6 +22,7 @@ vi.mock('./config.js', async () => {
     CONTAINER_IMAGE: 'nanoclaw-agent:latest',
     CONTAINER_MAX_OUTPUT_SIZE: 10485760,
     CONTAINER_RUNTIME: 'docker',
+    DOCKER_SIBLING_MODE: false,
     CONTAINER_TIMEOUT: 1800000, // 30min
     CREDENTIAL_PROXY_PORT: 3001,
     DATA_DIR: '/tmp/nanoclaw-test-data',
@@ -914,6 +915,7 @@ describe('container-runner local-LLM backend wiring', () => {
       CONTAINER_IMAGE: 'nanoclaw-agent:latest',
       CONTAINER_MAX_OUTPUT_SIZE: 10485760,
       CONTAINER_RUNTIME: 'docker',
+      DOCKER_SIBLING_MODE: false,
       CONTAINER_TIMEOUT: 1800000,
       CREDENTIAL_PROXY_PORT: 3001,
       DATA_DIR: '/tmp/nanoclaw-test-data',
