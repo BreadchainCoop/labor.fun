@@ -4,6 +4,7 @@ import path from 'path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { logger } from './logger.js';
 import { loadProfilePlugins, type PluginApi } from './plugin-loader.js';
 
 describe('loadProfilePlugins', () => {
@@ -11,6 +12,15 @@ describe('loadProfilePlugins', () => {
 
   function makePluginsDir(files: Record<string, string>): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plugins-test-'));
+    tmpDirs.push(dir);
+    for (const [name, body] of Object.entries(files)) {
+      fs.writeFileSync(path.join(dir, name), body);
+    }
+    return dir;
+  }
+
+  function makeCatalogDir(files: Record<string, string>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-test-'));
     tmpDirs.push(dir);
     for (const [name, body] of Object.entries(files)) {
       fs.writeFileSync(path.join(dir, name), body);
@@ -51,7 +61,11 @@ describe('loadProfilePlugins', () => {
       'ignored.txt': 'not a plugin',
     });
     const api = fakeApi();
-    const loaded = await loadProfilePlugins({ pluginsDir: dir, api });
+    const loaded = await loadProfilePlugins({
+      pluginsDir: dir,
+      catalogDir: '/nonexistent/catalog',
+      api,
+    });
 
     expect(loaded).toEqual(['a-channel.mjs', 'b-flow.mjs']); // sorted, .txt skipped
     expect(api.registerChannel).toHaveBeenCalledWith('a', expect.any(Function));
@@ -67,7 +81,11 @@ describe('loadProfilePlugins', () => {
         'export default (api) => api.registerIntegration({ name: "g", start(){} });',
     });
     const api = fakeApi();
-    const loaded = await loadProfilePlugins({ pluginsDir: dir, api });
+    const loaded = await loadProfilePlugins({
+      pluginsDir: dir,
+      catalogDir: '/nonexistent/catalog',
+      api,
+    });
     expect(loaded).toEqual(['good.mjs']);
   });
 
@@ -78,11 +96,146 @@ describe('loadProfilePlugins', () => {
         'export default (api) => api.registerChannel("ok", () => null);',
     });
     const api = fakeApi();
-    const loaded = await loadProfilePlugins({ pluginsDir: dir, api });
+    const loaded = await loadProfilePlugins({
+      pluginsDir: dir,
+      catalogDir: '/nonexistent/catalog',
+      api,
+    });
     expect(loaded).toEqual(['fine.mjs']); // boom recorded as failure, not thrown
     expect(api.registerChannel).toHaveBeenCalledWith(
       'ok',
       expect.any(Function),
     );
+  });
+
+  // --- M1: catalog + ENABLED_PLUGINS gating ---
+
+  it('(a) absent enabledPlugins → registers ALL profile plugins (backward compat)', async () => {
+    // Gating OFF (enabledPlugins undefined): every profile-dir plugin registers,
+    // and the catalog stays dark even though it is present and imported.
+    const profile = makePluginsDir({
+      'p-one.mjs':
+        'export default (api) => api.registerIntegration({ name: "one", start(){} });',
+      'p-two.mjs':
+        'export default (api) => api.registerIntegration({ name: "two", start(){} });',
+    });
+    const catalog = makeCatalogDir({
+      'cat.mjs':
+        'export const id = "cat"; export default (api) => api.registerIntegration({ name: "cat", start(){} });',
+    });
+    const api = fakeApi();
+    const loaded = await loadProfilePlugins({
+      pluginsDir: profile,
+      catalogDir: catalog,
+      enabledPlugins: undefined, // absent → gating off
+      api,
+    });
+
+    expect(loaded).toEqual(['p-one.mjs', 'p-two.mjs']); // both profile plugins
+    expect(loaded).not.toContain('cat.mjs'); // catalog off by default
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'one' }),
+    );
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'two' }),
+    );
+    expect(api.registerIntegration).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'cat' }),
+    );
+  });
+
+  it('(b) enabledPlugins=[id] → only that plugin registers; others imported-but-not-registered', async () => {
+    const profile = makePluginsDir({
+      'keep.mjs':
+        'export const id = "keep"; export default (api) => api.registerIntegration({ name: "keep", start(){} });',
+      'drop.mjs':
+        'export const id = "drop"; export default (api) => api.registerIntegration({ name: "drop", start(){} });',
+    });
+    const catalog = makeCatalogDir({
+      'wanted.mjs':
+        'export const id = "wanted"; export default (api) => api.registerIntegration({ name: "wanted", start(){} });',
+      'unwanted.mjs':
+        'export const id = "unwanted"; export default (api) => api.registerIntegration({ name: "unwanted", start(){} });',
+    });
+    const api = fakeApi();
+
+    // Enable one catalog id and one profile id.
+    const loaded = await loadProfilePlugins({
+      pluginsDir: profile,
+      catalogDir: catalog,
+      enabledPlugins: ['wanted', 'keep'],
+      api,
+    });
+
+    expect(loaded.sort()).toEqual(['keep.mjs', 'wanted.mjs']);
+    expect(loaded).not.toContain('drop.mjs');
+    expect(loaded).not.toContain('unwanted.mjs');
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'wanted' }),
+    );
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'keep' }),
+    );
+    // Imported (discovered) but never registered.
+    expect(api.registerIntegration).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'drop' }),
+    );
+    expect(api.registerIntegration).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'unwanted' }),
+    );
+  });
+
+  it('(c) unknown id in enabledPlugins → warns, no crash, valid ids still register', async () => {
+    const catalog = makeCatalogDir({
+      'real.mjs':
+        'export const id = "real"; export default (api) => api.registerIntegration({ name: "real", start(){} });',
+    });
+    const api = fakeApi();
+    // The unknown-id warning goes through the module logger (discovery-level),
+    // not the plugin-facing api.logger.
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const loaded = await loadProfilePlugins({
+      pluginsDir: '/nonexistent/plugins',
+      catalogDir: catalog,
+      enabledPlugins: ['real', 'does-not-exist'],
+      api,
+    });
+
+    expect(loaded).toEqual(['real.mjs']); // no throw; real still registers
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'real' }),
+    );
+    // The unknown id produced a warning naming it — rather than an error/throw.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'does-not-exist' }),
+      expect.any(String),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('(d) empty enabledPlugins=[] with a catalog present → catalog NOT registered', async () => {
+    const catalog = makeCatalogDir({
+      'a.mjs':
+        'export const id = "a"; export default (api) => api.registerIntegration({ name: "a", start(){} });',
+      'b.mjs':
+        'export const id = "b"; export default (api) => api.registerIntegration({ name: "b", start(){} });',
+    });
+    const profile = makePluginsDir({
+      'prof.mjs':
+        'export const id = "prof"; export default (api) => api.registerIntegration({ name: "prof", start(){} });',
+    });
+    const api = fakeApi();
+
+    // Explicit [] turns gating ON but enables nothing → register nothing,
+    // including the profile-dir plugin (gating applies to both sources).
+    const loaded = await loadProfilePlugins({
+      pluginsDir: profile,
+      catalogDir: catalog,
+      enabledPlugins: [],
+      api,
+    });
+
+    expect(loaded).toEqual([]);
+    expect(api.registerIntegration).not.toHaveBeenCalled();
   });
 });
