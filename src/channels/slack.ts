@@ -2,7 +2,11 @@ import fs from 'fs';
 import path from 'path';
 
 import { App, LogLevel } from '@slack/bolt';
-import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
+import type {
+  GenericMessageEvent,
+  BotMessageEvent,
+  AssistantThreadStartedEvent,
+} from '@slack/types';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { logReaction, storeOutboundMessage, updateChatName } from '../db.js';
@@ -22,6 +26,39 @@ import {
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
+
+// Slack's native AI Assistant surface (split-view assistant pane) is gated
+// behind this env flag. Default OFF → existing behavior is byte-for-byte
+// unchanged: no assistant_thread_started handler is registered, no
+// assistant.threads.* Web API calls are made, and message.im events flow
+// through the normal path exactly as before.
+//   docs.slack.dev/ai — events: assistant_thread_started,
+//   assistant_thread_context_changed, message.im; Web API methods:
+//   assistant.threads.setStatus / setSuggestedPrompts / setTitle; scope:
+//   assistant:write.
+// `env` is the object already read from readEnvFile — process.env wins over it,
+// matching the SLACK_* precedence used everywhere else in this file.
+function assistantSurfaceEnabled(env: Record<string, string>): boolean {
+  const raw =
+    process.env.SLACK_ASSISTANT_ENABLED || env.SLACK_ASSISTANT_ENABLED;
+  return String(raw).toLowerCase() === 'true';
+}
+
+// On-brand suggested prompts shown when a user opens the assistant pane.
+// Slack allows up to four; each needs a title (button label) and a message
+// (the text sent as if the user typed it). Kept generic/framework-level — no
+// hardcoded org identity (see CLAUDE.md: derive brand from profile/config).
+const ASSISTANT_SUGGESTED_PROMPTS: Array<{ title: string; message: string }> = [
+  { title: "What's on our agenda?", message: "What's on our agenda?" },
+  {
+    title: 'Summarize this channel',
+    message: 'Summarize the recent activity in this channel.',
+  },
+  {
+    title: 'Open a GitHub issue',
+    message: 'Open a GitHub issue for me.',
+  },
+];
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined), bot messages
@@ -79,6 +116,15 @@ export class SlackChannel implements Channel {
   private threadTsById = new Map<string, string>();
   private static readonly THREAD_TS_BY_ID_MAX = 500;
 
+  // Native AI Assistant surface (SLACK_ASSISTANT_ENABLED=true).
+  private assistantEnabled = false;
+  // Assistant thread roots we've seen, keyed by jid (`slack:<channel>`) → the
+  // assistant thread's thread_ts. A message.im whose thread_ts is in here is an
+  // assistant-pane message (vs a plain DM); we set a thinking status for it and
+  // clear that status when the agent's reply is posted.
+  private assistantThreads = new Map<string, string>();
+  private static readonly ASSISTANT_THREADS_MAX = 500;
+
   private opts: SlackChannelOpts;
 
   constructor(opts: SlackChannelOpts) {
@@ -95,7 +141,9 @@ export class SlackChannel implements Channel {
       'SLACK_HTTP_PORT',
       'SLACK_INGRESS_SECRET',
       'SLACK_SIGNING_SECRET',
+      'SLACK_ASSISTANT_ENABLED',
     ]);
+    this.assistantEnabled = assistantSurfaceEnabled(env);
     const botToken = process.env.SLACK_BOT_TOKEN || env.SLACK_BOT_TOKEN;
     const appToken = process.env.SLACK_APP_TOKEN || env.SLACK_APP_TOKEN;
     const receiverMode =
@@ -154,6 +202,25 @@ export class SlackChannel implements Channel {
   }
 
   private setupEventHandlers(): void {
+    // Native AI Assistant surface — only wired when SLACK_ASSISTANT_ENABLED=true.
+    // When off, this handler is never registered, so the app's event surface is
+    // identical to before (message handler only) and no assistant.threads.* Web
+    // API calls can ever fire. We use the raw Web API client (app.client.
+    // assistant.threads.*) rather than Bolt's Assistant class on purpose: the
+    // Assistant class strips next() and swallows assistant-thread message.im
+    // events before they reach app.event('message'), which would force us to
+    // duplicate the whole onMessage pipeline. Handling assistant_thread_started
+    // here and letting message.im flow through the existing handler keeps a
+    // single message entry point and reuses the agent path unchanged.
+    if (this.assistantEnabled) {
+      this.app.event(
+        'assistant_thread_started',
+        async ({ event }: { event: AssistantThreadStartedEvent }) => {
+          await this.onAssistantThreadStarted(event);
+        },
+      );
+    }
+
     // Use app.event('message') instead of app.message() to capture all
     // message subtypes including bot_message (needed to track our own output)
     // and message_changed (edits).
@@ -384,6 +451,20 @@ export class SlackChannel implements Channel {
         }
       }
 
+      // Native AI Assistant surface: if this real user message lands in an
+      // assistant thread we opened, show the "is thinking…" status while the
+      // existing agent path runs. The status is cleared when sendMessage posts
+      // the reply (which threads back into this same assistant thread via
+      // threadTsById → replyToMessageId). Best-effort: never block delivery.
+      if (
+        this.assistantEnabled &&
+        !isBotMessage &&
+        threadTs &&
+        this.assistantThreads.get(jid) === threadTs
+      ) {
+        void this.setAssistantStatus(jid, msg.channel, threadTs, 'is thinking…');
+      }
+
       this.opts.onMessage(jid, {
         id: msg.ts,
         chat_jid: jid,
@@ -396,6 +477,84 @@ export class SlackChannel implements Channel {
         thread_id: threadTs && threadTs !== msg.ts ? threadTs : undefined,
       });
     });
+  }
+
+  /**
+   * Handle `assistant_thread_started`: greet the user in the assistant pane,
+   * offer on-brand suggested prompts, and set a friendly thread title. All
+   * calls are best-effort — a failure here must never break the assistant.
+   *
+   * Uses the Web API directly (assistant.threads.setSuggestedPrompts,
+   * assistant.threads.setTitle) — scope: assistant:write. Posting the greeting
+   * reuses the existing chat.postMessage path (thread_ts pins it into the pane).
+   */
+  private async onAssistantThreadStarted(
+    event: AssistantThreadStartedEvent,
+  ): Promise<void> {
+    const { channel_id: channelId, thread_ts: threadTs } =
+      event.assistant_thread;
+    const jid = `slack:${channelId}`;
+
+    // Remember this thread so the message handler can distinguish assistant-pane
+    // messages from plain DMs and set a thinking status for them.
+    this.assistantThreads.set(jid, threadTs);
+    if (this.assistantThreads.size > SlackChannel.ASSISTANT_THREADS_MAX) {
+      const oldest = this.assistantThreads.keys().next().value;
+      if (oldest !== undefined) this.assistantThreads.delete(oldest);
+    }
+    // Pin replies for this thread to the assistant thread root.
+    this.threadTsById.set(`${jid}:${threadTs}`, threadTs);
+
+    try {
+      await this.app.client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: `Hi! I'm ${ASSISTANT_NAME}. Ask me anything, or pick a prompt below to get started.`,
+      });
+    } catch (err) {
+      logger.warn({ jid, err }, 'Assistant greeting failed');
+    }
+
+    try {
+      await this.app.client.assistant.threads.setSuggestedPrompts({
+        channel_id: channelId,
+        thread_ts: threadTs,
+        prompts: ASSISTANT_SUGGESTED_PROMPTS,
+      });
+    } catch (err) {
+      logger.warn({ jid, err }, 'Assistant setSuggestedPrompts failed');
+    }
+
+    try {
+      await this.app.client.assistant.threads.setTitle({
+        channel_id: channelId,
+        thread_ts: threadTs,
+        title: `Chat with ${ASSISTANT_NAME}`,
+      });
+    } catch (err) {
+      logger.debug({ jid, err }, 'Assistant setTitle failed (non-fatal)');
+    }
+  }
+
+  /**
+   * Set (or clear, with an empty string) the assistant thread status shown in
+   * the pane. assistant.threads.setStatus — scope: assistant:write.
+   */
+  private async setAssistantStatus(
+    jid: string,
+    channelId: string,
+    threadTs: string,
+    status: string,
+  ): Promise<void> {
+    try {
+      await this.app.client.assistant.threads.setStatus({
+        channel_id: channelId,
+        thread_ts: threadTs,
+        status,
+      });
+    } catch (err) {
+      logger.debug({ jid, err }, 'Assistant setStatus failed (non-fatal)');
+    }
   }
 
   async connect(): Promise<void> {
@@ -454,6 +613,17 @@ export class SlackChannel implements Channel {
       channel: channelId,
       ...(threadTs ? { thread_ts: threadTs } : {}),
     };
+
+    // Native AI Assistant surface: clear the "is thinking…" status just before
+    // the reply lands, if this reply threads into a known assistant thread.
+    // Empty string removes the status indicator. Best-effort.
+    if (
+      this.assistantEnabled &&
+      threadTs &&
+      this.assistantThreads.get(jid) === threadTs
+    ) {
+      await this.setAssistantStatus(jid, channelId, threadTs, '');
+    }
 
     try {
       // Slack limits messages to ~4000 characters; split if needed.
