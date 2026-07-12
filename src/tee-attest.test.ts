@@ -111,7 +111,11 @@ describe('attestNonce', () => {
   it('returns a full attestation when the socket is present', async () => {
     const client = stubClient({
       present: true,
-      info: { app_id: 'app-1', instance_id: 'inst-1', compose_hash: 'deadbeef' },
+      info: {
+        app_id: 'app-1',
+        instance_id: 'inst-1',
+        compose_hash: 'deadbeef',
+      },
       quote: { quote: 'abcdef0123456789' },
     });
     const r = await attestNonce('my-nonce-123', {

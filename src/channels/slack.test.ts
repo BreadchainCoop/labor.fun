@@ -1296,15 +1296,15 @@ describe('SlackChannel', () => {
 
     it('registers the assistant_thread_started handler only when enabled', () => {
       new SlackChannel(createTestOpts());
-      expect(
-        currentApp().eventHandlers.has('assistant_thread_started'),
-      ).toBe(false);
+      expect(currentApp().eventHandlers.has('assistant_thread_started')).toBe(
+        false,
+      );
 
       process.env.SLACK_ASSISTANT_ENABLED = 'true';
       new SlackChannel(createTestOpts());
-      expect(
-        currentApp().eventHandlers.has('assistant_thread_started'),
-      ).toBe(true);
+      expect(currentApp().eventHandlers.has('assistant_thread_started')).toBe(
+        true,
+      );
     });
 
     it('on assistant_thread_started: greets and sets suggested prompts', async () => {
@@ -1343,9 +1343,7 @@ describe('SlackChannel', () => {
       }
 
       // Optional title set.
-      expect(
-        currentApp().client.assistant.threads.setTitle,
-      ).toHaveBeenCalled();
+      expect(currentApp().client.assistant.threads.setTitle).toHaveBeenCalled();
     });
 
     it('on an assistant-thread user message: sets thinking status, delivers to onMessage, clears status on reply', async () => {
@@ -1418,9 +1416,9 @@ describe('SlackChannel', () => {
       await channel.connect();
 
       // No assistant_thread_started handler is even registered.
-      expect(
-        currentApp().eventHandlers.has('assistant_thread_started'),
-      ).toBe(false);
+      expect(currentApp().eventHandlers.has('assistant_thread_started')).toBe(
+        false,
+      );
 
       // A DM that (were the flag on) would be an assistant-thread message still
       // flows through the normal path and touches NONE of the assistant APIs.

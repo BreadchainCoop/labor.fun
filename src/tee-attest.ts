@@ -158,7 +158,9 @@ export class DstackClient {
           method,
           headers: {
             'Content-Type': 'application/json',
-            ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+            ...(payload
+              ? { 'Content-Length': Buffer.byteLength(payload) }
+              : {}),
           },
         },
         (res) => {
@@ -283,7 +285,7 @@ export function formatAttestationReply(r: AttestationResult): string {
     lines.push(
       r.wasHashed
         ? '(SHA-512/256 of your nonce — verify: `openssl dgst -sha512-256`)'
-        : '(your nonce in hex — verify: `echo -n \'<nonce>\' | xxd -p`)',
+        : "(your nonce in hex — verify: `echo -n '<nonce>' | xxd -p`)",
     );
   }
 

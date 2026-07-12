@@ -33,7 +33,11 @@ vi.mock('../db.js', () => ({
 vi.mock('discord.js', () => ({
   ChannelType: { GuildForum: 15, GuildMedia: 16 },
   Client: class {},
-  Events: { MessageCreate: 'messageCreate', ClientReady: 'ready', Error: 'error' },
+  Events: {
+    MessageCreate: 'messageCreate',
+    ClientReady: 'ready',
+    Error: 'error',
+  },
   GatewayIntentBits: {},
   Partials: {},
   TextChannel: class {},
@@ -123,8 +127,7 @@ function messagePayload(overrides: {
     message: {
       id: overrides.messageId ?? 'msg_001',
       channel_id: overrides.channelId ?? CHANNEL_ID,
-      guild_id:
-        overrides.guildId === undefined ? 'guild-1' : overrides.guildId,
+      guild_id: overrides.guildId === undefined ? 'guild-1' : overrides.guildId,
       guild_name: 'Test Server',
       channel_name: 'general',
       content: overrides.content ?? 'Hello everyone',
