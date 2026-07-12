@@ -102,7 +102,15 @@ export interface SendMessageOpts {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string, opts?: SendMessageOpts): Promise<void>;
+  /**
+   * Deliver a message to `jid`. Resolves `true` when the message was delivered
+   * (or accepted for guaranteed later delivery, e.g. queued while briefly
+   * disconnected) and `false` when it was dropped or failed to send (channel
+   * not connected, target unreachable, API error). Callers that only reply into
+   * the current chat may ignore the result; the cross-channel IPC path relies
+   * on it to surface silent non-delivery instead of reporting a false success.
+   */
+  sendMessage(jid: string, text: string, opts?: SendMessageOpts): Promise<boolean>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;

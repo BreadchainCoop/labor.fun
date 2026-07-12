@@ -964,7 +964,7 @@ describe('DiscordChannel', () => {
       // Should not throw
       await expect(
         channel.sendMessage('dc:1234567890123456', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
     });
 
     it('does nothing when client is not initialized', async () => {
@@ -1028,7 +1028,7 @@ describe('DiscordChannel', () => {
       // Should not throw — error is caught and logged
       await expect(
         channel.sendMessage('dc-dm:987654321', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
     });
   });
 

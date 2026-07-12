@@ -1072,7 +1072,7 @@ describe('TelegramChannel', () => {
       // Should not throw
       await expect(
         channel.sendMessage('tg:100200300', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(true);
     });
 
     it('does nothing when bot is not initialized', async () => {

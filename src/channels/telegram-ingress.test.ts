@@ -459,7 +459,7 @@ describe('Telegram ingress mode', () => {
 
       await expect(
         channel.sendMessage('tg:100200300', 'Hello'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
     });
 
     it('setTyping proxies sendChatAction', async () => {

@@ -1624,13 +1624,18 @@ async function main(): Promise<void> {
 
   startIpcWatcher({
     sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
+      // Route only to a *connected* channel that owns the JID (mirrors
+      // routeOutbound). A channel object that exists but isn't connected would
+      // otherwise accept the send and silently drop it.
+      const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
-    // Mirror the send path above so the watcher can pre-flight a target's
-    // routability and surface undeliverable sends instead of dropping them.
-    canDeliver: (jid) => findChannel(channels, jid) !== undefined,
+    // Mirror the send path above (a *connected* owning channel) so the watcher
+    // can pre-flight a target's routability and surface undeliverable sends
+    // instead of dropping them.
+    canDeliver: (jid) =>
+      channels.some((c) => c.ownsJid(jid) && c.isConnected()),
     deleteMessage: async (jid, messageId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
