@@ -110,7 +110,11 @@ export interface Channel {
    * the current chat may ignore the result; the cross-channel IPC path relies
    * on it to surface silent non-delivery instead of reporting a false success.
    */
-  sendMessage(jid: string, text: string, opts?: SendMessageOpts): Promise<boolean>;
+  sendMessage(
+    jid: string,
+    text: string,
+    opts?: SendMessageOpts,
+  ): Promise<boolean>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
