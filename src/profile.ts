@@ -134,6 +134,22 @@ export interface ProfileConfig {
    */
   enabledPlugins?: string[];
   /**
+   * Per-plugin CONFIG (M2 of per-tenant plugin support). A JSON object keyed by
+   * plugin id, each value that plugin's own config object (its schema is the
+   * plugin's business — see its catalog README entry). At load time the loader
+   * hands `pluginConfig[<plugin id>]` to that plugin's register function as a
+   * second argument, so one catalog plugin can be parameterized differently per
+   * org WITHOUT forking its code (facilitator pool, email recipients, schedule,
+   * channel, …). Absent/`{}` → every plugin receives `{}` (its documented
+   * defaults apply).
+   *
+   * The `PLUGIN_CONFIG_JSON` env var (hosted per-tenant injection) merges OVER
+   * this at the id level: env's entry for a plugin id replaces the profile's
+   * entry for that id wholesale (no deep merge). See config.ts (`PLUGIN_CONFIG`)
+   * and docs/PLUGINS.md.
+   */
+  pluginConfig?: Record<string, unknown>;
+  /**
    * Human-in-the-loop approval gate (reusable primitive). Which *classes* of
    * consequential action must be approved by a human before the agent may
    * proceed is declared here — never hardcoded in `src/`. When a proposed
