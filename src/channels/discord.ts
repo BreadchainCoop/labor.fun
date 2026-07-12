@@ -309,6 +309,34 @@ export function toHistoryMessage(
   };
 }
 
+/**
+ * Discord channel. Runs in one of two transports, chosen by the factory:
+ *
+ *   • GATEWAY (BYO bot token) — a discord.js Client over the Gateway WS. Full
+ *     fidelity: threading, attachment download hints, member/role fetches, DMs.
+ *
+ *   • INGRESS (shared-bot, hosted SaaS) — NO discord.js Client and NO token.
+ *     The control plane owns the platform bot; it forwards signed message JSON
+ *     to POST /discord/messages (on the shared INGRESS_HTTP_PORT listener) and
+ *     the channel proxies ALL outbound (send/edit/delete/typing/reaction) back
+ *     through the CP via {@link DiscordSender} → POST /api/instance/discord/send.
+ *
+ * Inbound parsing, trigger translation, auto-register, chat naming, and
+ * onMessage delivery are transport-agnostic ({@link handleInboundMessage}); the
+ * gateway and ingress paths only differ in how they FILL the InboundDiscord and
+ * how they SEND. Documented ingress-only degradations (no Client/token/cache):
+ *
+ *   - @bot-USER mention triggering works only when the DISCORD_BOT_ID hint is
+ *     set; @bot-ROLE mention triggering is off (no guild member-role cache).
+ *   - reply-to context uses only the CP-embedded referenced_message (no
+ *     on-demand fetch of an uncached referenced message).
+ *   - role-based DM auto-allowlisting is off (no guild member fetch).
+ *   - attachment DOWNLOAD is unavailable; CDN URLs are still surfaced inline.
+ *   - outbound threading is the CP's concern (no local thread handles); a
+ *     `dc-dm:<userId>` send can't be resolved to a channel and is dropped.
+ *   - reactions/typing target the recorded thread channel of a re-routed
+ *     message when known, else the jid's channel.
+ */
 export class DiscordChannel implements Channel {
   name = 'discord';
 
@@ -809,9 +837,7 @@ export class DiscordChannel implements Channel {
    *  - attachment DOWNLOAD is not available (URLs are still surfaced to the
    *    agent inline, same as gateway).
    */
-  private async processRawMessage(
-    raw: Record<string, unknown>,
-  ): Promise<void> {
+  private async processRawMessage(raw: Record<string, unknown>): Promise<void> {
     try {
       // The CP may wrap the message ({ message: {...} }) or forward it bare.
       const msg = (
