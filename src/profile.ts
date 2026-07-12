@@ -118,6 +118,22 @@ export interface ProfileConfig {
    */
   enabledSkills?: string[];
   /**
+   * Catalog plugin enable-list (M1 of per-tenant plugin support). Plugins are
+   * discovered from two sources — the baked first-party CATALOG
+   * (`container/catalog-plugins/`, policy-closed / off by default) and this
+   * profile's own `plugins/` dir — but only a plugin whose `id` appears here is
+   * *registered* (its channels/flows self-register). Keyed by plugin id (a
+   * catalog plugin's filename without extension, or its exported `id`).
+   *
+   * BACKWARD COMPAT: when this field is ABSENT/undefined (every existing profile
+   * today), gating is OFF and the loader preserves the legacy behavior exactly —
+   * every profile-dir plugin registers. Gating applies ONLY when this list is
+   * explicitly present (even as an empty array, which registers nothing). The
+   * `ENABLED_PLUGINS` env var (hosted per-tenant injection) merges over this.
+   * See docs/PLUGINS.md and config.ts (ENABLED_PLUGINS merge).
+   */
+  enabledPlugins?: string[];
+  /**
    * Human-in-the-loop approval gate (reusable primitive). Which *classes* of
    * consequential action must be approved by a human before the agent may
    * proceed is declared here — never hardcoded in `src/`. When a proposed
