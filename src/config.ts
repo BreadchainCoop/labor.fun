@@ -1,3 +1,4 @@
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -81,6 +82,7 @@ const envConfig = readEnvFile([
   'SHARED_KB_GROUP',
   'LABOR_PROFILE',
   'ENABLED_SKILLS',
+  'ENABLED_PLUGINS',
   'GATED_ACTION_CLASSES',
   'APPROVAL_TIMEOUT_MINUTES',
   'APPROVAL_EXPIRY_TICK_MS',
@@ -172,6 +174,93 @@ export const ENABLED_SKILLS: string[] = (() => {
     ? PROFILE.enabledSkills.map((s) => String(s).trim()).filter(Boolean)
     : [];
   return Array.from(new Set([...fromProfile, ...fromEnv]));
+})();
+
+// --- Catalog plugin enable-list (M1 of per-tenant plugins) ---
+// The set of plugin ids to REGISTER, gating the two discovery sources — the
+// baked first-party catalog (CATALOG_PLUGINS_DIR, policy-closed) and the active
+// profile's own plugins/ dir. Merged from the active profile's `enabledPlugins`
+// and the `ENABLED_PLUGINS` env var (comma-separated OR a JSON array — for
+// hosted per-tenant injection), mirroring the ENABLED_SKILLS / MCP_SERVERS
+// idiom. Validated loudly at startup: a non-string entry throws rather than
+// being silently coerced.
+//
+// CRITICAL backward-compat: the value is `undefined` when NEITHER the profile
+// nor the env declares a list — that means "gating off" and the loader
+// preserves today's behavior (register every profile-dir plugin, catalog off).
+// An explicit (even empty) list turns gating ON. We keep the absent-vs-[]
+// distinction here on purpose; `ENABLED_SKILLS` collapses to [] because skills
+// have no such "register everything" legacy fallback to protect.
+export const ENABLED_PLUGINS: string[] | undefined = (() => {
+  const envRaw = envVal('ENABLED_PLUGINS');
+  const envSet = envRaw !== undefined && envRaw.trim() !== '';
+  let fromEnv: string[] = [];
+  if (envSet) {
+    const trimmed = envRaw!.trim();
+    if (trimmed.startsWith('[')) {
+      // JSON-array form (hosted injection). Reject non-string entries loudly.
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch (err) {
+        throw new Error(
+          `ENABLED_PLUGINS env var is not valid JSON: ${(err as Error).message}`,
+          { cause: err },
+        );
+      }
+      if (!Array.isArray(parsed)) {
+        throw new Error('ENABLED_PLUGINS env var must be a JSON array.');
+      }
+      fromEnv = parsed.map((id, i) => {
+        if (typeof id !== 'string') {
+          throw new Error(
+            `ENABLED_PLUGINS[${i}] must be a string, got ${typeof id}.`,
+          );
+        }
+        return id.trim();
+      });
+    } else {
+      // Comma-separated form.
+      fromEnv = trimmed
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+  }
+
+  const profileSet = PROFILE.enabledPlugins !== undefined;
+  if (profileSet && !Array.isArray(PROFILE.enabledPlugins)) {
+    throw new Error(
+      'profile.config.json `enabledPlugins` must be an array of plugin ids.',
+    );
+  }
+  const fromProfile = Array.isArray(PROFILE.enabledPlugins)
+    ? PROFILE.enabledPlugins.map((id, i) => {
+        if (typeof id !== 'string') {
+          throw new Error(
+            `profile.config.json enabledPlugins[${i}] must be a string.`,
+          );
+        }
+        return id.trim();
+      })
+    : [];
+
+  // Absent everywhere → undefined (gating OFF, legacy behavior preserved).
+  if (!profileSet && !envSet) return undefined;
+  return Array.from(new Set([...fromProfile, ...fromEnv].filter(Boolean)));
+})();
+
+// Absolute path to the baked first-party plugin CATALOG. Two layouts:
+//   - orchestrator image: /app/catalog-plugins (Dockerfile.orchestrator COPYs
+//     container/catalog-plugins there, next to dist/ — process.cwd() == /app).
+//   - dev checkout / tests: container/catalog-plugins under the repo root.
+// Prefer the image path when present, else the in-tree source. Catalog plugins
+// are OFF by default and only register when their id is in ENABLED_PLUGINS.
+// See container/catalog-plugins/README.md.
+export const CATALOG_PLUGINS_DIR = (() => {
+  const baked = path.join(PROJECT_ROOT, 'catalog-plugins');
+  if (fs.existsSync(baked)) return baked;
+  return path.join(PROJECT_ROOT, 'container', 'catalog-plugins');
 })();
 
 // --- Generic remote-MCP bridge (docs/MCP-SERVERS.md) ---

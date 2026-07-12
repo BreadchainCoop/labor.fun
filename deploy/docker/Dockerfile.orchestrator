@@ -22,6 +22,10 @@
 #     - container/agent-runner/      copied into each agent pod at /app/src and
 #                                    recompiled at pod start (container-runner.ts
 #                                    reads cwd/container/agent-runner/src)
+#     - catalog-plugins/             first-party plugin catalog (policy-closed;
+#                                    from container/catalog-plugins/). Imported at
+#                                    boot; registered per tenant via ENABLED_PLUGINS
+#                                    (plugin-loader.ts reads cwd/catalog-plugins)
 #     - scripts/                     task-script gates (agent Dockerfile also
 #                                    bakes these, but the orchestrator reads cwd)
 #     - rules/ setup/ docs/          agent guidance mounted read-only into the
@@ -104,6 +108,10 @@ COPY --from=build /app/dist ./dist
 # See the header note for why each is here.
 COPY container/skills ./container/skills
 COPY container/agent-runner ./container/agent-runner
+# First-party plugin catalog (policy-closed; opted in per tenant via
+# ENABLED_PLUGINS). Copied to /app/catalog-plugins so the plugin loader finds it
+# next to dist/. See container/catalog-plugins/README.md and src/plugin-loader.ts.
+COPY container/catalog-plugins ./catalog-plugins
 COPY scripts ./scripts
 COPY rules ./rules
 COPY setup ./setup
