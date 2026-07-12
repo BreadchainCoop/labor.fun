@@ -14,21 +14,18 @@
  * handlers shared — and it avoids pulling in ExpressReceiver's express
  * dependency and subclassing its verification.
  */
-import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
+import { Server, IncomingMessage, ServerResponse } from 'http';
 import { createHmac, timingSafeEqual } from 'crypto';
 
 import type { App, Receiver, ReceiverEvent } from '@slack/bolt';
 
+import { getIngressHttpServer } from './ingress-http-server.js';
 import { logger as defaultLogger } from '../logger.js';
 
 // Slack allows a 3s budget to respond to events, and rejects requests whose
 // timestamp is stale. We use ±300s (matching Slack's own guidance) to bound
 // replay of captured signatures.
 const MAX_TIMESTAMP_SKEW_SECONDS = 300;
-
-// Cap the buffered request body to bound a pre-auth memory-exhaustion DoS.
-// Slack event payloads are small; 1 MiB is generous headroom.
-const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB
 
 type Logger = Pick<typeof defaultLogger, 'info' | 'warn' | 'error' | 'debug'>;
 
@@ -112,7 +109,6 @@ export function verifySlackSignature(args: {
 
 export class SlackHttpReceiver implements Receiver {
   private app: App | undefined;
-  private server: Server | undefined;
   private readonly port: number;
   private readonly ingressSecret: string | undefined;
   private readonly signingSecret: string | undefined;
@@ -130,125 +126,65 @@ export class SlackHttpReceiver implements Receiver {
   }
 
   start(): Promise<Server> {
-    return new Promise((resolve, reject) => {
-      const server = createServer((req, res) => this.handleRequest(req, res));
-      this.server = server;
-      // Bind on 0.0.0.0 so the ingress / other pods can reach us — this must
-      // NOT be 127.0.0.1.
-      server.listen(this.port, '0.0.0.0', () => {
-        this.logger.info(
-          { port: this.port, mode: this.ingressSecret ? 'ingress' : 'slack' },
-          'Slack HTTP receiver listening',
-        );
-        resolve(server);
-      });
-      server.on('error', reject);
-    });
+    // Share ONE listener per port with any other ingress receiver (e.g. the
+    // Telegram shared-bot ingress) so both can bind the same SLACK_HTTP_PORT.
+    // Raw-body buffering + the 1 MiB cap now live in the shared server; this
+    // handler owns verification, the url_verification challenge, ack, and
+    // dispatch — behaviorally identical to the previous inline handleRequest.
+    const shared = getIngressHttpServer(this.port, this.logger);
+    shared.registerRoute('POST', '/slack/events', (rawBody, req, res) =>
+      this.handleSlackRequest(rawBody, req, res),
+    );
+    return shared.start();
   }
 
   stop(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!this.server) {
-        resolve();
-        return;
-      }
-      this.server.close((err) => {
-        this.server = undefined;
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    return getIngressHttpServer(this.port, this.logger).stop();
   }
 
-  private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    const path = (req.url || '').split('?')[0];
-    if (req.method !== 'POST' || path !== '/slack/events') {
-      res.writeHead(404);
-      res.end('Not Found');
+  private handleSlackRequest(
+    rawBody: string,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
+    // Raw body first: signature verification runs on the raw bytes, BEFORE any
+    // JSON parsing.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    const verified = this.verify(req, rawBody, nowSeconds);
+    if (!verified) {
+      this.logger.warn(
+        { url: req.url, mode: this.ingressSecret ? 'ingress' : 'slack' },
+        'Slack HTTP receiver rejected request (signature verification failed)',
+      );
+      res.writeHead(401);
+      res.end('Unauthorized');
       return;
     }
 
-    // Content-Length fast path: if a caller advertises an over-cap body, reject
-    // before attaching data listeners so we never buffer a byte of it. Parse
-    // defensively — a malformed/absent header falls through to the running
-    // counter below.
-    const contentLength = Number(req.headers['content-length']);
-    if (!Number.isNaN(contentLength) && contentLength > MAX_BODY_BYTES) {
-      res.writeHead(413);
-      res.end('Payload Too Large');
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      res.writeHead(400);
+      res.end('Bad Request');
       return;
     }
 
-    const chunks: Buffer[] = [];
-    let received = 0;
-    let aborted = false;
-    req.on('data', (c) => {
-      if (aborted) return;
-      received += c.length;
-      // Running-counter enforcement: defends against chunked / missing
-      // Content-Length or a lying Content-Length. Stop buffering the moment we
-      // cross the cap, respond 413 (once), and tear down the socket.
-      if (received > MAX_BODY_BYTES) {
-        aborted = true;
-        if (!res.headersSent) {
-          res.writeHead(413);
-          res.end('Payload Too Large');
-        }
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => {
-      // If we aborted mid-stream, the request is already answered/torn down.
-      if (aborted) return;
-      // Raw body first: signature verification runs on the raw bytes, BEFORE
-      // any JSON parsing.
-      const rawBody = Buffer.concat(chunks).toString('utf-8');
-      const nowSeconds = Math.floor(Date.now() / 1000);
+    // Slack's URL verification handshake: echo the challenge. Verified above,
+    // but never dispatched to the app.
+    if (parsed.type === 'url_verification') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ challenge: parsed.challenge }));
+      return;
+    }
 
-      const verified = this.verify(req, rawBody, nowSeconds);
-      if (!verified) {
-        this.logger.warn(
-          { url: req.url, mode: this.ingressSecret ? 'ingress' : 'slack' },
-          'Slack HTTP receiver rejected request (signature verification failed)',
-        );
-        res.writeHead(401);
-        res.end('Unauthorized');
-        return;
-      }
+    // Ack Slack immediately (empty 200 within the 3s budget), THEN process
+    // asynchronously — fire-and-forget so slow handlers never blow the ack.
+    res.writeHead(200);
+    res.end();
 
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(rawBody);
-      } catch {
-        res.writeHead(400);
-        res.end('Bad Request');
-        return;
-      }
-
-      // Slack's URL verification handshake: echo the challenge. Verified above,
-      // but never dispatched to the app.
-      if (parsed.type === 'url_verification') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ challenge: parsed.challenge }));
-        return;
-      }
-
-      // Ack Slack immediately (empty 200 within the 3s budget), THEN process
-      // asynchronously — fire-and-forget so slow handlers never blow the ack.
-      res.writeHead(200);
-      res.end();
-
-      this.dispatch(parsed);
-    });
-    req.on('error', (err) => {
-      this.logger.warn({ err }, 'Slack HTTP receiver request error');
-      if (!res.headersSent) {
-        res.writeHead(400);
-        res.end('Bad Request');
-      }
-    });
+    this.dispatch(parsed);
   }
 
   private verify(
