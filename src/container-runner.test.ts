@@ -978,3 +978,74 @@ describe('container-runner local-LLM backend wiring', () => {
     expect(logged).not.toContain(LLM_SECRET);
   });
 });
+
+// Regression guard for the k8s main-group mount fix: the DOCKER path must keep
+// mounting the read-only project root (/workspace/project) and its /dev/null
+// .env shadow for a MAIN group exactly as before. Only the kubernetes path
+// drops those (see container-runner-k8s-main.test.ts) to avoid nesting the
+// writable store under a read-only subPath volumeMount.
+describe('container-runner docker main-group project-root mount (unchanged)', () => {
+  const mainInput = {
+    prompt: 'Hello',
+    groupFolder: 'test-group',
+    chatJid: 'test@g.us',
+    isMain: true,
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    // .env present on the host so the /dev/null shadow branch is exercised.
+    vi.mocked(fs.existsSync).mockImplementation(
+      ((p: string) => typeof p === 'string' && p.endsWith('/.env')) as never,
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(fs.existsSync).mockImplementation((() => false) as never);
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnCall() {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1] as unknown as [string, string[], unknown];
+  }
+
+  it('still mounts the read-only project root, its .env shadow, and the nested store', async () => {
+    await drive(runContainerAgent(testGroup, mainInput, () => {}, vi.fn()));
+    const [bin, args] = lastSpawnCall();
+    const flat = args.join(' ');
+
+    // Docker, not kubectl.
+    expect(bin).toBe('docker');
+
+    // Read-only project-root bind (matches readonlyMountArgs mock `h:c:ro`).
+    expect(flat).toContain(`${process.cwd()}:/workspace/project:ro`);
+
+    // /dev/null .env shadow (also read-only), nested under the project root.
+    expect(flat).toContain('/dev/null:/workspace/project/.env:ro');
+
+    // Writable store, nested under the read-only project root — the exact
+    // nesting docker tolerates and kubernetes does not.
+    expect(flat).toContain(
+      '/tmp/nanoclaw-test-profile/store:/workspace/project/store',
+    );
+
+    // Main also gets its group folder + read-only all-groups visibility.
+    expect(flat).toContain(':/workspace/group');
+    expect(flat).toContain(':/workspace/all-groups:ro');
+  });
+});
