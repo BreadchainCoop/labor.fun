@@ -124,6 +124,13 @@ export class SlackChannel implements Channel {
   // clear that status when the agent's reply is posted.
   private assistantThreads = new Map<string, string>();
   private static readonly ASSISTANT_THREADS_MAX = 500;
+  // Assistant threads with an active "is thinking…" status, keyed
+  // `<jid>:<threadTs>`. The agent runner streams its reply as one or more
+  // discrete text segments (each a separate sendMessage — the framework has no
+  // token-level deltas), so the status is set once when the turn starts and
+  // cleared once when the first reply segment lands. Tracking membership here
+  // makes clearing idempotent across multi-segment (streamed) replies.
+  private assistantPendingStatus = new Set<string>();
 
   private opts: SlackChannelOpts;
 
@@ -462,7 +469,13 @@ export class SlackChannel implements Channel {
         threadTs &&
         this.assistantThreads.get(jid) === threadTs
       ) {
-        void this.setAssistantStatus(jid, msg.channel, threadTs, 'is thinking…');
+        this.assistantPendingStatus.add(`${jid}:${threadTs}`);
+        void this.setAssistantStatus(
+          jid,
+          msg.channel,
+          threadTs,
+          'is thinking…',
+        );
       }
 
       this.opts.onMessage(jid, {
@@ -615,12 +628,16 @@ export class SlackChannel implements Channel {
     };
 
     // Native AI Assistant surface: clear the "is thinking…" status just before
-    // the reply lands, if this reply threads into a known assistant thread.
-    // Empty string removes the status indicator. Best-effort.
+    // the first reply segment lands, if this reply threads into a known
+    // assistant thread that still has an active status. Empty string removes the
+    // indicator. The agent may stream several segments (each its own
+    // sendMessage); we only clear once (the set makes this idempotent) so later
+    // segments don't re-clear/flicker. Best-effort.
     if (
       this.assistantEnabled &&
       threadTs &&
-      this.assistantThreads.get(jid) === threadTs
+      this.assistantThreads.get(jid) === threadTs &&
+      this.assistantPendingStatus.delete(`${jid}:${threadTs}`)
     ) {
       await this.setAssistantStatus(jid, channelId, threadTs, '');
     }
