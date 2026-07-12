@@ -658,6 +658,17 @@ export const WHATSAPP_AUTO_ALLOWLIST_GROUPS =
 export const SIGNAL_AUTO_REGISTER_GROUPS =
   envVal('SIGNAL_AUTO_REGISTER_GROUPS') === 'true';
 
+// --- Docker sibling-container mode (TEE / orchestrator-in-a-container) ---
+// When the orchestrator itself runs INSIDE a container and spawns each agent as
+// a SIBLING via the mounted host docker.sock (dstack/Phala TEE), the bind-mount
+// SOURCE paths it computes (e.g. /app/profiles/<org>/groups/<folder>) are its
+// OWN in-container paths — the HOST docker daemon can't resolve them and the
+// spawn fails ("mkdir /app: read-only file system"). With this on, the runner
+// translates each profile mount's source to the real HOST path by inspecting
+// its own container's mount table (docker inspect self). Off (default) → the
+// host-based docker path and the k8s path are byte-for-byte unchanged.
+export const DOCKER_SIBLING_MODE = envVal('DOCKER_SIBLING_MODE') === 'true';
+
 // --- Microsoft Teams channel (src/channels/teams.ts) ---
 // Non-secret feature flags, exported for anything outside the channel module
 // that needs to know Teams is configured (e.g. setup/status tooling). The App
