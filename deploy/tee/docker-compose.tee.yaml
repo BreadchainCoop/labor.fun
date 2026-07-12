@@ -26,6 +26,40 @@
 
 services:
   # ---------------------------------------------------------------------------
+  # docker-cli-fetch — the stock orchestrator image ships NO docker binary, but
+  # CONTAINER_RUNTIME=docker needs one to `docker run` a per-turn agent container
+  # via the mounted socket (in k8s the orchestrator uses the k8s API instead, so
+  # the image never bundled the CLI). The CVM host's docker CLI is dynamically
+  # linked against the host libc and won't exec in the Debian orchestrator, so we
+  # fetch the STATIC docker CLI, verify its sha256 (→ deterministic, measured into
+  # compose_hash via the pinned version+hash), and drop it on a shared volume the
+  # orchestrator installs onto PATH. Runs once; idempotent (skips if present).
+  # ---------------------------------------------------------------------------
+  docker-cli-fetch:
+    image: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    container_name: labor-docker-cli-fetch
+    restart: 'no'
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -x /out/docker ]; then
+          cd /tmp
+          wget -q https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz -O d.tgz
+          tar xzf d.tgz docker/docker
+          echo "fce9b87ce16bc531383c9163eac43c78699cedc6ef332d78a67ca3673476b518  docker/docker" > SUM
+          sha256sum -c SUM
+          cp docker/docker /out/docker
+          chmod 0755 /out/docker
+        fi
+        echo "[docker-cli-fetch] static docker CLI 27.3.1 ready at /out/docker"
+    volumes:
+      - docker-cli:/out
+    networks:
+      - labor-internal
+
+  # ---------------------------------------------------------------------------
   # orchestrator — the long-lived labor.fun process (node dist/index.js).
   # Self-registers the Signal channel at startup (LABOR_PROFILE selects the org
   # profile). Spawns one short-lived AGENT container per turn as a SIBLING via
@@ -41,9 +75,19 @@ services:
     #     -f deploy/docker/Dockerfile.orchestrator \
     #     -t YOUR_REGISTRY/labor-orchestrator:tee --push .
     #   docker inspect --format='{{index .RepoDigests 0}}' YOUR_REGISTRY/labor-orchestrator:tee
-    image: ghcr.io/breadchaincoop/labor-orchestrator@sha256:REPLACE_WITH_ORCHESTRATOR_DIGEST
+    image: ghcr.io/breadchaincoop/nanoclaw-orchestrator@sha256:REPLACE_WITH_ORCHESTRATOR_DIGEST
     container_name: labor-orchestrator
     restart: unless-stopped
+    # Root so the mounted docker.sock (root:docker 0660) is accessible (image
+    # default user is uid 1000 `node`). The entrypoint installs the static docker
+    # CLI (from docker-cli-fetch, on /dockercli) to /usr/local/bin — already on
+    # PATH — then execs the image's real entrypoint (node dist/index.js, WORKDIR /app).
+    user: '0:0'
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        install -m 0755 /dockercli/docker /usr/local/bin/docker
+        exec node dist/index.js
     environment:
       # --- Profile / runtime ------------------------------------------------
       - LABOR_PROFILE=${LABOR_PROFILE}
@@ -84,6 +128,8 @@ services:
       # dstack guest socket — quote generation (!verify) + KMS key derivation.
       # READ-ONLY: the guest agent only serves requests; nothing writes to it.
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      # static docker CLI staged by docker-cli-fetch (installed to PATH on boot).
+      - docker-cli:/dockercli
       # --- Encrypted, persistent state (dstack encrypted volumes) -----------
       # Each named volume below is backed by a dstack ENCRYPTED disk (configured
       # in the dstack app manifest / KMS, see README). Contents are sealed to the
@@ -100,6 +146,8 @@ services:
     networks:
       - labor-internal
     depends_on:
+      docker-cli-fetch:
+        condition: service_completed_successfully
       signal-cli:
         condition: service_healthy
     # NO `ports:` — the orchestrator is never reachable from outside the CVM.
@@ -119,6 +167,27 @@ services:
   # The Signal account is LINKED as a secondary device to the platform's ONE
   # Signal identity (docs/TEE.md); the private keys live on the encrypted
   # signal-data volume, sealed to this CVM.
+  #
+  # SELF-LINKING ENTRYPOINT (no public ports, no shell access in the CVM):
+  #   - We override the image entrypoint with bash so first boot can surface a
+  #     Signal device-link URI through the CONTAINER LOGS (scrape via `phala logs`).
+  #   - HOME=/home is REQUIRED. signal-cli's data dir is $HOME/.local/share/signal-cli
+  #     and the image's default HOME is /var/lib/signal-cli. Without HOME=/home the
+  #     mounted `signal-data` volume (at /home/.local/share/signal-cli) is IGNORED
+  #     and the session would not persist. Verified locally.
+  #   - IDEMPOTENCY PROBE: `[ -s "$HOME/.local/share/signal-cli/accounts.json" ]`.
+  #     signal-cli writes accounts.json (the account registry) only after a link is
+  #     APPROVED. Absent on an empty volume AND after an aborted/unapproved link
+  #     (verified on signal-cli 0.14.5). Present ⇒ already linked ⇒ skip to daemon.
+  #   - The URI prints on STDOUT wrapped in greppable delimiter lines:
+  #       ===LINK URI BELOW===
+  #       sgnl://linkdevice?uuid=...&pub_key=...
+  #       ===LINK URI ABOVE===
+  #     `signal-cli link` blocks until approval, so the container STAYS ALIVE
+  #     (unhealthy, not exited) for the whole approval window. Under
+  #     `restart: unless-stopped` only a process EXIT restarts — an unhealthy
+  #     healthcheck does NOT. Each restart REGENERATES a fresh URI; always scrape
+  #     the newest delimiter block.
   # ---------------------------------------------------------------------------
   signal-cli:
     # signal-cli in native JSON-RPC daemon mode. Pin by digest before deploy.
@@ -127,18 +196,33 @@ services:
     image: registry.gitlab.com/packaging/signal-cli/signal-cli-jre@sha256:REPLACE_WITH_SIGNAL_CLI_DIGEST
     container_name: labor-signal-cli
     restart: unless-stopped
-    # Bind the JSON-RPC daemon to the internal network on 7583 (the port the
-    # channel defaults to). 0.0.0.0 inside the container is reachable only over
-    # labor-internal — still no host/public exposure.
+    # Self-linking entrypoint: on first boot (no accounts.json) print a device-link
+    # URI to the logs and block until the primary approves; thereafter go straight
+    # to the JSON-RPC daemon on 7583 (0.0.0.0 inside the container is reachable only
+    # over labor-internal — still no host/public exposure).
+    entrypoint: ['/bin/bash', '-c']
     command:
-      - -a
-      - ${SIGNAL_ACCOUNT}
-      - daemon
-      - --tcp=0.0.0.0:7583
-      # --receive-mode=on-connection keeps a single long-lived read stream, which
-      # is what the channel's persistent socket expects.
-      - --receive-mode=on-connection
+      - |
+        set -eu
+        # $$ escapes compose interpolation so the SHELL expands these at runtime.
+        CFG="$$HOME/.local/share/signal-cli/accounts.json"
+        if [ -s "$$CFG" ]; then
+          echo "===SIGNAL ALREADY LINKED (accounts.json present) — starting daemon==="
+        else
+          echo "===LINK URI BELOW==="
+          signal-cli link -n "labor.fun TEE (${LABOR_PROFILE})"
+          echo "===LINK URI ABOVE==="
+        fi
+        # --receive-mode=on-connection keeps a single long-lived read stream, which
+        # is what the channel's persistent socket expects.
+        exec signal-cli -a "$$SIGNAL_ACCOUNT" daemon --tcp=0.0.0.0:7583 --receive-mode=on-connection
     environment:
+      # HOME=/home makes signal-cli's data dir land on the mounted signal-data
+      # volume below (see block comment). Do not remove.
+      - HOME=/home
+      - SIGNAL_ACCOUNT=${SIGNAL_ACCOUNT}
+      # LABOR_PROFILE parameterizes the device name shown when the primary approves.
+      - LABOR_PROFILE=${LABOR_PROFILE}
       - TZ=${TZ:-UTC}
     volumes:
       # Signal identity/keys + session state, on an encrypted dstack volume.
@@ -155,8 +239,10 @@ services:
       test: ['CMD-SHELL', 'timeout 2 bash -c "</dev/tcp/127.0.0.1/7583" || exit 1']
       interval: 15s
       timeout: 5s
-      retries: 10
-      start_period: 20s
+      # Generous window so the human device-link approval on FIRST boot does not
+      # flap the service (unhealthy != restart under restart: unless-stopped).
+      start_period: 900s
+      retries: 60
     # NO `ports:` — signal-cli is reachable only by the orchestrator.
 
   # ---------------------------------------------------------------------------
@@ -181,6 +267,7 @@ volumes:
   labor-store:
   labor-data:
   signal-data:
+  docker-cli: # holds the fetched static docker CLI (not org state; plain volume)
 
 networks:
   labor-internal:
