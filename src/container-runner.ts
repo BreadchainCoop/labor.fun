@@ -264,13 +264,50 @@ function getSelfMounts(): SelfMount[] {
 }
 
 /**
- * Map a mount's source to a host-resolvable path when DOCKER_SIBLING_MODE is
- * on; otherwise return it unchanged (host-based docker + kubernetes paths are
- * untouched).
+ * Decide the host-resolvable source for a mount under DOCKER_SIBLING_MODE, or
+ * signal that it must be SKIPPED. Off (default) → return the path unchanged.
+ *
+ * On:
+ *  - /dev/null and volume-backed paths (translatable) → their real host path;
+ *  - a path under the orchestrator's OWN image dir (process.cwd(), e.g. /app)
+ *    that does NOT map to a mounted volume → null (SKIP): it's framework code
+ *    baked into the image, which the host daemon can't bind and the sibling
+ *    agent doesn't need — it ships its own copy. This is the `mkdir /app:
+ *    read-only file system` case for cooperative/main groups (the project-root
+ *    read-only mount);
+ *  - any other (genuine external host) path → unchanged.
+ * Pure given the self-mount table; the null-skip branch is unit-tested.
  */
-function mountSource(hostPath: string): string {
+export function siblingMountSource(
+  hostPath: string,
+  selfMounts: SelfMount[],
+  imageRoot: string,
+): string | null {
+  if (hostPath === '/dev/null') return hostPath;
+  const translated = translateSiblingHostPath(hostPath, selfMounts);
+  if (translated !== hostPath) return translated;
+  const root = imageRoot.replace(/\/+$/, '');
+  if (root && (hostPath === root || hostPath.startsWith(root + '/'))) {
+    return null;
+  }
+  return hostPath;
+}
+
+/**
+ * Map a mount's source to a host-resolvable path when DOCKER_SIBLING_MODE is
+ * on, or null to skip it; otherwise return it unchanged (host-based docker +
+ * kubernetes paths are untouched).
+ */
+function mountSource(hostPath: string): string | null {
   if (!DOCKER_SIBLING_MODE) return hostPath;
-  return translateSiblingHostPath(hostPath, getSelfMounts());
+  const src = siblingMountSource(hostPath, getSelfMounts(), process.cwd());
+  if (src === null) {
+    logger.debug(
+      { hostPath },
+      'docker-sibling: skipping image-dir mount (agent uses its own image copy)',
+    );
+  }
+  return src;
 }
 
 function buildVolumeMounts(
@@ -865,9 +902,10 @@ function buildContainerArgs(
 
   for (const mount of mounts) {
     // In DOCKER_SIBLING_MODE the orchestrator's own /app/... source paths are
-    // rewritten to real host paths so the host daemon can bind them; a no-op
-    // otherwise.
+    // rewritten to real host paths so the host daemon can bind them (a no-op
+    // otherwise); image-dir mounts return null and are skipped.
     const src = mountSource(mount.hostPath);
+    if (src === null) continue;
     if (mount.readonly) {
       args.push(...readonlyMountArgs(src, mount.containerPath));
     } else {
