@@ -20,6 +20,7 @@ import {
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   ENABLED_SKILLS,
+  GITHUB_APP_MODE,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   K8S_NAMESPACE,
@@ -654,6 +655,138 @@ function getGithubToken(): string | undefined {
   );
 }
 
+// --- Hosted GitHub App token broker (GITHUB_APP_MODE) ---------------------
+//
+// In hosted/app mode the GitHub token injected into an agent container is a
+// short-lived GitHub App INSTALLATION token minted on demand by the control
+// plane, instead of a static PAT. The control-plane contract:
+//
+//   POST {CONTROL_PLANE_URL}/api/instance/github/token
+//   Authorization: Bearer {CONTROL_PLANE_TOKEN}
+//   200 -> { token, expiresAt (ISO), mode: 'app' }
+//   404 -> { error: 'github_not_installed' }   (org hasn't installed the App)
+//   502 -> mint failure
+//
+// The minted token is cached module-wide and reused across spawns until it is
+// within GITHUB_APP_TOKEN_REFRESH_SKEW_MS of expiry, then re-minted. Any broker
+// failure (network, non-200, malformed body) logs a warning and falls back to
+// the static env PAT (getGithubToken()) — which itself may be undefined, in
+// which case the agent simply runs without GitHub (spawn is NOT aborted).
+const GITHUB_BROKER_TIMEOUT_MS = 20_000;
+const GITHUB_APP_TOKEN_REFRESH_SKEW_MS = 5 * 60 * 1000; // refresh under 5 min
+
+interface CachedGithubAppToken {
+  token: string;
+  expiresAtMs: number;
+}
+let cachedGithubAppToken: CachedGithubAppToken | undefined;
+
+/**
+ * Read CONTROL_PLANE_URL / CONTROL_PLANE_TOKEN (process.env, then .env),
+ * mirroring the shared-bot send proxies (telegram-sender.ts etc.). Returns null
+ * when either is missing — the broker can't function without both.
+ */
+function controlPlaneConfig(): { url: string; token: string } | null {
+  const env = readEnvFile(['CONTROL_PLANE_URL', 'CONTROL_PLANE_TOKEN']);
+  const url = (process.env.CONTROL_PLANE_URL || env.CONTROL_PLANE_URL || '')
+    .trim()
+    .replace(/\/$/, '');
+  const token = (
+    process.env.CONTROL_PLANE_TOKEN ||
+    env.CONTROL_PLANE_TOKEN ||
+    ''
+  ).trim();
+  if (!url || !token) return null;
+  return { url, token };
+}
+
+/** For tests: drop the cached app-mode installation token. */
+export function _resetGithubAppTokenCache(): void {
+  cachedGithubAppToken = undefined;
+}
+
+/**
+ * Resolve the GitHub token to inject into an agent container for THIS spawn.
+ *
+ * - Not app mode (default / self-hosters): return the static env PAT
+ *   (getGithubToken()), unchanged behavior.
+ * - App mode WITHOUT a control plane configured: fall back to the static PAT.
+ * - App mode WITH a control plane: return a cached installation token if still
+ *   comfortably valid; otherwise mint a fresh one from the broker, cache it, and
+ *   return it. On ANY broker failure, log a warning and fall back to the static
+ *   PAT (possibly undefined — the agent then runs without GitHub).
+ *
+ * Never throws; never aborts the spawn.
+ */
+export async function resolveGithubToken(): Promise<string | undefined> {
+  if (!GITHUB_APP_MODE) return getGithubToken();
+
+  const cp = controlPlaneConfig();
+  if (!cp) {
+    // App mode requested but no control plane wired up — degrade to static PAT.
+    return getGithubToken();
+  }
+
+  const now = Date.now();
+  if (
+    cachedGithubAppToken &&
+    cachedGithubAppToken.expiresAtMs - now > GITHUB_APP_TOKEN_REFRESH_SKEW_MS
+  ) {
+    return cachedGithubAppToken.token;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GITHUB_BROKER_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${cp.url}/api/instance/github/token`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${cp.token}`,
+        'content-type': 'application/json',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      // 404 github_not_installed / 502 mint failure / anything else.
+      logger.warn(
+        { status: res.status },
+        'github app-mode: token broker returned non-200 — falling back to static PAT',
+      );
+      return getGithubToken();
+    }
+    const body = (await res.json()) as {
+      token?: unknown;
+      expiresAt?: unknown;
+      mode?: unknown;
+    };
+    if (typeof body?.token !== 'string' || !body.token) {
+      logger.warn(
+        'github app-mode: token broker returned no token — falling back to static PAT',
+      );
+      return getGithubToken();
+    }
+    const parsedExpiry =
+      typeof body.expiresAt === 'string' ? Date.parse(body.expiresAt) : NaN;
+    cachedGithubAppToken = {
+      token: body.token,
+      // No / unparseable expiry → treat as expiring at the refresh skew so the
+      // next spawn re-mints rather than trusting a token of unknown lifetime.
+      expiresAtMs: Number.isFinite(parsedExpiry)
+        ? parsedExpiry
+        : now + GITHUB_APP_TOKEN_REFRESH_SKEW_MS,
+    };
+    return body.token;
+  } catch (err) {
+    logger.warn(
+      { err },
+      'github app-mode: token broker request failed — falling back to static PAT',
+    );
+    return getGithubToken();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Linear personal API key for the bundled Linear MCP server, read from .env
  * (with process.env fallback). Returns undefined when unset, which leaves the
@@ -698,9 +831,14 @@ function getMcpServerEnvVars(): Record<string, string> {
  * kubernetes backend, whose --overrides JSON embeds them — see
  * getGithubToken()/getLinearApiKey() docs above.
  */
-function redactSecretsInArgs(joined: string): string {
+function redactSecretsInArgs(
+  joined: string,
+  resolvedGithubToken?: string,
+): string {
   let result = joined;
-  const githubToken = getGithubToken();
+  // Prefer the per-spawn resolved token (which may be an app-mode installation
+  // token, invisible to getGithubToken()); fall back to the static PAT.
+  const githubToken = resolvedGithubToken || getGithubToken();
   if (githubToken) {
     result = result.split(githubToken).join('***REDACTED***');
   }
@@ -821,6 +959,7 @@ function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   modelOverride?: string,
+  githubToken?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -899,15 +1038,16 @@ function buildContainerArgs(
   // GitHub MCP server: enable the env passthrough WITHOUT putting the
   // secret in argv. `-e NAME` (no value) makes the runtime read the value
   // from its own process environment, which runContainerAgent populates.
-  // This keeps the PAT out of the containerArgs debug log and host
-  // process args. Repo scope is enforced by the PAT itself (fine-grained,
-  // all BreadchainCoop repos, read+write).
+  // This keeps the token out of the containerArgs debug log and host
+  // process args. Repo scope is enforced by the token itself (static PAT, or
+  // — in GITHUB_APP_MODE — a short-lived App installation token resolved once
+  // per spawn by resolveGithubToken() and threaded in here).
   //
   // GH_TOKEN is the env var the gh CLI uses for authentication. We pass
   // both so that task script gates can use `gh api` directly without any
   // extra configuration — GITHUB_PERSONAL_ACCESS_TOKEN alone is not
   // recognised by gh CLI.
-  if (getGithubToken()) {
+  if (githubToken) {
     args.push('-e', 'GITHUB_PERSONAL_ACCESS_TOKEN');
     args.push('-e', 'GH_TOKEN');
   }
@@ -985,6 +1125,7 @@ function buildContainerArgs(
 function buildK8sEnvVars(
   containerName: string,
   modelOverride?: string,
+  githubToken?: string,
 ): K8sEnvVar[] {
   const env: K8sEnvVar[] = [{ name: 'TZ', value: TIMEZONE }];
 
@@ -1031,8 +1172,8 @@ function buildK8sEnvVars(
   // *logged* debug output (callers log containerArgs/mounts, not the
   // resolved env list) but it IS present in the --overrides JSON passed as a
   // kubectl argv, which is a real difference from the docker passthrough —
-  // documented in docs/KUBERNETES.md.
-  const githubToken = getGithubToken();
+  // documented in docs/KUBERNETES.md. The value is the token resolved ONCE per
+  // spawn (static PAT, or a GITHUB_APP_MODE installation token) and threaded in.
   if (githubToken) {
     env.push({ name: 'GITHUB_PERSONAL_ACCESS_TOKEN', value: githubToken });
     env.push({ name: 'GH_TOKEN', value: githubToken });
@@ -1090,6 +1231,7 @@ function buildSpawnCommand(
   mounts: VolumeMount[],
   containerName: string,
   modelOverride?: string,
+  githubToken?: string,
 ): { bin: string; args: string[] } {
   if (CONTAINER_RUNTIME === 'kubernetes') {
     if (AGENT_CONTAINER_PIDS_LIMIT) {
@@ -1119,7 +1261,7 @@ function buildSpawnCommand(
         containerPath: m.containerPath,
         readonly: m.readonly,
       })),
-      env: buildK8sEnvVars(containerName, modelOverride),
+      env: buildK8sEnvVars(containerName, modelOverride, githubToken),
       volumeMode: K8S_VOLUME_MODE,
       nodeName: K8S_VOLUME_MODE === 'hostPath' ? K8S_NODE_NAME : undefined,
       pvcName: K8S_VOLUME_MODE === 'pvc' ? K8S_DATA_PVC_NAME : undefined,
@@ -1143,7 +1285,7 @@ function buildSpawnCommand(
 
   return {
     bin: CONTAINER_RUNTIME_BIN,
-    args: buildContainerArgs(mounts, containerName, modelOverride),
+    args: buildContainerArgs(mounts, containerName, modelOverride, githubToken),
   };
 }
 
@@ -1166,20 +1308,34 @@ export async function runContainerAgent(
   // config so no call site can forget it; an explicit input.mcpServers wins.
   input = { ...input, mcpServers: input.mcpServers ?? MCP_SERVERS };
 
+  // Resolve the GitHub token for this spawn ONCE, before building env/argv.
+  // In GITHUB_APP_MODE this may mint (or reuse a cached) short-lived App
+  // installation token from the control plane; otherwise it's the static PAT.
+  // Threaded into both spawn paths (docker passthrough value + k8s pod-spec
+  // value) so the two never diverge. Never throws — undefined just means the
+  // agent runs without GitHub.
+  const githubToken = await resolveGithubToken();
+
   const mounts = buildVolumeMounts(group, input.isMain);
   const containerName = buildAgentContainerName(group.folder, Date.now());
   const { bin: runtimeBin, args: containerArgs } = buildSpawnCommand(
     mounts,
     containerName,
     input.modelOverride,
+    githubToken,
   );
 
   // The docker argv never contains secret values (bare `-e NAME` passthrough
   // — see buildContainerArgs). The kubernetes argv DOES embed resolved
   // secret values inside the --overrides JSON (kubectl run has no
   // name-only env passthrough — see buildK8sEnvVars), so redact known
-  // secret values before this hits the debug log.
-  const loggedContainerArgs = redactSecretsInArgs(containerArgs.join(' '));
+  // secret values before this hits the debug log. Pass the per-spawn github
+  // token explicitly so an app-mode token (which getGithubToken() wouldn't
+  // return) is redacted too.
+  const loggedContainerArgs = redactSecretsInArgs(
+    containerArgs.join(' '),
+    githubToken,
+  );
 
   logger.debug(
     {
@@ -1220,9 +1376,12 @@ export async function runContainerAgent(
     // GH_TOKEN                     — used by the gh CLI (different name,
     //                                same value). Without this, `gh api`
     //                                calls in task script gates fail silently.
+    //
+    // Uses the per-spawn resolved token (githubToken) — the static PAT, or a
+    // GITHUB_APP_MODE installation token — NOT a fresh getGithubToken() call,
+    // so the value matches the passthrough flags built above.
     const extraEnv: Record<string, string> = {};
     if (CONTAINER_RUNTIME !== 'kubernetes') {
-      const githubToken = getGithubToken();
       const linearApiKey = getLinearApiKey();
       if (githubToken) {
         extraEnv.GITHUB_PERSONAL_ACCESS_TOKEN = githubToken;

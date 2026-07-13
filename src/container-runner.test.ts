@@ -26,6 +26,7 @@ vi.mock('./config.js', async () => {
     CONTAINER_TIMEOUT: 1800000, // 30min
     CREDENTIAL_PROXY_PORT: 3001,
     DATA_DIR: '/tmp/nanoclaw-test-data',
+    GITHUB_APP_MODE: false,
     GROUPS_DIR: '/tmp/nanoclaw-test-groups',
     IDLE_TIMEOUT: 1800000, // 30min
     K8S_DATA_PVC_NAME: '',
@@ -163,7 +164,11 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import { logger } from './logger.js';
 import { resourceLimitArgs } from './container-runtime.js';
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  resolveGithubToken,
+  ContainerOutput,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -919,6 +924,7 @@ describe('container-runner local-LLM backend wiring', () => {
       CONTAINER_TIMEOUT: 1800000,
       CREDENTIAL_PROXY_PORT: 3001,
       DATA_DIR: '/tmp/nanoclaw-test-data',
+      GITHUB_APP_MODE: false,
       GROUPS_DIR: '/tmp/nanoclaw-test-groups',
       IDLE_TIMEOUT: 1800000,
       K8S_DATA_PVC_NAME: '',
@@ -1047,5 +1053,283 @@ describe('container-runner docker main-group project-root mount (unchanged)', ()
     // Main also gets its group folder + read-only all-groups visibility.
     expect(flat).toContain(':/workspace/group');
     expect(flat).toContain(':/workspace/all-groups:ro');
+  });
+});
+
+describe('resolveGithubToken — static / non-app mode', () => {
+  const STATIC_PAT = 'github_pat_STATIC_do_not_log_0123456789';
+  let savedPat: string | undefined;
+
+  beforeEach(() => {
+    savedPat = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (savedPat === undefined) delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    else process.env.GITHUB_PERSONAL_ACCESS_TOKEN = savedPat;
+  });
+
+  it('returns the static env PAT (never hits the broker) when GITHUB_APP_MODE is off', async () => {
+    process.env.GITHUB_PERSONAL_ACCESS_TOKEN = STATIC_PAT;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    // The top-level import has GITHUB_APP_MODE: false in the mocked config.
+    await expect(resolveGithubToken()).resolves.toBe(STATIC_PAT);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when no PAT is set and app mode is off', async () => {
+    delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    await expect(resolveGithubToken()).resolves.toBeUndefined();
+  });
+});
+
+describe('resolveGithubToken — GitHub App token broker (GITHUB_APP_MODE)', () => {
+  const STATIC_PAT = 'github_pat_STATIC_fallback_0123456789';
+  let savedPat: string | undefined;
+
+  // Re-import container-runner with GITHUB_APP_MODE flipped on. vi.resetModules
+  // gives a fresh module (and thus a fresh, empty token cache) per import.
+  async function importAppMode(): Promise<
+    typeof import('./container-runner.js')
+  > {
+    vi.resetModules();
+    const { mcpServerEnvVarNames } =
+      await vi.importActual<typeof import('./mcp-servers.js')>(
+        './mcp-servers.js',
+      );
+    vi.doMock('./config.js', () => ({
+      AGENT_CONTAINER_CPUS: '',
+      AGENT_CONTAINER_MEMORY: '',
+      AGENT_CONTAINER_PIDS_LIMIT: '',
+      CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+      CONTAINER_MAX_OUTPUT_SIZE: 10485760,
+      CONTAINER_RUNTIME: 'docker',
+      DOCKER_SIBLING_MODE: false,
+      CONTAINER_TIMEOUT: 1800000,
+      CREDENTIAL_PROXY_PORT: 3001,
+      DATA_DIR: '/tmp/nanoclaw-test-data',
+      ENABLED_SKILLS: [],
+      GITHUB_APP_MODE: true,
+      GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+      IDLE_TIMEOUT: 1800000,
+      K8S_DATA_PVC_NAME: '',
+      K8S_NAMESPACE: '',
+      K8S_NODE_NAME: '',
+      K8S_POD_IP: '',
+      K8S_VOLUME_MODE: 'hostPath',
+      KB_DASHBOARD_URL: 'https://kb.test.example',
+      MCP_SERVERS: [],
+      NANOCLAW_MODEL: undefined,
+      NANOCLAW_SUBAGENT_MODEL: undefined,
+      NANOCLAW_BACKEND: 'claude',
+      LOCAL_LLM_BASE_URL: 'http://host.docker.internal:1234/v1',
+      LOCAL_LLM_MODEL: undefined,
+      LOCAL_LLM_API_KEY: undefined,
+      PROFILE_DIR: '/tmp/nanoclaw-test-profile',
+      SHARED_KB_GROUP: 'slack_main',
+      STORE_DIR: '/tmp/nanoclaw-test-profile/store',
+      TIMEZONE: 'America/Los_Angeles',
+      mcpServerEnvVarNames,
+    }));
+    return import('./container-runner.js');
+  }
+
+  function okBody(token: string, ttlMs: number) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        token,
+        expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+        mode: 'app',
+      }),
+    };
+  }
+
+  beforeEach(() => {
+    savedPat = process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    process.env.CONTROL_PLANE_URL = 'https://cp.example';
+    process.env.CONTROL_PLANE_TOKEN = 'cp-secret';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+    delete process.env.CONTROL_PLANE_URL;
+    delete process.env.CONTROL_PLANE_TOKEN;
+    if (savedPat === undefined) delete process.env.GITHUB_PERSONAL_ACCESS_TOKEN;
+    else process.env.GITHUB_PERSONAL_ACCESS_TOKEN = savedPat;
+  });
+
+  it('mints a token from the broker (correct URL + bearer header) and returns it', async () => {
+    const fetchSpy = vi.fn(async () =>
+      okBody('app-install-token-1', 3_600_000),
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const cr = await importAppMode();
+    const token = await cr.resolveGithubToken();
+
+    expect(token).toBe('app-install-token-1');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [
+      string,
+      { method: string; headers: Record<string, string> },
+    ];
+    expect(url).toBe('https://cp.example/api/instance/github/token');
+    expect(init.method).toBe('POST');
+    expect(init.headers.authorization).toBe('Bearer cp-secret');
+  });
+
+  it('caches the minted token within its TTL (single broker call across spawns)', async () => {
+    const fetchSpy = vi.fn(async () => okBody('cached-token', 3_600_000));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const cr = await importAppMode();
+    const a = await cr.resolveGithubToken();
+    const b = await cr.resolveGithubToken();
+
+    expect(a).toBe('cached-token');
+    expect(b).toBe('cached-token');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-mints once the cached token nears expiry (within the 5-min refresh skew)', async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.now();
+      const fetchSpy = vi
+        .fn()
+        // First mint: 10-min TTL (comfortably beyond the 5-min skew → cached).
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            token: 'token-first',
+            expiresAt: new Date(now + 10 * 60_000).toISOString(),
+            mode: 'app',
+          }),
+        })
+        // Second mint after we advance past the refresh threshold.
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            token: 'token-second',
+            expiresAt: new Date(now + 40 * 60_000).toISOString(),
+            mode: 'app',
+          }),
+        });
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const cr = await importAppMode();
+      expect(await cr.resolveGithubToken()).toBe('token-first');
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+      // 7 min later: only 3 min of the 10-min token remains (< 5-min skew).
+      vi.setSystemTime(now + 7 * 60_000);
+      expect(await cr.resolveGithubToken()).toBe('token-second');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('falls back to the static PAT when the broker returns non-200 (e.g. 404 github_not_installed)', async () => {
+    process.env.GITHUB_PERSONAL_ACCESS_TOKEN = STATIC_PAT;
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: 'github_not_installed' }),
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const cr = await importAppMode();
+    await expect(cr.resolveGithubToken()).resolves.toBe(STATIC_PAT);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the static PAT on a network error', async () => {
+    process.env.GITHUB_PERSONAL_ACCESS_TOKEN = STATIC_PAT;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+    );
+
+    const cr = await importAppMode();
+    await expect(cr.resolveGithubToken()).resolves.toBe(STATIC_PAT);
+  });
+
+  it('returns undefined (no crash) when the broker fails and no static PAT is set', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('boom');
+      }),
+    );
+    const cr = await importAppMode();
+    await expect(cr.resolveGithubToken()).resolves.toBeUndefined();
+  });
+
+  it('skips the broker and uses the static PAT when no control plane is configured', async () => {
+    delete process.env.CONTROL_PLANE_URL;
+    delete process.env.CONTROL_PLANE_TOKEN;
+    process.env.GITHUB_PERSONAL_ACCESS_TOKEN = STATIC_PAT;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const cr = await importAppMode();
+    await expect(cr.resolveGithubToken()).resolves.toBe(STATIC_PAT);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('spawn path injects the brokered token into BOTH env var names, never argv', async () => {
+    vi.useFakeTimers();
+    try {
+      fakeProc = createFakeProcess();
+      vi.mocked(spawn).mockClear();
+      const BROKERED = 'ghs_brokered_install_token_do_not_log_abc';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => okBody(BROKERED, 3_600_000)),
+      );
+
+      const cr = await importAppMode();
+      const p = cr.runContainerAgent(testGroup, testInput, () => {}, vi.fn());
+
+      // Drive the fake container to completion (marker → close).
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'ok',
+        newSessionId: 's',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+      await p;
+
+      const calls = vi.mocked(spawn).mock.calls;
+      const [, args, opts] = calls[calls.length - 1] as unknown as [
+        string,
+        string[],
+        { env?: NodeJS.ProcessEnv },
+      ];
+
+      // Name-only passthrough flags in argv; the brokered value never appears.
+      expect(args).toContain('GITHUB_PERSONAL_ACCESS_TOKEN');
+      expect(args).toContain('GH_TOKEN');
+      expect(args.join(' ')).not.toContain(BROKERED);
+
+      // The brokered token is delivered via BOTH env var names.
+      expect(opts.env?.GITHUB_PERSONAL_ACCESS_TOKEN).toBe(BROKERED);
+      expect(opts.env?.GH_TOKEN).toBe(BROKERED);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
