@@ -17,6 +17,25 @@ bundled in the agent container.
   time (`src/container-runner.ts`). It is never committed.
 - Tools are exposed under `mcp__github__*`.
 
+### Token source: static PAT vs. hosted App mode
+
+By default the injected token is the static `GITHUB_PERSONAL_ACCESS_TOKEN`. In
+**hosted/app mode** (`GITHUB_APP_MODE=true`) the framework instead mints a
+**short-lived GitHub App installation token** per agent run from the control
+plane (`POST {CONTROL_PLANE_URL}/api/instance/github/token`, resolved once per
+spawn by `resolveGithubToken()` in `src/container-runner.ts` and cached until it
+nears expiry). The agent sees an identical `GITHUB_PERSONAL_ACCESS_TOKEN` /
+`GH_TOKEN` either way — **capabilities are the same** — but app-mode still
+requires the org to have **installed the labor.fun GitHub App** (the token is
+scoped to that installation). If the broker is unreachable or the App isn't
+installed, it falls back to the static PAT (or, if none, the GitHub server
+simply doesn't load).
+
+> **Known limitation:** only the agent-container spawn path is brokered.
+> Background consumers that use the static PAT directly — the GitHub mentions
+> channel and the GitHub Projects V2 sync loop — are **not** covered by app-mode
+> yet and still need `GITHUB_PERSONAL_ACCESS_TOKEN`. Follow-up.
+
 ## Scope
 
 | Dimension | Value |

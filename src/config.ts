@@ -94,6 +94,7 @@ const envConfig = readEnvFile([
   'REMINDER_TARGET_JID',
   'REMINDER_ESCALATION_CONTACT',
   'GITHUB_SYNC_ISSUE_DEPS',
+  'GITHUB_APP_MODE',
   'PM_ORCHESTRATION_INTERVAL_MS',
   'PM_ORCHESTRATION_TARGET_GROUP',
   'PM_DUE_SOON_DAYS',
@@ -723,6 +724,22 @@ export const GITHUB_PROJECT_SYNC_INTERVAL_MS = Math.max(
 // GraphQL fields, but this lets an operator disable the attempt entirely.
 export const GITHUB_SYNC_ISSUE_DEPS =
   (envVal('GITHUB_SYNC_ISSUE_DEPS') ?? 'true') !== 'false';
+
+// --- Hosted GitHub App token-broker mode (labor.fun GitHub App) ---
+// When true, the per-run GitHub token injected into agent containers is NOT the
+// static GITHUB_PERSONAL_ACCESS_TOKEN but a short-lived GitHub App installation
+// token minted on demand by the control plane
+// (POST {CONTROL_PLANE_URL}/api/instance/github/token). Requires CONTROL_PLANE_URL
+// + CONTROL_PLANE_TOKEN (already set in hosted mode for the shared-bot proxies);
+// falls back to the static PAT if the broker is unreachable or the App isn't
+// installed. Off by default — self-hosters keep using the static PAT.
+// Resolved per spawn by resolveGithubToken() in container-runner.ts.
+//
+// KNOWN LIMITATION: only the agent-container spawn path is covered. Background
+// consumers that use the static PAT directly (the GitHub mentions channel, the
+// GitHub Projects V2 sync loop) are NOT brokered by app-mode yet — they still
+// require GITHUB_PERSONAL_ACCESS_TOKEN. Follow-up.
+export const GITHUB_APP_MODE = envVal('GITHUB_APP_MODE') === 'true';
 
 // --- PM orchestration (#31) ---
 // Periodic loop that reviews the GitHub-synced + hand-authored task graph and
