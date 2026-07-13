@@ -28,6 +28,7 @@ vi.mock('./config.js', async () => {
     CONTAINER_TIMEOUT: 1800000,
     CREDENTIAL_PROXY_PORT: 3001,
     DATA_DIR: '/tmp/nanoclaw-test-data',
+    GITHUB_APP_MODE: false,
     GROUPS_DIR: '/tmp/nanoclaw-test-groups',
     IDLE_TIMEOUT: 1800000,
     K8S_DATA_PVC_NAME: 'nanoclaw-data',
