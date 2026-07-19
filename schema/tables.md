@@ -308,6 +308,19 @@ Idempotency ledger for the operational-report loop (`src/integrations/operationa
 | **period** | TEXT PK | Period key — ISO week (`2026-W24`) or month (`2026-06`) |
 | sent_at    | TEXT    | ISO timestamp the report was delivered                  |
 
+### chat_translate_prefs
+
+Per-chat translation preferences for the pre-agent translation suite (`src/translate-commands.ts`, see [rules/messaging/translation.md](../rules/messaging/translation.md)). `lang1`/`lang2` + `enabled` hold the group bidirectional pair set via `!translate-on`; `user_langs` is a JSON map of sender → target language code for per-user `!translate-me` opt-ins. Rows are pruned when both the pair and the user map are empty.
+
+| Column       | Type    | Notes                                                    |
+| ------------ | ------- | -------------------------------------------------------- |
+| **chat_jid** | TEXT PK | Chat/group JID                                           |
+| lang1        | TEXT    | One side of the bidirectional pair (nullable)            |
+| lang2        | TEXT    | Other side of the pair (nullable)                        |
+| enabled      | INTEGER | 1 when group pair auto-translate is active               |
+| user_langs   | TEXT    | JSON object: sender id → ISO 639-1 target code           |
+| updated_at   | TEXT    | ISO timestamp of the last change                         |
+
 ### api_usage
 
 API cost tracking & budgets: one row per completed `/v1/messages` call observed by the credential proxy (`src/credential-proxy.ts`). Powers usage reporting (`scripts/usage-report.ts`), budget enforcement (`src/usage-budget.ts`), and hosted control-plane usage push (`src/integrations/control-plane-sync.ts` — drains rows by `id` in batches, cursor persisted in `router_state` under `control_plane_usage_cursor`). `run_tag` is the spawning container's name (see `container-runner.ts`), which encodes the group folder, so usage can be grouped per-group by prefix. `est_cost_usd` is computed at insert time from `src/model-pricing.ts`, so historical rows keep the price in effect when the call was made even if pricing is later overridden.
