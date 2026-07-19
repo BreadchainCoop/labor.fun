@@ -543,6 +543,23 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
+  // --- Pre-agent translation preferences ---
+
+  // Per-chat auto-translate preferences (see src/translate-commands.ts):
+  // `lang1`/`lang2` + `enabled` hold the group bidirectional pair set via
+  // !translate-on; `user_langs` is a JSON map sender → target language for
+  // per-user !translate-me opt-ins. Runs entirely pre-agent (no container).
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS chat_translate_prefs (
+      chat_jid TEXT PRIMARY KEY,
+      lang1 TEXT,
+      lang2 TEXT,
+      enabled INTEGER DEFAULT 0,
+      user_langs TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL
+    )
+  `);
+
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:jane-doe","platform":"cli","kb_person":"jane-doe"}]'
@@ -2842,6 +2859,149 @@ export function expireStalePendingApprovals(
 }
 
 // --- JSON migration ---
+
+// --- Pre-agent translation preferences (chat_translate_prefs) ---
+
+export interface ChatTranslatePrefs {
+  chat_jid: string;
+  lang1: string | null;
+  lang2: string | null;
+  enabled: boolean;
+  userLangs: Record<string, string>;
+  updated_at: string;
+}
+
+interface TranslatePrefsRow {
+  chat_jid: string;
+  lang1: string | null;
+  lang2: string | null;
+  enabled: number;
+  user_langs: string;
+  updated_at: string;
+}
+
+function parseTranslatePrefsRow(row: TranslatePrefsRow): ChatTranslatePrefs {
+  let userLangs: Record<string, string> = {};
+  try {
+    const parsed = JSON.parse(row.user_langs);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      userLangs = parsed as Record<string, string>;
+    }
+  } catch {
+    // Corrupt JSON — treat as empty map rather than crash the message loop.
+  }
+  return {
+    chat_jid: row.chat_jid,
+    lang1: row.lang1,
+    lang2: row.lang2,
+    enabled: row.enabled === 1,
+    userLangs,
+    updated_at: row.updated_at,
+  };
+}
+
+export function getTranslatePrefs(
+  chatJid: string,
+): ChatTranslatePrefs | undefined {
+  const row = db
+    .prepare(`SELECT * FROM chat_translate_prefs WHERE chat_jid = ?`)
+    .get(chatJid) as TranslatePrefsRow | undefined;
+  return row ? parseTranslatePrefsRow(row) : undefined;
+}
+
+/** Enable the group bidirectional pair (per-user opt-ins are preserved). */
+export function setTranslatePair(
+  chatJid: string,
+  lang1: string,
+  lang2: string,
+): void {
+  db.prepare(
+    `INSERT INTO chat_translate_prefs (chat_jid, lang1, lang2, enabled, user_langs, updated_at)
+     VALUES (?, ?, ?, 1, '{}', ?)
+     ON CONFLICT(chat_jid) DO UPDATE SET
+       lang1 = excluded.lang1,
+       lang2 = excluded.lang2,
+       enabled = 1,
+       updated_at = excluded.updated_at`,
+  ).run(chatJid, lang1, lang2, new Date().toISOString());
+}
+
+/**
+ * Disable the group pair. Returns true when a pair was active. Deletes the
+ * row entirely when no per-user opt-ins remain (mirrors sigstack's
+ * default-pruning store).
+ */
+export function clearTranslatePair(chatJid: string): boolean {
+  const prefs = getTranslatePrefs(chatJid);
+  if (!prefs || !prefs.enabled) return false;
+  if (Object.keys(prefs.userLangs).length === 0) {
+    db.prepare(`DELETE FROM chat_translate_prefs WHERE chat_jid = ?`).run(
+      chatJid,
+    );
+  } else {
+    db.prepare(
+      `UPDATE chat_translate_prefs
+       SET lang1 = NULL, lang2 = NULL, enabled = 0, updated_at = ?
+       WHERE chat_jid = ?`,
+    ).run(new Date().toISOString(), chatJid);
+  }
+  return true;
+}
+
+/** Per-user !translate-me opt-in: map sender → target language code. */
+export function setUserTranslateLang(
+  chatJid: string,
+  sender: string,
+  langCode: string,
+): void {
+  const prefs = getTranslatePrefs(chatJid);
+  const userLangs = prefs?.userLangs ?? {};
+  userLangs[sender] = langCode;
+  db.prepare(
+    `INSERT INTO chat_translate_prefs (chat_jid, lang1, lang2, enabled, user_langs, updated_at)
+     VALUES (?, NULL, NULL, 0, ?, ?)
+     ON CONFLICT(chat_jid) DO UPDATE SET
+       user_langs = excluded.user_langs,
+       updated_at = excluded.updated_at`,
+  ).run(chatJid, JSON.stringify(userLangs), new Date().toISOString());
+}
+
+/** Remove a per-user opt-in. Returns true when the sender had one. */
+export function clearUserTranslateLang(
+  chatJid: string,
+  sender: string,
+): boolean {
+  const prefs = getTranslatePrefs(chatJid);
+  if (!prefs || !(sender in prefs.userLangs)) return false;
+  const userLangs = { ...prefs.userLangs };
+  delete userLangs[sender];
+  if (!prefs.enabled && Object.keys(userLangs).length === 0) {
+    db.prepare(`DELETE FROM chat_translate_prefs WHERE chat_jid = ?`).run(
+      chatJid,
+    );
+  } else {
+    db.prepare(
+      `UPDATE chat_translate_prefs SET user_langs = ?, updated_at = ? WHERE chat_jid = ?`,
+    ).run(JSON.stringify(userLangs), new Date().toISOString(), chatJid);
+  }
+  return true;
+}
+
+/**
+ * Whether a chat is a group (vs a 1:1 DM), from stored chat metadata with a
+ * JID-shape fallback for chats whose metadata hasn't landed yet.
+ */
+export function isGroupChat(jid: string): boolean {
+  const row = db
+    .prepare(`SELECT is_group FROM chats WHERE jid = ?`)
+    .get(jid) as { is_group: number | null } | undefined;
+  if (row && row.is_group !== null) return row.is_group === 1;
+  if (jid.endsWith('@g.us')) return true;
+  if (jid.endsWith('@s.whatsapp.net')) return false;
+  if (jid.startsWith('tg:')) return jid.startsWith('tg:-');
+  // Unknown shape (Signal/Slack/Discord before metadata sync): assume group.
+  return true;
+}
 
 function migrateJsonState(): void {
   const migrateFile = (filename: string) => {
