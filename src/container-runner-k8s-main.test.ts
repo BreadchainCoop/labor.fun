@@ -35,6 +35,7 @@ vi.mock('./config.js', async () => {
     CONTAINER_RUNTIME: 'kubernetes',
     CONTAINER_TIMEOUT: 1800000,
     CREDENTIAL_PROXY_PORT: 3001,
+    GITHUB_APP_MODE: false,
     // All roots nested under one PROFILE_DIR so the PVC subPath translator can
     // rewrite every produced host path to a `profile/…` subPath (matches the
     // container-runner-k8s-pvc.test.ts layout).
