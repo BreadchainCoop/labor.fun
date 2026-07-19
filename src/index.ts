@@ -67,6 +67,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getRegisteredGroup,
+  isGroupChat,
   getAllSessions,
   deleteSession,
   getAllTasks,
@@ -118,8 +119,14 @@ import {
   isSenderAllowed,
   isTriggerAllowed,
   loadSenderAllowlist,
+  SenderAllowlistConfig,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { ChatCommandContext, dispatchChatCommand } from './chat-commands.js';
+import {
+  maybeAutoTranslate,
+  registerTranslateCommands,
+} from './translate-commands.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startReminderEngine } from './reminder-engine.js';
 import {
@@ -363,6 +370,53 @@ export function _setRegisteredGroups(
   groups: Record<string, RegisteredGroup>,
 ): void {
   registeredGroups = groups;
+}
+
+/**
+ * Pre-agent command plane gate (translation commands + auto-translate today).
+ *
+ * Runs before storage and independent of the trigger pattern. Gated by the
+ * SAME sender allowlist the poll loop enforces (isTriggerAllowed): a denied
+ * sender can neither run a pre-agent command nor be auto-translated, matching
+ * the trigger-mode allowlist semantics used at getNewMessages poll time.
+ *
+ * Returns `claimed: true` when a registered command handled the message. The
+ * caller MUST then skip storeMessage and normal trigger handling — storing a
+ * handled command would let the DB poller pipe it straight to the agent
+ * container in requiresTrigger=false chats (double-handling + a stray spawn).
+ */
+export function runPreAgentCommandPlane(
+  chatJid: string,
+  msg: NewMessage,
+  opts: {
+    isGroup: boolean;
+    reply: (text: string) => Promise<void>;
+    allowlist: SenderAllowlistConfig;
+    registeredGroups: Record<string, RegisteredGroup>;
+    findChatFlow: (jid: string) => unknown;
+  },
+): { eligible: boolean; claimed: boolean } {
+  const eligible =
+    !msg.is_from_me &&
+    !msg.is_bot_message &&
+    !!opts.registeredGroups[chatJid] &&
+    !opts.findChatFlow(chatJid) &&
+    isTriggerAllowed(chatJid, msg.sender, opts.allowlist);
+  if (!eligible) return { eligible: false, claimed: false };
+
+  const cmdCtx: ChatCommandContext = {
+    chatJid,
+    msg,
+    isGroup: opts.isGroup,
+    reply: opts.reply,
+  };
+  // A handled command must not be stored (see docstring), so signal `claimed`.
+  if (dispatchChatCommand(cmdCtx)) return { eligible: true, claimed: true };
+  // Auto-translate middleware (group pair / per-user opt-in). Fire and forget —
+  // detection + LLM call happen off the message loop while the normal flow
+  // (store, trigger handling) continues at the call site.
+  void maybeAutoTranslate(cmdCtx);
+  return { eligible: true, claimed: false };
 }
 
 /** Resolve the shared-KB group's chat JID, if it's registered. */
@@ -1067,6 +1121,9 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+  // Pre-agent chat-command plane: translation suite (!translate, !translate-on,
+  // !translate-me, !list-langs). See src/translate-commands.ts.
+  registerTranslateCommands();
   const orphaned = markOrphanedRunsAsInterrupted();
   if (orphaned > 0) {
     logger.info(
@@ -1375,6 +1432,26 @@ async function main(): Promise<void> {
         const kbPerson = resolveUser(msg.sender, channelName);
         if (kbPerson) msg.user_id = kbPerson;
       }
+
+      // Lightweight pre-agent command plane (translation commands today).
+      // Channel-agnostic: runs before storage, independent of the trigger
+      // pattern, and never spawns an agent container. Replies go out directly
+      // via the owning channel. A handled command is NOT stored — storing it
+      // would let the DB poller pipe the command to the agent in
+      // requiresTrigger=false chats. Gated by the same sender allowlist the
+      // poll loop enforces so denied senders can't run commands / be
+      // auto-translated (see runPreAgentCommandPlane).
+      const preAgent = runPreAgentCommandPlane(chatJid, msg, {
+        isGroup: isGroupChat(chatJid),
+        reply: async (text: string) => {
+          const ch = findChannel(channels, chatJid);
+          if (ch) await ch.sendMessage(chatJid, text);
+        },
+        allowlist: loadSenderAllowlist(),
+        registeredGroups,
+        findChatFlow,
+      });
+      if (preAgent.claimed) return;
 
       storeMessage(msg);
 
