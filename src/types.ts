@@ -97,6 +97,14 @@ export interface SendMessageOpts {
    * proactive/agent-initiated sends, which fall back to channel-level routing.
    */
   replyToMessageId?: string;
+  /**
+   * Proactive / scheduled send with no triggering inbound message. When true,
+   * thread-aware channels post to the BASE channel and never anchor to (or
+   * start a thread on) a prior inbound — a scheduled task's output must not
+   * reply to whoever happened to message last. Interactive replies pass
+   * `replyToMessageId` instead and keep threading.
+   */
+  standalone?: boolean;
 }
 
 export interface Channel {

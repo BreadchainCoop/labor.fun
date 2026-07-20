@@ -1061,7 +1061,13 @@ export class DiscordChannel implements Channel {
       const anchorMessage = opts?.replyToMessageId
         ? this.inboundById.get(opts.replyToMessageId)
         : undefined;
-      const target = await this.resolveReplyTarget(jid, anchorMessage);
+      // Proactive/scheduled sends (standalone) must never anchor to a prior
+      // inbound — doing so started a stray thread on an unrelated message
+      // (e.g. a scheduled reminder "replying" to whoever spoke last). Resolve
+      // straight to the base channel instead.
+      const target = opts?.standalone
+        ? await this.client!.channels.fetch(jid.replace(/^dc:/, ''))
+        : await this.resolveReplyTarget(jid, anchorMessage);
       if (!target || typeof target !== 'object' || !('send' in target)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
         return false;
