@@ -1101,6 +1101,27 @@ describe('DiscordChannel', () => {
         '1234567890123456',
       );
     });
+
+    it('standalone sends ignore a stale last-inbound anchor (no stray thread)', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      // An unrelated inbound sets the per-jid lastReplyAnchor...
+      const msg = guildMessage('msg_X');
+      await triggerMessage(msg);
+
+      // ...but a proactive/scheduled send marked standalone must NOT revive it
+      // (previously this started a stray thread on the unrelated message).
+      await channel.sendMessage('dc:1234567890123456', 'Scheduled post', {
+        standalone: true,
+      });
+
+      expect(msg.startThread).not.toHaveBeenCalled();
+      expect(currentClient().channels.fetch).toHaveBeenCalledWith(
+        '1234567890123456',
+      );
+    });
   });
 
   // --- ownsJid ---

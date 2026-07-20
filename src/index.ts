@@ -1567,7 +1567,7 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text, { standalone: true });
     },
   });
   // Background flows self-register via ./integrations/index.js (mirrors the
@@ -1597,7 +1597,7 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text, { standalone: true });
     },
     writeDigest: (markdown) => {
       const digestPath = path.join(
@@ -1628,7 +1628,7 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text, { standalone: true });
     },
     loadTasks: () => loadPmTasksFromKb(),
   });
@@ -1660,7 +1660,7 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text, { standalone: true });
     },
     writeDigest: (markdown) => {
       const digestPath = path.join(
