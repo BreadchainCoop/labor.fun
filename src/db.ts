@@ -54,6 +54,7 @@ function createSchema(database: Database.Database): void {
       last_run TEXT,
       last_result TEXT,
       status TEXT DEFAULT 'active',
+      delivery TEXT NOT NULL DEFAULT 'channel',
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
@@ -306,6 +307,18 @@ function createSchema(database: Database.Database): void {
   try {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN context_mode TEXT DEFAULT 'isolated'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add delivery column if it doesn't exist (migration for existing DBs).
+  // Defaults to 'channel' so every pre-existing task keeps its current
+  // behavior (result posts to chat_jid); only tasks explicitly scheduled
+  // 'silent' suppress their channel narration.
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN delivery TEXT NOT NULL DEFAULT 'channel'`,
     );
   } catch {
     /* column already exists */
@@ -1038,8 +1051,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, delivery, next_run, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -1050,6 +1063,7 @@ export function createTask(
     task.schedule_type,
     task.schedule_value,
     task.context_mode || 'isolated',
+    task.delivery === 'silent' ? 'silent' : 'channel',
     task.next_run,
     task.status,
     task.created_at,

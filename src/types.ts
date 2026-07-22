@@ -68,6 +68,20 @@ export interface ScheduledTask {
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
   context_mode: 'group' | 'isolated';
+  /**
+   * Where the task's result narration is delivered.
+   * - 'channel' (default): the agent's result is posted to `chat_jid`, like a
+   *   daily briefing or an in-channel reminder meant for everyone to see.
+   * - 'silent': the result narration is NOT posted to any channel. Use for
+   *   private reminders / DM tasks whose real output goes out via `dm_user` —
+   *   so the bookkeeping narration ("DM sent ✅") can never leak into the
+   *   bound chat/thread. Suppression is enforced by the orchestrator, not by
+   *   the agent remembering to wrap text in <internal> tags. See issue #46.
+   *
+   * Optional in the type for backward-compat with existing call sites; the DB
+   * column is NOT NULL DEFAULT 'channel', so reads are always populated.
+   */
+  delivery?: 'channel' | 'silent';
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;
