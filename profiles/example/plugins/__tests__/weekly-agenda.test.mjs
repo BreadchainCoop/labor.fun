@@ -287,6 +287,12 @@ describe('planActions — build → verify → announce → nudge', () => {
     const escPost = esc.posts.find((t) => /file my agenda update/.test(t));
     expect(escPost).toBeTruthy();
     expect(escPost).not.toMatch(/hasn't filled|follow up directly/);
+    // Regression: the build always pre-drafts every owner's section, so an
+    // escalation must NOT claim the section is missing ("I don't have …") —
+    // that tells people their present entries are gone. It asks them to
+    // confirm/correct the draft instead.
+    expect(escPost).not.toMatch(/I don't have/);
+    expect(escPost).toMatch(/confirm/i);
     expect(esc.state.members.ruben.escalated).toBe(true);
     const after = run();
     expect(after.dms).toHaveLength(0);
