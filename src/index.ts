@@ -1706,7 +1706,11 @@ async function main(): Promise<void> {
       // otherwise accept the send and silently drop it.
       const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      // Explicit send_message broadcasts (the agent posting a message, incl.
+      // scheduled-task sends) go to the base channel — never threaded on or
+      // replied to an unrelated inbound. Conversational replies still thread
+      // via the trigger message (replyToMessageId) elsewhere.
+      return channel.sendMessage(jid, text, { standalone: true });
     },
     // Mirror the send path above (a *connected* owning channel) so the watcher
     // can pre-flight a target's routability and surface undeliverable sends
