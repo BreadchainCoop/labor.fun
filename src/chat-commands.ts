@@ -11,7 +11,9 @@
  * This is intentionally tiny — other pre-agent features (translation today)
  * register here; keep it generic.
  */
+import { SLASH_RL_MAX, SLASH_RL_WINDOW_MS } from './config.js';
 import { logger } from './logger.js';
+import { rateLimitKey, slashCommandLimiter } from './rate-limit.js';
 import { NewMessage } from './types.js';
 
 export interface ChatCommandContext {
@@ -19,6 +21,13 @@ export interface ChatCommandContext {
   msg: NewMessage;
   /** Whether the chat is a group (vs a 1:1 DM). */
   isGroup: boolean;
+  /**
+   * Skip rate limiting for this dispatch. Set for the main control group —
+   * labor.fun's operator surface (the flat-permission equivalent of Salem's
+   * admin exemption), so scripted command bursts by the operator are never
+   * throttled.
+   */
+  exemptFromRateLimit?: boolean;
   /** Send a reply directly via the owning channel (no agent involved). */
   reply: (text: string) => Promise<void>;
 }
@@ -60,18 +69,58 @@ export function matchChatCommand(text: string): RegisteredCommand | undefined {
   });
 }
 
+/** One-time notice sent on the allowed→denied transition of a rate-limit window. */
+const RATE_LIMIT_NOTICE =
+  'You are sending commands too quickly — please wait a moment and try again.';
+
 /**
  * Dispatch a message to the first matching command, if any.
  *
  * Returns true when a command claimed the message (the handler runs
  * asynchronously; errors are logged, never thrown to the message loop).
  * Returns false when no command matches — normal message flow continues.
+ *
+ * Rate limiting: when SLASH_RL_MAX > 0 (default 0 = disabled), each
+ * (chatJid, sender, command prefix) tuple is throttled through a sliding
+ * window (src/rate-limit.ts). A denied command is still CLAIMED (returns
+ * true) so the caller skips storage/trigger handling — a throttled command
+ * must never fall through and spawn an agent container. The throttle notice
+ * is sent once per over-limit window (firstDenial), not on every denial.
  */
 export function dispatchChatCommand(ctx: ChatCommandContext): boolean {
   const text = ctx.msg.content.trim();
   if (!text) return false;
   const cmd = matchChatCommand(text);
   if (!cmd) return false;
+
+  if (SLASH_RL_MAX > 0 && !ctx.exemptFromRateLimit) {
+    const rl = slashCommandLimiter.check(
+      rateLimitKey(ctx.chatJid, ctx.msg.sender, cmd.prefix),
+      SLASH_RL_WINDOW_MS,
+      SLASH_RL_MAX,
+    );
+    if (!rl.allowed) {
+      logger.warn(
+        {
+          chatJid: ctx.chatJid,
+          sender: ctx.msg.sender,
+          prefix: cmd.prefix,
+          count: rl.count,
+        },
+        'Chat command rate limited — dropping',
+      );
+      if (rl.firstDenial) {
+        ctx.reply(RATE_LIMIT_NOTICE).catch((err) => {
+          logger.error(
+            { err, chatJid: ctx.chatJid },
+            'Failed to send rate-limit notice',
+          );
+        });
+      }
+      // Consumed: never runs the handler, never falls through to the agent.
+      return true;
+    }
+  }
 
   const args = text.slice(cmd.prefix.length).trim();
   Promise.resolve(cmd.handler(args, ctx)).catch((err) => {

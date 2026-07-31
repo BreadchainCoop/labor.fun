@@ -95,6 +95,15 @@ const envConfig = readEnvFile([
   'REMINDER_ESCALATION_CONTACT',
   'GITHUB_SYNC_ISSUE_DEPS',
   'GITHUB_APP_MODE',
+  // Pre-agent chat-command rate limiting (src/chat-commands.ts). SLASH_RL_MAX
+  // defaults to 0 = limiter fully disabled (today's behavior, byte-identical).
+  'SLASH_RL_MAX',
+  'SLASH_RL_WINDOW_MS',
+  // Optional per-tier model overrides for the orchestrator model router
+  // (src/model-router.ts). Unset = the router's built-in tier defaults; the
+  // `default` tier always follows NANOCLAW_MODEL.
+  'LABOR_TIER_CHEAP_MODEL',
+  'LABOR_TIER_STRONG_MODEL',
   // Opt-in message-retention sweeper (src/retention.ts). Both default 0 = OFF
   // (today's keep-everything behavior, byte-identical). See docs/TEE.md
   // "Privacy posture".
@@ -947,6 +956,29 @@ export const NANOCLAW_SUBAGENT_MODEL =
   process.env.NANOCLAW_SUBAGENT_MODEL ||
   envConfig.NANOCLAW_SUBAGENT_MODEL ||
   undefined;
+// Optional per-tier model overrides for the orchestrator model router
+// (src/model-router.ts). The router applies its own concrete defaults when
+// these are unset; the `default` tier always follows NANOCLAW_MODEL above.
+export const LABOR_TIER_CHEAP_MODEL =
+  envVal('LABOR_TIER_CHEAP_MODEL') || undefined;
+export const LABOR_TIER_STRONG_MODEL =
+  envVal('LABOR_TIER_STRONG_MODEL') || undefined;
+
+// --- Pre-agent chat-command rate limiting (src/chat-commands.ts) ---
+// Sliding-window throttle keyed on (chatJid, sender, command prefix), applied
+// in dispatchChatCommand BEFORE any handler runs. SLASH_RL_MAX = max commands
+// per window; 0 (the default) DISABLES the limiter entirely — existing
+// deployments see zero behavior change until they opt in. Recommended value
+// for a deployment that wants protection: SLASH_RL_MAX=10 with the default
+// 60s window (generous enough that no human ever hits it).
+export const SLASH_RL_MAX = Math.max(
+  0,
+  parseInt(envVal('SLASH_RL_MAX') || '0', 10) || 0,
+);
+export const SLASH_RL_WINDOW_MS = Math.max(
+  1,
+  parseInt(envVal('SLASH_RL_WINDOW_MS') || '60000', 10) || 60000,
+);
 
 // Smithers durable-workflow bridge (orchestration/). Off by default; when
 // enabled, exposes a localhost-only, token-authed endpoint that runs one
