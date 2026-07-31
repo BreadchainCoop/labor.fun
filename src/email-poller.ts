@@ -72,8 +72,10 @@ export async function startEmailPoller(deps: EmailPollerDeps): Promise<void> {
           const subject = msg.envelope?.subject || '(no subject)';
 
           if (!EMAIL_WHITELIST.includes(from)) {
+            // Log hygiene: the subject line is message CONTENT — keep it out
+            // of INFO+ logs (CVM logs can be public). Sender id only.
             logger.info(
-              { from, subject },
+              { from },
               'Email from non-whitelisted sender — skipping',
             );
             // Mark as seen so we don't re-process
@@ -100,8 +102,9 @@ export async function startEmailPoller(deps: EmailPollerDeps): Promise<void> {
             }
           }
 
+          // Log hygiene: subject is content — INFO carries ids/lengths only.
           logger.info(
-            { from, subject },
+            { from, subjectLength: subject.length, bodyLength: body.length },
             'Email received from whitelisted sender',
           );
           await deps.onEmail(from, subject, body);

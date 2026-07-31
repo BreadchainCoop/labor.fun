@@ -1033,6 +1033,98 @@ export function getLastBotMessageTimestamp(
   return row?.ts ?? undefined;
 }
 
+// --- Message retention (opt-in privacy sweeper — src/retention.ts) ---
+
+/** Distinct chats that currently hold at least one stored message. */
+export function getMessageChatJids(): string[] {
+  const rows = db
+    .prepare(`SELECT DISTINCT chat_jid FROM messages`)
+    .all() as Array<{ chat_jid: string }>;
+  return rows.map((r) => r.chat_jid);
+}
+
+/**
+ * Timestamp of the Nth-newest message in a chat (1-based), or undefined when
+ * the chat holds fewer than N messages. Used by the per-chat overflow rule:
+ * deleting strictly OLDER than this keeps at least the newest N (ties at the
+ * boundary survive — the safe direction).
+ */
+export function getNthNewestMessageTimestamp(
+  chatJid: string,
+  n: number,
+): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT timestamp FROM messages WHERE chat_jid = ?
+       ORDER BY timestamp DESC LIMIT 1 OFFSET ?`,
+    )
+    .get(chatJid, n - 1) as { timestamp: string } | undefined;
+  return row?.timestamp;
+}
+
+/**
+ * Delete a chat's messages with timestamp strictly BELOW `olderThanExclusive`
+ * AND at-or-below `processedCeilingInclusive` (the chat's processed-watermark
+ * guard — rows above it are still owed to the agent poller and must survive;
+ * see src/retention.ts). Returns the number of rows deleted.
+ *
+ * Index note: the `timestamp < ?` range predicate rides the existing
+ * idx_timestamp ON messages(timestamp); chat_jid is filtered within that
+ * range (there is no (chat_jid, timestamp) composite index — the table is
+ * retention-bounded when this runs, so the residual filter is cheap).
+ */
+export function deleteChatMessages(
+  chatJid: string,
+  olderThanExclusive: string,
+  processedCeilingInclusive: string,
+): number {
+  return db
+    .prepare(
+      `DELETE FROM messages
+       WHERE chat_jid = ? AND timestamp < ? AND timestamp <= ?`,
+    )
+    .run(chatJid, olderThanExclusive, processedCeilingInclusive).changes;
+}
+
+/**
+ * Age-prune the agent-run log. `agent_runs.trigger_content` stores up to 500
+ * chars of the triggering MESSAGE (startAgentRun), so retention must bound
+ * this table too or content outlives the messages it was copied from.
+ *
+ * No watermark guard is needed: a run row is written at dispatch time and is
+ * never read back by the poller — it is a post-dispatch record. Rows still
+ * flagged `running` are spared so an in-flight run's completeAgentRun() has a
+ * row to update; a crashed process's zombie rows are flipped to `interrupted`
+ * by markOrphanedRunsAsInterrupted() at startup and become prunable then.
+ *
+ * Index note: there is no index on `started_at` alone (only the composite
+ * (chat_jid, started_at) / (channel, started_at)), so this is a scan — it runs
+ * hourly at most, over a table the same sweep keeps bounded.
+ */
+export function deleteAgentRunsBefore(olderThanExclusive: string): number {
+  return db
+    .prepare(
+      `DELETE FROM agent_runs
+       WHERE started_at < ? AND status != 'running'`,
+    )
+    .run(olderThanExclusive).changes;
+}
+
+/**
+ * Age-prune the assistant analytics log. `assistant_events.question_text` can
+ * hold the verbatim question (subject to ASSISTANT_ANALYTICS_PRIVACY), so it
+ * is content and must be bounded like the messages table. Post-dispatch
+ * record — nothing reads it back for delivery, so no watermark guard.
+ * Rides idx_assistant_events_created ON assistant_events(created_at).
+ */
+export function deleteAssistantEventsBefore(
+  olderThanExclusive: string,
+): number {
+  return db
+    .prepare(`DELETE FROM assistant_events WHERE created_at < ?`)
+    .run(olderThanExclusive).changes;
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {
