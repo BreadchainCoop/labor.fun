@@ -6,6 +6,12 @@ import matter from 'gray-matter';
 import { marked } from 'marked';
 import sanitizeHtml from 'sanitize-html';
 import { buildUserRoster, readPeopleDir } from './roster.mjs';
+import {
+  loadKbUiPlugins,
+  navCardVisible,
+  resolveCatalogDir,
+  resolveEnabledPluginIds,
+} from './plugin-mount.mjs';
 import { createRequire } from 'module';
 // better-sqlite3 is in the parent /opt/breadbrich/node_modules, not kb-ui's
 let Database;
@@ -334,6 +340,52 @@ function layout(title, body, username) {
 </html>`;
 }
 
+// --- Plugin kb-ui mounts (generic hook; see kb-ui/plugin-mount.mjs) ---
+// Enabled plugins may ship dashboard routes + home-page nav cards. Which ids
+// are enabled mirrors src/config.ts: profile `enabledPlugins` ∪ ENABLED_PLUGINS
+// env. Everything registers behind the Basic Auth middleware above, and any
+// plugin failure logs + skips — kb-ui must boot regardless.
+function profileEnabledPlugins() {
+  try {
+    const cfg = JSON.parse(
+      fs.readFileSync(path.join(PROFILE_DIR, 'profile.config.json'), 'utf-8'),
+    );
+    return cfg.enabledPlugins;
+  } catch {
+    return undefined;
+  }
+}
+
+const PLUGIN_DEPS = {
+  layout,
+  esc,
+  isAdmin,
+  isSuperAdmin,
+  isCoordinator,
+  isResident,
+  usernameFromReq: (req) => req.auth.user,
+  Database, // better-sqlite3 constructor (may be null when unavailable)
+  DB_PATH: process.env.DB_PATH || DEFAULT_DB_PATH,
+  PROFILE_DIR,
+  CONTEXT_DIR,
+  logger: console,
+};
+
+const { mounts: pluginMounts, navCards: pluginNavCards } =
+  await loadKbUiPlugins({
+    enabledIds: resolveEnabledPluginIds(
+      profileEnabledPlugins(),
+      process.env.ENABLED_PLUGINS,
+    ),
+    catalogDir: resolveCatalogDir(),
+    profileDir: PROFILE_DIR,
+    deps: PLUGIN_DEPS,
+  });
+for (const m of pluginMounts) {
+  app.use(m.mount, m.router);
+  console.log(`[kb-ui] mounted plugin routes: ${m.mount} (${m.id})`);
+}
+
 // --- Routes ---
 
 app.get('/', (req, res) => {
@@ -358,6 +410,12 @@ app.get('/', (req, res) => {
   // --- Dashboards section ---
   let dashboardCards = '';
   dashboardCards += `<a href="/projects" class="nav-card" style="border-color:#1a2a1a"><div class="icon">\u{1F4CA}</div><div class="label">Projects</div><div class="count">Project tracker</div></a>`;
+
+  // Plugin-contributed nav cards (kb-ui/plugin-mount.mjs), role-filtered.
+  for (const card of pluginNavCards) {
+    if (!navCardVisible(card, username, { isAdmin, isSuperAdmin, isCoordinator, isResident })) continue;
+    dashboardCards += `<a href="${esc(card.href)}" class="nav-card" style="border-color:#1a2a2a">${card.icon ? `<div class="icon">${esc(card.icon)}</div>` : ''}<div class="label">${esc(card.title)}</div>${card.desc ? `<div class="count">${esc(card.desc)}</div>` : ''}</a>`;
+  }
 
   // --- Raw Data section ---
   let rawDataCards = '';

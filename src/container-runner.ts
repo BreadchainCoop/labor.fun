@@ -949,8 +949,8 @@ function resolveGoogleWorkspaceCredsPath(): string | undefined {
  */
 function getGoogleWorkspaceCalendarId(): string | undefined {
   return (
-    readEnvFile(['GOOGLE_WORKSPACE_CALENDAR_ID']).GOOGLE_WORKSPACE_CALENDAR_ID ||
-    process.env.GOOGLE_WORKSPACE_CALENDAR_ID
+    readEnvFile(['GOOGLE_WORKSPACE_CALENDAR_ID'])
+      .GOOGLE_WORKSPACE_CALENDAR_ID || process.env.GOOGLE_WORKSPACE_CALENDAR_ID
   );
 }
 
