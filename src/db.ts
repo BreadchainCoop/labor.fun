@@ -560,6 +560,41 @@ function createSchema(database: Database.Database): void {
     )
   `);
 
+  // --- Ops events log (deploys, GitHub Actions, devops/container failures,
+  //     gotchas, restore drills) — the catch-all operational-event audit rail.
+  //     Later consumers (IPC dead-letter, passive monitor) append here too.
+  //     NEVER store full prompts/responses here: metadata, bounded summaries
+  //     (<=500c), lengths and categories only. ---
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ops_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'info',
+      ref_id TEXT,
+      actor TEXT,
+      summary TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ops_events_type ON ops_events(event_type, created_at);
+    CREATE INDEX IF NOT EXISTS idx_ops_events_severity ON ops_events(severity, created_at);
+    CREATE INDEX IF NOT EXISTS idx_ops_events_ref ON ops_events(ref_id);
+  `);
+
+  // --- Daily estimated-spend reservation ledger (src/spend-gate.ts) ---
+  // One row per UTC day: a conservative, non-refundable estimated-USD
+  // reservation total. Written only by reserveDailySpend(); no runtime
+  // consumer is wired yet (staged substrate — see spend-gate.ts).
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS passive_monitor_spend (
+      spend_date TEXT PRIMARY KEY,
+      reserved_usd REAL NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
+      batches INTEGER NOT NULL DEFAULT 0 CHECK (batches >= 0),
+      updated_at TEXT NOT NULL
+    )
+  `);
+
   // Seed known user identities (idempotent) from SEED_IDENTITIES env var.
   // Format: JSON array of {platform_id, platform, kb_person} objects.
   // Example: SEED_IDENTITIES='[{"platform_id":"cli:jane-doe","platform":"cli","kb_person":"jane-doe"}]'
@@ -3093,6 +3128,96 @@ export function isGroupChat(jid: string): boolean {
   if (jid.startsWith('tg:')) return jid.startsWith('tg:-');
   // Unknown shape (Signal/Slack/Discord before metadata sync): assume group.
   return true;
+}
+
+// --- Ops events (operational-event audit rail) ---
+
+export type OpsEventType =
+  | 'deploy'
+  | 'gh_action'
+  | 'devops'
+  | 'container'
+  | 'gotcha'
+  | 'restore_drill'
+  | 'system'
+  | 'ipc' // dead-lettered/rejected IPC action files (later wave)
+  | 'passive_monitor'; // passive-monitor batch/verdict/spend/error events (later wave)
+export type OpsSeverity = 'info' | 'warn' | 'error' | 'critical';
+
+export interface OpsEventRow {
+  id: number;
+  event_type: string;
+  source: string;
+  severity: string;
+  ref_id: string | null;
+  actor: string | null;
+  summary: string;
+  detail: string | null;
+  created_at: string;
+}
+
+/**
+ * Append an ops event. The catch-all audit rail for deploys, CI outcomes,
+ * devops/container failures, gotchas and restore drills.
+ * NEVER pass raw prompts/responses in `detail` — metadata only.
+ */
+export function logOpsEvent(opts: {
+  eventType: OpsEventType;
+  source: string;
+  severity?: OpsSeverity;
+  refId?: string | null;
+  actor?: string | null;
+  summary: string;
+  detail?: unknown;
+}): number {
+  const result = db
+    .prepare(
+      `INSERT INTO ops_events (event_type, source, severity, ref_id, actor, summary, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      opts.eventType,
+      opts.source,
+      opts.severity ?? 'info',
+      opts.refId ?? null,
+      opts.actor ?? null,
+      opts.summary.substring(0, 500),
+      opts.detail === undefined ? null : JSON.stringify(opts.detail),
+      new Date().toISOString(),
+    );
+  return Number(result.lastInsertRowid);
+}
+
+export function getRecentOpsEvents(opts?: {
+  eventType?: string;
+  severity?: string;
+  limit?: number;
+}): OpsEventRow[] {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (opts?.eventType) {
+    clauses.push('event_type = ?');
+    params.push(opts.eventType);
+  }
+  if (opts?.severity) {
+    clauses.push('severity = ?');
+    params.push(opts.severity);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  params.push(Math.min(opts?.limit ?? 100, 1000));
+  return db
+    .prepare(
+      `SELECT * FROM ops_events ${where} ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(...params) as OpsEventRow[];
+}
+
+export function getOpsEventsSince(sinceIso: string): OpsEventRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM ops_events WHERE created_at >= ? ORDER BY created_at DESC`,
+    )
+    .all(sinceIso) as OpsEventRow[];
 }
 
 function migrateJsonState(): void {

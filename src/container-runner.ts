@@ -940,6 +940,21 @@ function resolveGoogleWorkspaceCredsPath(): string | undefined {
 }
 
 /**
+ * Dedicated Google Calendar id for the assistant's events (NOT the service
+ * account's primary calendar). Not a secret — just the calendar id the agent
+ * passes as `calendarId` to the gws Calendar tools (see
+ * container/skills/google-workspace/SKILL.md). Read from .env with
+ * process.env fallback; undefined when unset, in which case nothing is
+ * injected (existing deployments unchanged).
+ */
+function getGoogleWorkspaceCalendarId(): string | undefined {
+  return (
+    readEnvFile(['GOOGLE_WORKSPACE_CALENDAR_ID']).GOOGLE_WORKSPACE_CALENDAR_ID ||
+    process.env.GOOGLE_WORKSPACE_CALENDAR_ID
+  );
+}
+
+/**
  * Placeholder ANTHROPIC_API_KEY value the container sends to the credential
  * proxy in api-key mode: encodes the container name (runTag) for usage
  * attribution, and the CREDENTIAL_PROXY_AUTH_TOKEN shared secret when set.
@@ -1079,6 +1094,13 @@ function buildContainerArgs(
     );
   }
 
+  // Dedicated events calendar id (non-secret; value safe in argv). Only
+  // injected when set — unset installs are byte-identical to before.
+  const gwsCalendarId = getGoogleWorkspaceCalendarId();
+  if (gwsCalendarId) {
+    args.push('-e', `GOOGLE_WORKSPACE_CALENDAR_ID=${gwsCalendarId}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
@@ -1194,6 +1216,12 @@ function buildK8sEnvVars(
       name: 'GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE',
       value: CONTAINER_GWS_CREDS_PATH,
     });
+  }
+  // Dedicated events calendar id (non-secret) — mirrors the docker `-e`
+  // injection above; only present when configured.
+  const gwsCalendarId = getGoogleWorkspaceCalendarId();
+  if (gwsCalendarId) {
+    env.push({ name: 'GOOGLE_WORKSPACE_CALENDAR_ID', value: gwsCalendarId });
   }
 
   return env;
