@@ -10,6 +10,7 @@ import {
   PLUGIN_CONFIG,
   PROFILE_DIR,
 } from './config.js';
+import { getDb } from './db.js';
 import { readEnvFile } from './env.js';
 import { registerIntegration } from './integrations/registry.js';
 import { logger } from './logger.js';
@@ -27,6 +28,13 @@ export interface PluginApi {
   registerChatFlow: typeof registerChatFlow;
   /** Read keys from the install's .env without leaking them to process.env. */
   readEnvFile: typeof readEnvFile;
+  /**
+   * The framework's shared better-sqlite3 handle (src/db.ts). Orchestrator-side
+   * plugin code uses this instead of opening its own connection, so all writes
+   * go through the single schema owner's connection. Only valid after
+   * initDatabase() has run (plugin loading happens after DB init at startup).
+   */
+  getDb: typeof getDb;
   logger: typeof logger;
   /**
    * Absolute path to the active profile's directory (the org instance root
@@ -57,6 +65,7 @@ function defaultApi(): PluginApi {
     registerIntegration,
     registerChatFlow,
     readEnvFile,
+    getDb,
     logger,
     profileDir: PROFILE_DIR,
   };

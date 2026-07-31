@@ -207,6 +207,69 @@ plus `failed` (retryable propose error), `cancelled`, `rejected` (nonce replaced
 The reconcile loop only advances rows by observation; terminal rows are immutable
 (replay-safe). See `rules/finance/safe-payouts.md`.
 
+### rooms
+
+Physical rooms tracked by the `residency` catalog plugin. Created on every
+install (additive DDL) but only carries data where the plugin is enabled.
+`building_id` / `floor_id` / `map_room_id` link a room to a physical room in
+the profile's `buildings.json` (see `container/catalog-plugins/residency/`);
+all three are set together or not at all ("Not mapped").
+
+| Column       | Type        | Notes                                                |
+| ------------ | ----------- | ---------------------------------------------------- |
+| **id**       | TEXT PK     | UUID                                                 |
+| room_number  | INTEGER     | NOT NULL UNIQUE; integer-validated at the API        |
+| room_name    | TEXT        | Optional display name (falls back to "Room {number}") |
+| capacity     | INTEGER     | NOT NULL, default 1                                  |
+| notes        | TEXT        | Optional                                             |
+| building_id  | TEXT        | buildings.json building id (nullable)                |
+| floor_id     | TEXT        | buildings.json floor id (nullable)                   |
+| map_room_id  | TEXT        | buildings.json room id (nullable)                    |
+| created_at   | TEXT        | ISO timestamp, default `datetime('now')`             |
+
+### room_occupancy
+
+Stays (resident or guest) in a room. A stay is a half-open calendar window in
+the org's timezone: `end_date` NULL means ongoing/permanent. Dates are stored
+as plain `YYYY-MM-DD` strings and compared as text, so the API rejects anything
+that isn't a real calendar date and any inverted range.
+
+| Column      | Type    | Notes                                                       |
+| ----------- | ------- | ------------------------------------------------------------ |
+| **id**      | TEXT PK | UUID                                                        |
+| room_id     | TEXT    | NOT NULL, FK -> rooms.id                                    |
+| user_id     | TEXT    | FK -> app_users.id (NULL for guests)                        |
+| guest_name  | TEXT    | Free text; used instead of user_id when `is_guest` is 1     |
+| start_date  | TEXT    | NOT NULL, `YYYY-MM-DD`                                      |
+| end_date    | TEXT    | `YYYY-MM-DD`, NULL = ongoing                                |
+| is_guest    | INTEGER | NOT NULL, default 0; 1 = guest (no app_users row)           |
+| notes       | TEXT    | Optional                                                    |
+| created_at  | TEXT    | ISO timestamp, default `datetime('now')`                    |
+
+### residency_requests
+
+Inbound residency/guest applications raised from a chat. Intake flows arrive
+with the plugin's orchestrator side; the table is the durable queue behind them.
+
+| Column               | Type    | Notes                                             |
+| -------------------- | ------- | -------------------------------------------------- |
+| **id**               | TEXT PK | Generated ID                                      |
+| chat_jid             | TEXT    | NOT NULL, FK -> chats.jid                         |
+| source_group         | TEXT    | Originating group folder                          |
+| requester_user_id    | TEXT    | FK -> app_users.id (nullable)                     |
+| requester_name       | TEXT    | NOT NULL display name                             |
+| requester_contact    | TEXT    | Email/handle, optional                            |
+| request_type         | TEXT    | NOT NULL, default `resident` (e.g. resident, guest) |
+| requested_start_date | TEXT    | NOT NULL, `YYYY-MM-DD`                            |
+| requested_end_date   | TEXT    | `YYYY-MM-DD`, nullable                            |
+| room_preference      | TEXT    | Free text, optional                               |
+| notes                | TEXT    | Optional                                          |
+| status               | TEXT    | NOT NULL, default `pending`                       |
+| created_at           | TEXT    | ISO timestamp, default `datetime('now')`          |
+| resolved_by          | TEXT    | Coordinator/admin who decided                     |
+| resolved_at          | TEXT    | ISO timestamp                                     |
+| resolution_notes     | TEXT    | Optional                                          |
+
 ### meeting_summaries
 
 Processed meeting transcript summaries with extracted action items.
@@ -374,6 +437,9 @@ Assistant usage + knowledge-gap analytics: one row per completed agent run in a 
 | idx_expenses_status            | expenses(status)                       | Approval-queue lookup                        |
 | idx_expenses_requester         | expenses(requester_user_id)            | Per-person expense history                   |
 | idx_expenses_event             | expenses(event_id)                     | Expense grouping by event_id                 |
+| idx_rooms_number               | rooms(room_number)                     | Room lookup/ordering by number               |
+| idx_occupancy_room             | room_occupancy(room_id, start_date)    | Per-room stay timeline (grid + Gantt)        |
+| idx_residency_requests_status  | residency_requests(status, created_at) | Residency application queue by status        |
 | idx_api_usage_created          | api_usage(created_at)                  | Time-range usage queries                     |
 | idx_api_usage_run_tag          | api_usage(run_tag)                     | Per-run/group usage lookup                   |
 | idx_api_usage_model            | api_usage(model)                       | Per-model usage breakdown                    |
