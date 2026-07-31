@@ -1,0 +1,45 @@
+{
+  "_comment": "Building floor-map geometry for the residency plugin (and the R3 3D map). Units are HALF-FEET (a 20x24 room is 10ft x 12ft). This is obviously-fictional example data — replace with your org's real geometry. Schema: see container/catalog-plugins/residency/kb-ui/buildings.mjs.",
+  "residencyMappingBuildingId": "example-hall",
+  "buildings": [
+    {
+      "id": "example-hall",
+      "name": "Example Hall",
+      "address": "1 Example Way",
+      "shape": "rect",
+      "width": 80,
+      "depth": 120,
+      "floorOrder": ["1", "2"],
+      "floors": [
+        {
+          "id": "1",
+          "name": "First Floor",
+          "subtitle": "The Commons",
+          "color": "#3b82f6",
+          "rooms": [
+            { "id": "1-lobby", "name": "Lobby", "x": 2, "y": 2, "w": 36, "h": 30, "common": true },
+            { "id": "1-r101", "name": "Room 101", "x": 42, "y": 2, "w": 34, "h": 28, "sqft": 238 },
+            { "id": "1-r102", "name": "Room 102", "x": 42, "y": 34, "w": 34, "h": 28, "sqft": 238 },
+            { "id": "1-r103", "name": "Room 103", "x": 2, "y": 36, "w": 36, "h": 26, "sqft": 234 },
+            { "id": "1-kitchen", "name": "Shared Kitchen", "x": 2, "y": 66, "w": 74, "h": 24, "common": true },
+            { "id": "1-r104", "name": "Room 104", "x": 2, "y": 94, "w": 36, "h": 24, "sqft": 216 }
+          ]
+        },
+        {
+          "id": "2",
+          "name": "Second Floor",
+          "subtitle": "The Quiet Wing",
+          "color": "#4f46e5",
+          "rooms": [
+            { "id": "2-r201", "name": "Room 201", "x": 2, "y": 2, "w": 36, "h": 28, "sqft": 252 },
+            { "id": "2-r202", "name": "Room 202", "x": 42, "y": 2, "w": 34, "h": 28, "sqft": 238 },
+            { "id": "2-r203", "name": "Room 203", "x": 2, "y": 34, "w": 36, "h": 28, "sqft": 252 },
+            { "id": "2-r204", "name": "Room 204", "x": 42, "y": 34, "w": 34, "h": 28, "sqft": 238 },
+            { "id": "2-bath", "name": "Bathrooms", "x": 2, "y": 66, "w": 30, "h": 20, "common": true },
+            { "id": "2-r205", "name": "Room 205", "x": 36, "y": 66, "w": 40, "h": 24, "sqft": 240 }
+          ]
+        }
+      ]
+    }
+  ]
+}

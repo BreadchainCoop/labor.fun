@@ -34,6 +34,7 @@ describe('loadProfilePlugins', () => {
       registerIntegration: vi.fn(),
       registerChatFlow: vi.fn(),
       readEnvFile: vi.fn(() => ({})),
+      getDb: vi.fn() as never,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
       profileDir: '/tmp/fake-profile',
     };
@@ -72,6 +73,25 @@ describe('loadProfilePlugins', () => {
     expect(api.registerChannel).toHaveBeenCalledWith('a', expect.any(Function));
     expect(api.registerIntegration).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'b' }),
+    );
+  });
+
+  it('exposes getDb on the api so a plugin can reach the shared DB handle', async () => {
+    const fakeHandle = { prepare: vi.fn() };
+    const dir = makePluginsDir({
+      'db-user.mjs':
+        'export default (api) => api.registerIntegration({ name: "db-user", db: api.getDb(), start(){} });',
+    });
+    const api = fakeApi();
+    (api.getDb as ReturnType<typeof vi.fn>).mockReturnValue(fakeHandle);
+    await loadProfilePlugins({
+      pluginsDir: dir,
+      catalogDir: '/nonexistent/catalog',
+      api,
+    });
+    expect(api.getDb).toHaveBeenCalled();
+    expect(api.registerIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'db-user', db: fakeHandle }),
     );
   });
 
