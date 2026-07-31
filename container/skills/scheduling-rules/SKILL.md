@@ -54,6 +54,28 @@ Each wake-up uses API credits. For tasks > 2x/day:
 | `group` | Task needs chat history / conversation context |
 | `isolated` | Self-contained task, all context in prompt |
 
+## Delivery Mode (privacy) — prevents reminder leaks
+
+`delivery` controls whether the task's **result narration** is posted to the bound chat.
+
+| Mode | Use When |
+|------|----------|
+| `channel` (default) | The result is meant for everyone in the chat — daily briefings, in-channel reminders, public status posts. |
+| `silent` | **Private** reminders / DM-only tasks. The result is NOT posted to any channel; the real output goes out via `dm_user` to the requester. |
+
+**Rule of thumb:** if the request is "remind **me**" / "DM me" / anything personal, set `delivery: "silent"` **and** have the prompt deliver via `dm_user(target=<requester>, ...)`. If the request is "remind **the channel**" / "post the briefing here", use the default `channel`.
+
+Why this exists: `silent` makes the orchestrator **structurally** drop the result narration, so a confirmation like "DM sent ✅" can never leak into a shared channel/thread where other people (not the requester) would see it. Do **not** rely on wrapping narration in `<internal>` for privacy — `silent` is the guarantee. See issue #46.
+
+```
+schedule_task(
+  prompt: "DM <requester> via dm_user: 'Reminder — check the X'.",
+  schedule_type: "once",
+  schedule_value: "2026-06-27T09:00:00",
+  delivery: "silent",
+)
+```
+
 ## Scheduling for Other Groups
 
 ```

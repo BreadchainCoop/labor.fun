@@ -1474,6 +1474,7 @@ export async function processTaskIpc(
     schedule_type?: string;
     schedule_value?: string;
     context_mode?: string;
+    delivery?: string;
     script?: string;
     groupFolder?: string;
     chatJid?: string;
@@ -1754,6 +1755,9 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
+        // 'silent' suppresses the task's result narration from the channel
+        // (private reminders / DM-only work); anything else posts as before.
+        const delivery = data.delivery === 'silent' ? 'silent' : 'channel';
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -1763,6 +1767,7 @@ export async function processTaskIpc(
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           context_mode: contextMode,
+          delivery,
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),

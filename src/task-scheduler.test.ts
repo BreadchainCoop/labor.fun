@@ -4,6 +4,7 @@ import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
   computeNextRun,
+  shouldNarrateToChannel,
   startSchedulerLoop,
 } from './task-scheduler.js';
 
@@ -125,5 +126,19 @@ describe('task scheduler', () => {
     const offset =
       (new Date(nextRun!).getTime() - new Date(scheduledTime).getTime()) % ms;
     expect(offset).toBe(0);
+  });
+
+  describe('shouldNarrateToChannel (delivery mode)', () => {
+    it('suppresses channel narration for silent tasks', () => {
+      expect(shouldNarrateToChannel('silent')).toBe(false);
+    });
+
+    it('posts to channel for explicit channel tasks', () => {
+      expect(shouldNarrateToChannel('channel')).toBe(true);
+    });
+
+    it('treats undefined/legacy rows as channel (no behavior change)', () => {
+      expect(shouldNarrateToChannel(undefined)).toBe(true);
+    });
   });
 });
