@@ -314,4 +314,154 @@ TEE mode trades scale-out for verifiability. Known constraints:
 - **No inbound admin port.** With no public ports, all operator actions go
   through `docker exec` into the CVM (e.g. Signal linking) or the dstack/phala
   control surface — there is no KB dashboard exposed from a TEE CVM.
-```
+
+---
+
+## 8. Privacy posture: ephemeral mode & retention (toggle)
+
+By default labor.fun **persists everything**: `messages.db` is both the chat
+history and the queue that drives the agent poller, and TEE mode seals it to
+encrypted disks. For orgs that want sigstack-bot-style data retention —
+conversations living in TEE-protected **memory only**, bounded to roughly the
+last ~50 messages / 24 hours, total loss on restart — the framework offers an
+**opt-in toggle with two independent layers**. Nothing changes unless you turn
+them on.
+
+### Layer 1 — retention sweeper (any deployment mode, env-gated)
+
+Two env vars, both defaulting to `0` = **off** = today's keep-everything
+behavior, byte-identical:
+
+| Env var | Meaning | Recommended (sigstack-parity) |
+|---|---|---|
+| `MESSAGE_RETENTION_HOURS` | delete stored messages older than N hours | `24` |
+| `MESSAGE_RETENTION_MAX_PER_CHAT` | keep only the newest N messages per chat | `200` |
+
+When either is set, an hourly sweeper ([`src/retention.ts`](../src/retention.ts))
+deletes expired/overflow rows from the SQLite `messages` table. The message
+**queue mechanism is untouched** — the sweeper never deletes a message the
+agent poller hasn't processed yet (it honors each chat's processed watermark,
+an in-process floor for runs currently dispatched — whose cursor can still be
+rolled back for retry — plus an absolute "never touch the last hour" floor; see
+the module header for the exact composite guard). Works identically on a
+droplet, in Kubernetes, or in a TEE.
+
+`MESSAGE_RETENTION_HOURS` additionally age-prunes the two other
+content-bearing tables, so message text can't survive as a copy:
+`agent_runs.trigger_content` (up to 500 chars of each run's trigger message)
+and `assistant_events.question_text` (the analytics question text, subject to
+`ASSISTANT_ANALYTICS_PRIVACY`). Both are post-dispatch records — nothing reads
+them back for delivery — so they get the age rule and the 1-hour floor, but no
+watermark guard. `MESSAGE_RETENTION_MAX_PER_CHAT` is a `messages`-only rule; if
+you care about bounding the analytics tables, set the hours knob.
+
+**Honest limitation — a never-triggered group retains everything.** The
+watermark guard is deliberately fail-safe: a *registered* chat with no
+processed watermark (no `last_agent_timestamp` cursor and no bot reply yet) is
+skipped entirely, because every row in it might still be owed to the agent. In
+practice that means a trigger-mode group where the assistant has never been
+triggered accumulates messages **indefinitely**, no matter how low
+`MESSAGE_RETENTION_HOURS` is set — retention starts applying to that chat only
+once the agent has processed something in it. There is intentionally no
+override to force-delete unprocessed backlog: losing messages the agent still
+owes a response to is the worse failure. If you need a hard guarantee for such
+groups, use the ephemeral compose variant below (restart wipes everything) or
+don't register the group at all.
+
+### Layer 2 — ephemeral compose variant (TEE only, chosen at deploy time)
+
+The privacy mode is selected by **which compose you deploy**:
+
+| Compose file | Posture |
+|---|---|
+| [`deploy/tee/docker-compose.tee.yaml`](../deploy/tee/docker-compose.tee.yaml) | default — org state on encrypted **persistent** disks |
+| [`deploy/tee/docker-compose.tee-ephemeral.yaml`](../deploy/tee/docker-compose.tee-ephemeral.yaml) | opt-in — content-bearing state on **tmpfs (RAM only)** |
+
+In the ephemeral variant the three content-bearing volumes (`labor-profiles`,
+`labor-store` with `messages.db`, `labor-data` with sessions/IPC) are
+tmpfs-backed named volumes: chat content only ever exists in the CVM's
+TDX-encrypted guest memory and is destroyed on restart. Named-volume tmpfs (not
+container tmpfs) is required so the sibling agent-container bind mounts keep
+working — see the variant's header. The retention env vars are declared in its
+orchestrator environment (dstack only injects declared vars); set them in
+`.env.tee` for the full sigstack-parity window.
+
+**The selling point of toggle-by-variant: the privacy mode is attestable.**
+dstack measures the exact compose document into `compose_hash`, which appears
+in the TDX quote `!verify <nonce>` returns. The two variants necessarily hash
+differently, so a user can *cryptographically prove* whether the deployment
+they're talking to is the ephemeral one — the operator can't claim ephemerality
+while running the persistent template. Publish both files; verifiers match the
+reported `compose_hash` against the claimed variant.
+
+### What survives a restart (ephemeral mode)
+
+| Data | Survives? | Why |
+|---|---|---|
+| Signal device keys (`signal-data`) | **yes** (encrypted disk) | keys, not content; losing them forces a Signal re-link |
+| static docker CLI (`docker-cli`) | yes | tooling, no org data |
+| chat history / `messages.db` | **no — by design** | RAM only |
+| agent sessions/transcripts, IPC state | **no — by design** | RAM only |
+| group registrations | no — re-created automatically on first inbound message (`SIGNAL_AUTO_REGISTER_GROUPS=true`) | RAM only |
+| translate preferences (`!translate-on` / `!translate-me`) | no — users re-issue them | RAM only |
+| org profile / per-group `CLAUDE.md` | reseeded from the orchestrator image on every boot — see "Profile seeding" below (bake your profile into the image) | RAM only |
+
+### Profile seeding (ephemeral mode)
+
+A tmpfs-backed named volume is **empty every boot**, so `LABOR_PROFILE` would
+point at a missing directory and [`src/profile.ts`](../src/profile.ts) would
+throw on startup — a crash loop — unless something repopulates it. Docker's
+named-volume copy-up does **not** solve this: copy-up happens when the volume
+is *created*, while the local driver mounts the tmpfs on first use and
+unmounts (destroys) it as soon as the volume's refcount hits zero, so the
+content is gone before the orchestrator process starts. A dedicated seeding
+init-service fails for the same reason — its exit drops the refcount to zero
+and wipes what it just wrote.
+
+The seeding therefore happens **inside the orchestrator container, while it
+holds the mount**:
+
+1. [`deploy/docker/Dockerfile.orchestrator`](../deploy/docker/Dockerfile.orchestrator)
+   snapshots the baked profiles to `/app/profiles.dist` — deliberately outside
+   `/app/profiles`, so the volume mount cannot shadow it.
+2. The ephemeral variant overrides the orchestrator `command:` to
+   `cp -a /app/profiles.dist/. /app/profiles/ && exec node dist/index.js`.
+
+This runs on every start, so it self-heals across restarts and reboots. Bake
+your org's profile into the image (`COPY profiles/<org> ./profiles/<org>` then
+`RUN cp -a /app/profiles/. /app/profiles.dist/`) — it is then covered by the
+pinned image digest that `!verify` attests. A profile pushed onto the volume
+out-of-band is not reproducible and will not come back after a restart.
+
+### Log hygiene
+
+Ephemerality is defeated if content leaks into container logs — CVM logs can
+be made public (`phala deploy --public-logs`, used only to scrape the Signal
+link URI on first boot). The framework logs message **lengths, ids, and
+counts** at INFO and above, never message content (content is permitted at
+DEBUG only; keep `LOG_LEVEL=info` in production). The retention sweeper itself
+logs only row counts. **Turn `--public-logs` OFF in production** once Signal
+linking is done.
+
+### Honest comparison with sigstack-bot
+
+With both layers toggled on, labor.fun matches sigstack's core posture:
+conversation content exists only in TEE-protected RAM, retention is bounded
+(24h / N-messages window, hourly background cleanup vs sigstack's in-process
+map eviction), a restart is total conversation loss, and nothing
+content-bearing is ever written to disk. Differences to be honest about:
+
+- **Preferences also reset.** sigstack persists user preferences (e.g.
+  translation settings) encrypted at rest; labor.fun's ephemeral variant wipes
+  translate prefs and group registrations with everything else — users
+  re-issue `!translate-on` after a restart. (Registrations self-heal via
+  `SIGNAL_AUTO_REGISTER_GROUPS`.)
+- **Sweep cadence.** sigstack evicts continuously in-process; labor.fun's
+  sweeper runs hourly and never touches the most recent hour or unprocessed
+  messages, so the effective window normally exceeds the configured bound by up
+  to ~an hour — and in the never-triggered-group case above it is unbounded
+  until the agent first runs there. In ephemeral mode a restart is the backstop.
+- **Storage medium during the window.** Inside the retention window sigstack
+  holds messages in a process map; labor.fun holds them in SQLite — in
+  ephemeral mode that file lives on tmpfs, so the medium is still RAM, but it
+  is a file-shaped one shared with the (sibling, in-enclave) agent containers.
