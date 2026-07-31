@@ -64,6 +64,13 @@ see:
   auto-issues. The plugin just keeps one recurring triage task in sync with KB
   config (schedule/cancel/reschedule); the companion skill reads forwarded mail
   via the agent's `gws` gmail tool, classifies it, and opens GitHub issues.
+- `profiles/example/plugins/chores.mjs`, `hearts.mjs`, `things.mjs` — a
+  coliving-house governance suite (chore points with peer verification,
+  hearts accountability, procurement votes), reimplementing the mechanisms
+  from Daniel Kronovet's choreWheel (see `plugins/NOTICE.md` in the example
+  profile). Poll votes are counted by polling `reactions.get` on the plugin's
+  own Slack message, since the framework doesn't surface reaction events to
+  plugins.
 
 Each pairs with a container skill under
 `profiles/example/container-skills/<name>/` for the agent-side half.
