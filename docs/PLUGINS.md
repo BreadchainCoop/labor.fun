@@ -287,6 +287,43 @@ Built-ins self-register via the barrel (`src/chat-flows/index.ts`).
 (#30) — is the reference implementation, including the sentinel pattern for
 flagging events to the privileged side.
 
+## 2c. Dashboard slices (kb-ui pages from a plugin)
+
+A plugin can add pages to the KB dashboard. Put a module at
+`<profile>/plugins/<id>/kb-ui/index.mjs` (or the same path under the catalog
+dir); when `<id>` is enabled, kb-ui mounts it at `/<id>` behind its own auth.
+
+```js
+export function createRoutes(deps) {   // -> an express.Router
+  const router = express.Router();
+  router.get('/', (req, res) => res.send(deps.layout('Title', '<h1>hi</h1>')));
+  return router;
+}
+
+export function navCards(deps) {       // optional home-page cards
+  return [{ href: '/my-plugin', title: 'My Plugin', desc: '…',
+            roles: ['coordinator', 'admin'] }];   // roles = who sees the card
+}
+```
+
+`deps` carries `layout`, `esc`, the role predicates (`isAdmin`,
+`isSuperAdmin`, `isCoordinator`, `isResident`), `usernameFromReq(req)`, the
+`Database` constructor plus `DB_PATH`, `PROFILE_DIR`, `CONTEXT_DIR`, and
+`logger`. A profile plugin shadows a catalog plugin of the same id; a module
+that fails to load is logged and skipped rather than taking the dashboard down.
+
+Three rules, because this is a web surface reachable by every dashboard user:
+
+- **Gate the page, not just the API.** `navCards` `roles` only hides the card.
+- **Check the origin on every mutation** (exact host) and require the role
+  there too.
+- **Escape every interpolated value** — including dates and numbers going into
+  HTML attributes — and validate types at the API.
+
+Orchestrator-side plugin code can reach the same SQLite database via
+`api.getDb()` (see §0). A plugin owning its own tables should create them with
+`CREATE TABLE IF NOT EXISTS` on first use, from one place.
+
 ## 3. Container skills
 
 Agent-side capabilities are plain `SKILL.md` folders synced into each container's

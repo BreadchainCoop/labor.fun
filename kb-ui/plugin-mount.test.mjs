@@ -36,8 +36,8 @@ describe('resolveEnabledPluginIds', () => {
   });
 
   it('unions profile and env (comma form), deduped', () => {
-    expect(resolveEnabledPluginIds(['residency'], 'residency, other')).toEqual([
-      'residency',
+    expect(resolveEnabledPluginIds(['demo-panel'], 'demo-panel, other')).toEqual([
+      'demo-panel',
       'other',
     ]);
   });
@@ -51,8 +51,8 @@ describe('resolveEnabledPluginIds', () => {
   });
 
   it('malformed env JSON logs and degrades instead of crashing kb-ui', () => {
-    expect(resolveEnabledPluginIds(['residency'], '[oops', silentLogger)).toEqual([
-      'residency',
+    expect(resolveEnabledPluginIds(['demo-panel'], '[oops', silentLogger)).toEqual([
+      'demo-panel',
     ]);
     expect(silentLogger.warn).toHaveBeenCalled();
   });
@@ -80,22 +80,27 @@ describe('loadKbUiPlugins', () => {
     const catalogDir = tmpDir('catalog-');
     writePluginModule(
       catalogDir,
-      'residency',
+      'demo-panel',
       `export function createRoutes(deps) { return { fakeRouter: true, got: deps.marker }; }
-       export function navCards() { return [{ href: '/residency', title: 'Residency', desc: 'Rooms' }]; }`,
+       export function navCards() { return [{ href: '/demo-panel', title: 'Demo Panel', desc: 'A demo slice' }]; }`,
     );
     const { mounts, navCards } = await loadKbUiPlugins({
-      enabledIds: ['residency'],
+      enabledIds: ['demo-panel'],
       catalogDir,
       profileDir: tmpDir('profile-'),
       deps,
       logger: silentLogger,
     });
     expect(mounts).toHaveLength(1);
-    expect(mounts[0].mount).toBe('/residency');
+    expect(mounts[0].mount).toBe('/demo-panel');
     expect(mounts[0].router).toEqual({ fakeRouter: true, got: 'deps' });
     expect(navCards).toEqual([
-      { pluginId: 'residency', href: '/residency', title: 'Residency', desc: 'Rooms' },
+      {
+        pluginId: 'demo-panel',
+        href: '/demo-panel',
+        title: 'Demo Panel',
+        desc: 'A demo slice',
+      },
     ]);
   });
 
@@ -103,12 +108,12 @@ describe('loadKbUiPlugins', () => {
     const catalogDir = tmpDir('catalog-');
     writePluginModule(
       catalogDir,
-      'residency',
+      'demo-panel',
       `export function createRoutes() { return { ok: true }; }
-       export function navCards() { return [{ href: '/residency', title: 'Residency', roles: ['coordinator', 'admin'] }]; }`,
+       export function navCards() { return [{ href: '/demo-panel', title: 'Demo Panel', roles: ['coordinator', 'admin'] }]; }`,
     );
     const { navCards } = await loadKbUiPlugins({
-      enabledIds: ['residency'],
+      enabledIds: ['demo-panel'],
       catalogDir,
       profileDir: tmpDir('profile-'),
       deps,
@@ -121,7 +126,7 @@ describe('loadKbUiPlugins', () => {
     const catalogDir = tmpDir('catalog-');
     writePluginModule(
       catalogDir,
-      'residency',
+      'demo-panel',
       `export function createRoutes() { return {}; }
        export function navCards() { return [{ href: '/x', title: 'X' }]; }`,
     );
@@ -149,7 +154,7 @@ describe('loadKbUiPlugins', () => {
 
   it('skips silently when an enabled plugin has no kb-ui module or dirs are absent', async () => {
     const out = await loadKbUiPlugins({
-      enabledIds: ['residency', 'weekly-agenda'],
+      enabledIds: ['demo-panel', 'weekly-agenda'],
       catalogDir: '/nonexistent/catalog',
       profileDir: '/nonexistent/profile',
       deps,
@@ -200,10 +205,10 @@ describe('loadKbUiPlugins', () => {
   it('profile plugins shadow the catalog for the same id', async () => {
     const catalogDir = tmpDir('catalog-');
     const profileDir = tmpDir('profile-');
-    writePluginModule(catalogDir, 'residency', 'export function createRoutes() { return { from: "catalog" }; }');
-    writePluginModule(path.join(profileDir, 'plugins'), 'residency', 'export function createRoutes() { return { from: "profile" }; }');
+    writePluginModule(catalogDir, 'demo-panel', 'export function createRoutes() { return { from: "catalog" }; }');
+    writePluginModule(path.join(profileDir, 'plugins'), 'demo-panel', 'export function createRoutes() { return { from: "profile" }; }');
     const out = await loadKbUiPlugins({
-      enabledIds: ['residency'],
+      enabledIds: ['demo-panel'],
       catalogDir,
       profileDir,
       deps,
@@ -248,12 +253,26 @@ describe('navCardVisible', () => {
     expect(navCardVisible({ href: '/x', title: 'X', roles: ['wizard'] }, 'root', roles)).toBe(false);
   });
 
-  it("the residency card is hidden from users its route gate would 403", async () => {
-    // Real card, not a fixture — the advertisement must track the gate.
-    const residency = await import(
-      '../container/catalog-plugins/residency/kb-ui/index.mjs'
+  it("a loaded plugin's own card is hidden from users its route gate would 403", async () => {
+    // End-to-end through loadKbUiPlugins: whatever roles a plugin module
+    // declares on its card must survive the load and be honoured by the home
+    // page filter, so a card is never advertised to a user its routes 403.
+    const catalogDir = tmpDir('catalog-');
+    writePluginModule(
+      catalogDir,
+      'demo-panel',
+      `export function navCards() {
+         return [{ href: '/demo-panel', title: 'Demo Panel', roles: ['coordinator', 'admin'] }];
+       }`,
     );
-    const [card] = residency.navCards();
+    const { navCards } = await loadKbUiPlugins({
+      enabledIds: ['demo-panel'],
+      catalogDir,
+      profileDir: tmpDir('profile-'),
+      deps: {},
+      logger: silentLogger,
+    });
+    const [card] = navCards;
     expect(navCardVisible(card, 'coord', roles)).toBe(true);
     expect(navCardVisible(card, 'root', roles)).toBe(true);
     expect(navCardVisible(card, 'res', roles)).toBe(false);
