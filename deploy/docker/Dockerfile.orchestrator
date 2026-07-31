@@ -120,6 +120,21 @@ COPY docs ./docs
 # NOT baked — they come from the PVC/hostPath mount selected by LABOR_PROFILE.
 COPY profiles/example ./profiles/example
 
+# Immutable snapshot of the baked profiles, kept OUTSIDE /app/profiles so it
+# survives that path being shadowed by a volume mount. Deployments whose
+# profiles volume starts EMPTY on every boot (the TEE-ephemeral variant's
+# tmpfs-backed labor-profiles — deploy/tee/docker-compose.tee-ephemeral.yaml)
+# seed it from here in the orchestrator's own entrypoint, i.e. while the
+# process holds the mount. Docker's named-volume copy-up cannot do this: it
+# runs at volume CREATE, and the local driver destroys a tmpfs volume as soon
+# as its refcount hits 0, so the volume is empty again by the time the
+# orchestrator starts (LABOR_PROFILE would point at a missing dir → crash
+# loop). Inert for every other deployment (a few hundred KB, never read).
+# Derived images that bake their own org profile should refresh the snapshot:
+#   COPY profiles/<org> ./profiles/<org>
+#   RUN cp -a /app/profiles/. /app/profiles.dist/
+RUN cp -a /app/profiles /app/profiles.dist
+
 # Non-root: the stock node:22 image ships a uid/gid 1000 `node` user. The
 # orchestrator writes runtime state (SQLite store, sessions, IPC) under the
 # mounted profile dir, which the tenant provisions writable for uid 1000.

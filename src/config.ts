@@ -95,6 +95,11 @@ const envConfig = readEnvFile([
   'REMINDER_ESCALATION_CONTACT',
   'GITHUB_SYNC_ISSUE_DEPS',
   'GITHUB_APP_MODE',
+  // Opt-in message-retention sweeper (src/retention.ts). Both default 0 = OFF
+  // (today's keep-everything behavior, byte-identical). See docs/TEE.md
+  // "Privacy posture".
+  'MESSAGE_RETENTION_HOURS',
+  'MESSAGE_RETENTION_MAX_PER_CHAT',
   'PM_ORCHESTRATION_INTERVAL_MS',
   'PM_ORCHESTRATION_TARGET_GROUP',
   'PM_DUE_SOON_DAYS',
@@ -658,6 +663,27 @@ export const WHATSAPP_AUTO_ALLOWLIST_GROUPS =
 // Default: off — unregistered Signal chats are ignored, exactly as before.
 export const SIGNAL_AUTO_REGISTER_GROUPS =
   envVal('SIGNAL_AUTO_REGISTER_GROUPS') === 'true';
+
+// --- Opt-in message-retention sweeper (privacy toggle, layer 1) ---
+// Bounds how long / how much chat content the SQLite store retains. BOTH
+// default to 0 = disabled = today's keep-everything behavior; the sweeper
+// (src/retention.ts) is a true no-op unless at least one is > 0. Works in any
+// deployment mode; in TEE mode it pairs with the ephemeral compose variant
+// (deploy/tee/docker-compose.tee-ephemeral.yaml) for sigstack-parity data
+// retention. The sweeper NEVER deletes messages the agent poller hasn't
+// processed yet — see the guard in src/retention.ts.
+//
+// MESSAGE_RETENTION_HOURS: delete messages older than this many hours (0 = no
+// age limit). MESSAGE_RETENTION_MAX_PER_CHAT: keep at most the newest N
+// messages per chat (0 = no cap). Recommended TEE-ephemeral values: 24 / 200.
+export const MESSAGE_RETENTION_HOURS = Math.max(
+  0,
+  parseInt(envVal('MESSAGE_RETENTION_HOURS') || '0', 10) || 0,
+);
+export const MESSAGE_RETENTION_MAX_PER_CHAT = Math.max(
+  0,
+  parseInt(envVal('MESSAGE_RETENTION_MAX_PER_CHAT') || '0', 10) || 0,
+);
 
 // --- Docker sibling-container mode (TEE / orchestrator-in-a-container) ---
 // When the orchestrator itself runs INSIDE a container and spawns each agent as

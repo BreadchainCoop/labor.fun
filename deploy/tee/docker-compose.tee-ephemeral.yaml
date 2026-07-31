@@ -1,33 +1,81 @@
-# labor.fun — TEE deployment mode (dstack / Phala Intel-TDX CVM)
+# labor.fun — TEE deployment mode, EPHEMERAL (RAM-only) VARIANT
 # ---------------------------------------------------------------------------
-# Runs the WHOLE labor.fun stack inside a single dstack Confidential VM (CVM).
-# Signal E2E terminates INSIDE the enclave (signal-cli daemon), inference is
-# proxied to NEAR AI (remote — no local service), and `!verify <nonce>` returns
-# a fresh Intel-TDX attestation quote bound to the caller's nonce.
+# Same stack as docker-compose.tee.yaml (the persistent template — this file
+# is derived from it; keep the two structurally in sync), with ONE posture
+# change: all CONTENT-BEARING state is tmpfs-backed, i.e. lives only in the
+# CVM's TEE-protected RAM. This is the "layer 2" privacy toggle
+# (docs/TEE.md → "Privacy posture"): sigstack-parity data retention.
 #
-# Design goals (see deploy/tee/README.md and docs/TEE.md):
-#   * NO public ports. Everything talks over the internal Docker network the
-#     dstack runtime creates. The only trust boundary that crosses the enclave
-#     is (a) Signal's E2E channel (terminates in signal-cli) and (b) the NEAR AI
-#     HTTPS egress for inference. Neither exposes plaintext org data at rest.
-#   * The dstack guest socket (/var/run/dstack.sock) is mounted READ-ONLY into
-#     every service that needs attestation / key derivation.
-#   * State (profiles/, store, data) lives on dstack ENCRYPTED volumes so that
-#     even the host operator cannot read org memory at rest (see README).
+# WHAT IS RAM-ONLY (wiped on every CVM restart/reboot — BY DESIGN):
+#   * labor-profiles — org identity, per-group CLAUDE.md memory, KB context
+#   * labor-store    — SQLite messages.db (chat history, translate prefs,
+#                      identities, group registrations)
+#   * labor-data     — sessions/transcripts, IPC dirs, agent-runner-src cache
 #
-# What this compose file is MEASURED into: dstack hashes this exact compose
-# document into `compose_hash`, which appears in the TDX quote returned by
-# `!verify`. Changing ANY line here re-measures the app → the attestation a
-# user verifies is bound to this published file. That is why every image is
-# pinned by @sha256 digest below: a floating `:latest` tag would let the host
-# swap the running code without changing compose_hash. Pin real digests before
-# deploying (the placeholders below will not pull).
+# WHAT SURVIVES A RESTART (keys, not content):
+#   * signal-data    — the Signal secondary-device keys/session. Losing it
+#                      forces a full re-link from the primary device, so it
+#                      stays on the encrypted persistent disk. It holds
+#                      cryptographic identity, NOT message content.
+#   * docker-cli     — the fetched static docker CLI binary (no org data).
 #
-# PRIVACY VARIANT: this template PERSISTS org state (encrypted volumes). For
-# sigstack-parity EPHEMERAL retention — chat content in RAM only, wiped on
-# restart — deploy docker-compose.tee-ephemeral.yaml instead. Because the
-# compose document is measured into compose_hash, WHICH variant runs is
-# attestable via `!verify`. See docs/TEE.md → "Privacy posture".
+# RESTART SEMANTICS (empty-on-boot is handled, not an error):
+#   * Chat history, agent sessions, per-user/per-chat translate preferences
+#     and group registrations are GONE after a restart — that is the point.
+#     With SIGNAL_AUTO_REGISTER_GROUPS=true the first inbound message in a
+#     chat re-registers it automatically; translate prefs must be re-issued
+#     (!translate-on / !translate-me). The orchestrator boots cleanly from an
+#     empty store (initDatabase creates the schema; empty cursors/watermarks
+#     mean "nothing pending", not a crash).
+#   * PROFILE SEEDING — done by the orchestrator's OWN entrypoint, and it has
+#     to be. Docker's named-volume copy-up (image content → empty volume) is
+#     NOT usable here: copy-up runs when the volume is CREATED, but the local
+#     driver mounts a tmpfs volume on first use and UNMOUNTS (destroys) it the
+#     moment its refcount drops to 0. So whatever copy-up wrote is gone before
+#     the orchestrator starts, and LABOR_PROFILE points at a missing dir →
+#     src/profile.ts throws → crash loop. A separate seeding init-service
+#     fails the same way (its exit drops the refcount to 0 and wipes the
+#     volume). The only actor that can seed the volume is a process that HOLDS
+#     the mount: the orchestrator itself. Hence the `command:` below —
+#     `cp -a /app/profiles.dist/. /app/profiles/ && exec node dist/index.js` —
+#     copying from the image-baked snapshot (deploy/docker/Dockerfile.orchestrator
+#     writes /app/profiles.dist, outside the mount point so the volume can't
+#     shadow it). Self-heals on every restart/reboot.
+#     Consequence: BAKE your org's profile into your orchestrator image
+#     (COPY profiles/<org> ./profiles/<org>, then refresh the snapshot with
+#     RUN cp -a /app/profiles/. /app/profiles.dist/) — it is then covered by
+#     the pinned image digest AND reseeded each boot. A profile delivered
+#     out-of-band onto the volume does NOT survive a reboot (nothing outside
+#     the image can be reseeded).
+#
+# WHY tmpfs-backed NAMED VOLUMES (not container-level `tmpfs:`): agent
+# containers are DOCKER SIBLINGS — src/container-runner.ts
+# (DOCKER_SIBLING_MODE) resolves the orchestrator's mounts to HOST paths via
+# `docker inspect` and bind-mounts them into each per-turn agent container. A
+# tmpfs-backed NAMED volume still has a host mountpoint
+# (/var/lib/docker/volumes/<name>/_data, with the tmpfs mounted there), so
+# those sibling bind-mounts keep working; container-level tmpfs has no host
+# path and would break them.
+#
+# tmpfs SIZING: size=1g per content volume below is a hard cap; tmpfs
+# allocates lazily, so pages are consumed only as data is written. On a
+# tdx.large (8 GB RAM) the 3×1g caps leave ample headroom for the
+# orchestrator + per-turn agent containers. Pair with the retention env vars
+# (declared below) so messages.db stays bounded like sigstack's
+# ~50-msgs / 24h window.
+#
+# ATTESTABILITY — the point of toggle-by-variant: dstack measures this exact
+# compose document into `compose_hash`, which appears in the TDX quote that
+# `!verify <nonce>` returns. This file differs from the persistent template,
+# so it produces a DIFFERENT compose_hash: users can cryptographically verify
+# that the deployment they are talking to is the ephemeral one — not just
+# trust the operator's word. Publish both variants so verifiers can compare
+# the reported hash against the variant the operator claims to run.
+#
+# Everything else from the persistent template still applies: NO public
+# ports, dstack guest socket mounted read-only, every image pinned by @sha256
+# digest (a floating tag would let the host swap code without changing
+# compose_hash). Pin real digests before deploying (placeholders won't pull).
 # ---------------------------------------------------------------------------
 
 services:
@@ -88,11 +136,22 @@ services:
     # default user is uid 1000 `node`). The entrypoint installs the static docker
     # CLI (from docker-cli-fetch, on /dockercli) to /usr/local/bin — already on
     # PATH — then execs the image's real entrypoint (node dist/index.js, WORKDIR /app).
+    #
+    # DELTA vs the persistent template: the `cp -a` line. It seeds the RAM-only
+    # profiles volume from the image-baked snapshot /app/profiles.dist while
+    # THIS process holds the mount — the only point at which a tmpfs-backed
+    # named volume is guaranteed to exist (see PROFILE SEEDING in the header;
+    # copy-up and init-service seeding both lose the race to the driver's
+    # unmount-on-refcount-0). Runs on every boot, so it also self-heals a
+    # partially populated volume. `.` in the source path copies the CONTENTS
+    # (not the dir itself) into the mount; failures fall through to node, which
+    # then exits with an explicit "profile does not exist" error.
     user: '0:0'
     entrypoint: ['/bin/sh', '-c']
     command:
       - |
         install -m 0755 /dockercli/docker /usr/local/bin/docker
+        cp -a /app/profiles.dist/. /app/profiles/
         exec node dist/index.js
     environment:
       # --- Profile / runtime ------------------------------------------------
@@ -126,6 +185,19 @@ services:
       - INFERENCE_BACKEND=${INFERENCE_BACKEND:-near-ai}
       - NEAR_AI_API_KEY=${NEAR_AI_API_KEY}
       - NEAR_AI_MODEL=${NEAR_AI_MODEL}
+      # --- Retention (privacy toggle, layer 1 — src/retention.ts) ----------
+      # Declared here because dstack injects ONLY declared env vars into the
+      # container. Both default 0 = off; for sigstack-parity set in .env.tee:
+      #   MESSAGE_RETENTION_HOURS=24        (drop chat rows older than 24h)
+      #   MESSAGE_RETENTION_MAX_PER_CHAT=200 (keep the newest 200 per chat)
+      # The sweeper never deletes messages the agent poller hasn't processed —
+      # which also means a group the assistant has never been triggered in
+      # retains everything (fail-safe; docs/TEE.md §8). In THIS variant the
+      # RAM-only store still bounds it: a restart wipes it regardless.
+      # MESSAGE_RETENTION_HOURS additionally prunes agent_runs.trigger_content
+      # and assistant_events.question_text, the other content-bearing tables.
+      - MESSAGE_RETENTION_HOURS=${MESSAGE_RETENTION_HOURS}
+      - MESSAGE_RETENTION_MAX_PER_CHAT=${MESSAGE_RETENTION_MAX_PER_CHAT}
     volumes:
       # docker.sock — spawn sibling AGENT containers inside the CVM. The socket
       # is the SAME dockerd the dstack runtime uses; agent containers therefore
@@ -136,10 +208,11 @@ services:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
       # static docker CLI staged by docker-cli-fetch (installed to PATH on boot).
       - docker-cli:/dockercli
-      # --- Encrypted, persistent state (dstack encrypted volumes) -----------
-      # Each named volume below is backed by a dstack ENCRYPTED disk (configured
-      # in the dstack app manifest / KMS, see README). Contents are sealed to the
-      # CVM measurement, so the host operator cannot read org memory at rest.
+      # --- EPHEMERAL org state (tmpfs-backed named volumes — RAM only) ------
+      # DELTA vs the persistent template: these three volumes are declared
+      # with a tmpfs driver below, so org content never touches disk and is
+      # wiped on every CVM restart (see the file header for the full restart
+      # semantics and why NAMED tmpfs volumes, not container tmpfs).
       #   profiles/  — org identity, per-group CLAUDE.md, KB (people/tasks/etc.)
       #   store      — SQLite messages.db (message history, identities)
       #   data       — sessions/, IPC dirs, agent-runner-src cache
@@ -290,12 +363,34 @@ services:
   # verify it out-of-band). See src/container-runner.ts.
 
 volumes:
-  # dstack backs these with ENCRYPTED disks (declared in the dstack app
-  # manifest). Named volumes keep the compose portable; the encryption is a
-  # property of the CVM's disk config, not of the volume driver line here.
+  # DELTA vs the persistent template: the three CONTENT-BEARING volumes are
+  # tmpfs-backed NAMED volumes — the data lives only in the CVM's
+  # TEE-protected RAM (guest memory is TDX-encrypted) and vanishes on
+  # restart. They are named (not container `tmpfs:`) so `docker inspect`
+  # still reports a host mountpoint and the sibling agent-container
+  # bind-mounts keep working (see header). size= is a hard cap; tmpfs
+  # allocates lazily.
   labor-profiles:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: 'size=1g'
   labor-store:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: 'size=1g'
   labor-data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: 'size=1g'
+  # KEPT PERSISTENT (encrypted disk, as in the template): Signal device KEYS —
+  # losing them forces a full re-link from the primary device. Keys are not
+  # chat content; message plaintext never lands here.
   signal-data:
   docker-cli: # holds the fetched static docker CLI (not org state; plain volume)
 

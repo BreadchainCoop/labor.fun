@@ -382,7 +382,13 @@ export class SignalChannel implements Channel {
       try {
         msg = JSON.parse(line);
       } catch (err) {
-        logger.warn({ line, err }, 'Signal: unparseable JSON-RPC line');
+        // Log hygiene: the raw line is a JSON-RPC frame that carries message
+        // PLAINTEXT — never log it at WARN (CVM logs can be made public).
+        // Length + parse error are enough to diagnose framing problems.
+        logger.warn(
+          { lineLength: line.length, err },
+          'Signal: unparseable JSON-RPC line',
+        );
         continue;
       }
       if (msg.id !== undefined && this.pending.has(msg.id)) {

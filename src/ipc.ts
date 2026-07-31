@@ -811,8 +811,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         subject: data.subject,
                         text: data.body,
                       });
+                      // Log hygiene: the subject is message CONTENT — keep it
+                      // out of INFO+ logs (CVM logs can be public). Recipient
+                      // + length only, matching src/email-poller.ts.
                       logger.info(
-                        { to: data.to, subject: data.subject, sourceGroup },
+                        {
+                          to: data.to,
+                          subjectLength: String(data.subject).length,
+                          sourceGroup,
+                        },
                         'Email sent',
                       );
                     } catch (emailErr) {
