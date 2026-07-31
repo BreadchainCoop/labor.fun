@@ -127,6 +127,11 @@ import {
   maybeAutoTranslate,
   registerTranslateCommands,
 } from './translate-commands.js';
+import {
+  clearInFlightRetentionFloor,
+  registerInFlightRetentionFloor,
+  startRetentionSweeper,
+} from './retention.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { startReminderEngine } from './reminder-engine.js';
 import {
@@ -467,6 +472,11 @@ async function processChatFlow(
   const previousCursor = lastAgentTimestamp[chatJid] || '';
   lastAgentTimestamp[chatJid] = lastTs;
   saveState();
+  // The persisted cursor now over-reports what has actually been processed
+  // (we roll it back below on error-without-reply). Hold the retention
+  // sweeper at the pre-dispatch value so it can't delete a batch this run may
+  // still hand back for retry. Cleared in processGroupMessages' finally.
+  registerInFlightRetentionFloor(chatJid, previousCursor);
 
   const triggerMsg = inbound[inbound.length - 1];
   const prompt = formatMessages(missedMessages, TIMEZONE);
@@ -532,8 +542,23 @@ async function processChatFlow(
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
+ *
+ * Thin wrapper over the real body so the retention in-flight floor (guard 4 in
+ * src/retention.ts) is released on EVERY exit path — normal return, early
+ * return, chat-flow return, or a throw out of runAgent. The GroupQueue
+ * serializes runs per group (GroupState.active), so one wrapper invocation
+ * owns the chat's floor for the whole dispatch window, including the floors
+ * registered by processChatFlow and by the message loop's pipe path.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
+  try {
+    return await processGroupMessagesInner(chatJid);
+  } finally {
+    clearInFlightRetentionFloor(chatJid);
+  }
+}
+
+async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -634,6 +659,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   lastAgentTimestamp[chatJid] =
     missedMessages[missedMessages.length - 1].timestamp;
   saveState();
+  // Hold the retention sweeper at the pre-dispatch cursor for the lifetime of
+  // this run: between here and the rollback below the persisted cursor claims
+  // these messages are processed, but an error-without-output hands them back
+  // for retry. Released in processGroupMessages' finally (every exit path).
+  registerInFlightRetentionFloor(chatJid, previousCursor);
 
   logger.info(
     { group: group.name, messageCount: missedMessages.length },
@@ -1068,9 +1098,16 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
+            const pipedFrom = lastAgentTimestamp[chatJid] || '';
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+            // queue.sendMessage() only returns true while a message container
+            // is active, i.e. while processGroupMessages is on the stack for
+            // this chat — so this floor is always released by its finally.
+            // Lower-wins: the run's own (older) floor already covers this
+            // advance; registering here just makes the invariant explicit.
+            registerInFlightRetentionFloor(chatJid, pipedFrom);
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
@@ -1830,6 +1867,15 @@ async function main(): Promise<void> {
   startSlackMembersSyncLoop();
 
   recoverPendingMessages();
+
+  // Opt-in message-retention sweeper (privacy toggle — docs/TEE.md "Privacy
+  // posture"). True no-op unless MESSAGE_RETENTION_HOURS /
+  // MESSAGE_RETENTION_MAX_PER_CHAT is set. Started AFTER
+  // recoverPendingMessages() and with an internal ~1min first-run delay so
+  // startup recovery of unprocessed messages runs first; its processed-
+  // watermark guard independently protects anything still owed to the poller.
+  startRetentionSweeper();
+
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
