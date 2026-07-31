@@ -31,6 +31,7 @@ import {
   REMINDER_SWEEP_INTERVAL_MS,
   REMINDER_TARGET_JID,
   SHARED_KB_GROUP,
+  SLASH_RL_WINDOW_MS,
   SMITHERS_BRIDGE_ENABLED,
   SMITHERS_BRIDGE_PORT,
   SMITHERS_BRIDGE_TOKEN,
@@ -123,6 +124,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { ChatCommandContext, dispatchChatCommand } from './chat-commands.js';
+import { slashCommandLimiter } from './rate-limit.js';
 import {
   maybeAutoTranslate,
   registerTranslateCommands,
@@ -413,6 +415,9 @@ export function runPreAgentCommandPlane(
     chatJid,
     msg,
     isGroup: opts.isGroup,
+    // Main-group senders are the operator surface — never throttle them
+    // (Salem exempts admins; labor.fun's flat model uses the main group).
+    exemptFromRateLimit: !!opts.registeredGroups[chatJid]?.isMain,
     reply: opts.reply,
   };
   // A handled command must not be stored (see docstring), so signal `claimed`.
@@ -1875,6 +1880,17 @@ async function main(): Promise<void> {
   // startup recovery of unprocessed messages runs first; its processed-
   // watermark guard independently protects anything still owed to the poller.
   startRetentionSweeper();
+
+  // Chat-command rate-limiter prune: drop limiter keys idle for at least 4
+  // windows so the in-memory map cannot grow unbounded across long uptimes
+  // (key cardinality is bounded by chats × senders × registered prefixes, but
+  // that still accretes on busy multi-tenant instances). Runs even while the
+  // limiter is disabled (SLASH_RL_MAX=0) — it is then a no-op on an empty
+  // map. Unref'd so it never holds the process open.
+  setInterval(
+    () => slashCommandLimiter.prune(SLASH_RL_WINDOW_MS * 4),
+    60 * 1000,
+  ).unref();
 
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');

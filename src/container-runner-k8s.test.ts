@@ -240,6 +240,33 @@ describe('container-runner Kubernetes dispatch (CONTAINER_RUNTIME=kubernetes)', 
     expect(JSON.stringify(env)).not.toContain('host.docker.internal');
   });
 
+  it('injects GOOGLE_WORKSPACE_CALENDAR_ID into the pod-spec env when set', async () => {
+    process.env.GOOGLE_WORKSPACE_CALENDAR_ID = 'cal-k8s@group.calendar.google.com';
+    try {
+      await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+      const [, args] = lastSpawnCall();
+      const overrides = JSON.parse(args[args.indexOf('--overrides') + 1]);
+      const env = overrides.spec.containers[0].env as Array<{
+        name: string;
+        value: string;
+      }>;
+      expect(env.find((e) => e.name === 'GOOGLE_WORKSPACE_CALENDAR_ID')?.value).toBe(
+        'cal-k8s@group.calendar.google.com',
+      );
+    } finally {
+      delete process.env.GOOGLE_WORKSPACE_CALENDAR_ID;
+    }
+  });
+
+  it('omits GOOGLE_WORKSPACE_CALENDAR_ID from the pod-spec env when unset', async () => {
+    delete process.env.GOOGLE_WORKSPACE_CALENDAR_ID;
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+    const [, args] = lastSpawnCall();
+    const overrides = JSON.parse(args[args.indexOf('--overrides') + 1]);
+    const env = overrides.spec.containers[0].env as Array<{ name: string }>;
+    expect(env.some((e) => e.name === 'GOOGLE_WORKSPACE_CALENDAR_ID')).toBe(false);
+  });
+
   it('does not put GitHub/Linear secrets in the extraEnv passed to spawn (they are resolved into --overrides instead)', async () => {
     process.env.GITHUB_PERSONAL_ACCESS_TOKEN = 'gh-secret-value';
     try {
