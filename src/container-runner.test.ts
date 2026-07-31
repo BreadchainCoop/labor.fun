@@ -870,6 +870,65 @@ describe('container-runner Google Workspace credentials mount', () => {
   });
 });
 
+describe('container-runner Google Workspace calendar id env', () => {
+  const CALENDAR_ID = 'abc123@group.calendar.google.com';
+  let savedCalEnv: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+    vi.mocked(spawn).mockClear();
+    savedCalEnv = process.env.GOOGLE_WORKSPACE_CALENDAR_ID;
+    delete process.env.GOOGLE_WORKSPACE_CALENDAR_ID;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedCalEnv === undefined) {
+      delete process.env.GOOGLE_WORKSPACE_CALENDAR_ID;
+    } else {
+      process.env.GOOGLE_WORKSPACE_CALENDAR_ID = savedCalEnv;
+    }
+  });
+
+  async function drive(p: Promise<unknown>) {
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'ok',
+      newSessionId: 's',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+  }
+
+  function lastSpawnArgs(): string[] {
+    const calls = vi.mocked(spawn).mock.calls;
+    return calls[calls.length - 1][1] as string[];
+  }
+
+  it('injects GOOGLE_WORKSPACE_CALENDAR_ID when set', async () => {
+    process.env.GOOGLE_WORKSPACE_CALENDAR_ID = CALENDAR_ID;
+
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    expect(lastSpawnArgs()).toContain(
+      `GOOGLE_WORKSPACE_CALENDAR_ID=${CALENDAR_ID}`,
+    );
+  });
+
+  it('omits GOOGLE_WORKSPACE_CALENDAR_ID when unset (no behavior change)', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+
+    expect(
+      lastSpawnArgs().some((a) =>
+        a.startsWith('GOOGLE_WORKSPACE_CALENDAR_ID='),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('container-runner local-LLM backend wiring', () => {
   const LLM_SECRET = 'sk-local-TESTSECRET_must_not_leak_0123456789abcdef';
 
