@@ -6,9 +6,18 @@
  * Two auth modes:
  *   API key:  Proxy injects x-api-key on every request.
  *   OAuth:    Container CLI exchanges its placeholder token for a temp
- *             API key via /api/oauth/claude_cli/create_api_key.
+ *             API key via /api/oauth/claude_cli/create_api_key
+ *             (anthropic-auth.ts: OAUTH_CREATE_API_KEY_PATH).
  *             Proxy injects real OAuth token on that exchange request;
  *             subsequent requests carry the temp key which is valid as-is.
+ *
+ * The proxy performs no exchange itself — it RELAYS the container CLI's, only
+ * swapping the placeholder Bearer for the real token. Host-process callers
+ * have no CLI, so they run the same exchange through
+ * `getAnthropicApiKey()` in anthropic-auth.ts; both sides build the
+ * exchange's Authorization header from `anthropicAuthHeaders()` there, and
+ * credential-proxy.test.ts pins the relayed path/header against that module's
+ * constants so the two protocols cannot drift.
  *
  * Usage metering + budget enforcement (OSS "API cost tracking & budgets"):
  * optional `hooks` let a caller observe token usage per run and gate
@@ -19,10 +28,15 @@ import { createServer, Server } from 'http';
 import { request as httpsRequest } from 'https';
 import { request as httpRequest, RequestOptions } from 'http';
 
-import { readEnvFile } from './env.js';
+import {
+  AnthropicAuthMode,
+  anthropicAuthHeaders,
+  detectAnthropicAuthMode,
+  readSecrets,
+} from './anthropic-auth.js';
 import { logger } from './logger.js';
 
-export type AuthMode = 'api-key' | 'oauth';
+export type AuthMode = AnthropicAuthMode;
 
 export interface ProxyConfig {
   authMode: AuthMode;
@@ -190,28 +204,6 @@ function parseUsageFromBody(
   };
 }
 
-/**
- * Read credential/config values preferring process.env, falling back to .env.
- *
- * The proxy originally read these from .env only. That breaks hosted
- * Kubernetes mode, where a tenant orchestrator receives ANTHROPIC_API_KEY /
- * ANTHROPIC_BASE_URL / etc. as pod env vars (from a Secret via secretKeyRef —
- * see deploy/k8s/tenant-example/deployment.yaml) and has no .env file at all:
- * the proxy would find no API key, silently fall into OAuth mode with no
- * token, and every agent request would fail. process.env-first matches the
- * convention already used by the Slack channel and container-runner
- * (`process.env.X || env.X`), so self-hosted .env installs are unaffected.
- */
-function readSecrets(keys: string[]): Record<string, string> {
-  const fromEnvFile = readEnvFile(keys);
-  const result: Record<string, string> = {};
-  for (const key of keys) {
-    const v = process.env[key] ?? fromEnvFile[key];
-    if (v) result[key] = v;
-  }
-  return result;
-}
-
 export function startCredentialProxy(
   port: number,
   host = '127.0.0.1',
@@ -291,7 +283,13 @@ export function startCredentialProxy(
 
           // API key mode: inject x-api-key on every request
           delete headers['x-api-key'];
-          headers['x-api-key'] = secrets.ANTHROPIC_API_KEY;
+          Object.assign(
+            headers,
+            anthropicAuthHeaders({
+              mode: 'api-key',
+              token: secrets.ANTHROPIC_API_KEY,
+            }),
+          );
         } else {
           // OAuth mode: replace placeholder Bearer token with the real one
           // only when the container actually sends an Authorization header
@@ -304,10 +302,19 @@ export function startCredentialProxy(
           // post-exchange requests carry a temp key issued by Anthropic
           // (not our placeholder), so there's no placeholder value left to
           // decode a runTag or auth token from at proxy time.
+          //
+          // Only the `authorization` header is taken from the shared helper:
+          // this is a RELAY, so the client's own `anthropic-beta` list must
+          // survive untouched (the Claude CLI sends its own betas, including
+          // the OAuth one). Direct callers use anthropicMessagesHeaders()
+          // instead, which does add the beta.
           if (headers['authorization']) {
             delete headers['authorization'];
             if (oauthToken) {
-              headers['authorization'] = `Bearer ${oauthToken}`;
+              headers['authorization'] = anthropicAuthHeaders({
+                mode: 'oauth',
+                token: oauthToken,
+              }).authorization;
             }
           }
         }
@@ -429,11 +436,11 @@ export function startCredentialProxy(
   });
 }
 
-/** Detect which auth mode the host is configured for. */
+/**
+ * Detect which auth mode the host is configured for.
+ * Re-exported from the shared module so the proxy, container-runner, and the
+ * host-process Anthropic callers (e.g. translate-service) can never disagree.
+ */
 export function detectAuthMode(): AuthMode {
-  // process.env-first (with .env fallback) so hosted Kubernetes tenants, whose
-  // ANTHROPIC_API_KEY arrives as a pod env var and not in a .env file, are
-  // detected as api-key mode. Must match startCredentialProxy's readSecrets.
-  const secrets = readSecrets(['ANTHROPIC_API_KEY']);
-  return secrets.ANTHROPIC_API_KEY ? 'api-key' : 'oauth';
+  return detectAnthropicAuthMode();
 }

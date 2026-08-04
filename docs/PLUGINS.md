@@ -293,6 +293,13 @@ A plugin can add pages to the KB dashboard. Put a module at
 `<profile>/plugins/<id>/kb-ui/index.mjs` (or the same path under the catalog
 dir); when `<id>` is enabled, kb-ui mounts it at `/<id>` behind its own auth.
 
+> **Self-host only today.** These pages only exist where kb-ui is actually
+> running. That's the self-host case. The hosted control plane does not yet
+> provision a dashboard container (the orchestrator image ships `/app/kb-ui`,
+> so it can, but nothing routes to it) — so a plugin whose only surface is a
+> dashboard slice has no surface at all on a hosted tenant. Give a plugin a
+> chat surface too if hosted tenants need to reach it.
+
 ```js
 export function createRoutes(deps) {   // -> an express.Router
   const router = express.Router();

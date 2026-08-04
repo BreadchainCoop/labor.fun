@@ -17,7 +17,7 @@ people, and runtime state. Nothing about a specific org is baked into the code.
 labor.fun/                  ← the framework (org-agnostic, reusable)
 ├── src/                    Orchestrator: message loop, channels, DB, IPC, scheduler
 ├── container/              Agent container image + runtime skills
-├── kb-ui/                  Admin dashboard
+├── kb-ui/                  Admin dashboard (self-host; see "Self-host vs hosted")
 ├── rules/                  Core operating rules the agent follows
 ├── setup/                  Install wizard steps
 └── profiles/              ← org instances (only `example` is tracked)
@@ -62,6 +62,19 @@ Five consistent extension points — all self-register the same way (see
 | **Infra / deploy** | per-org `deploy.config` | `<profile>/deploy.config` |
 | **Setup step** | add to the `STEPS` registry | `setup/` |
 | **Rules / KB** | markdown | `rules/` (core) + `<profile>/groups/` (org) |
+
+## Self-host vs hosted
+
+The framework runs in two deployment shapes, and they do not have the same
+surfaces today. Stated plainly so nobody plans around a feature that isn't
+reachable:
+
+| Surface | Self-host (your own box / Docker) | Hosted (control-plane provisioned) |
+|---|---|---|
+| Chat channels, agent runs, KB, scheduled tasks | Available | Available |
+| **KB dashboard (`kb-ui/`)** | Available — run `node kb-ui/server.mjs` (`KB_PORT`, default 8080) | **Not exposed.** The orchestrator image now ships `/app/kb-ui`, so a deployment *can* run it as a second container from the same image, but the hosted control plane does not yet provision or route to one. |
+| **Plugin dashboard slices** ([docs/PLUGINS.md §2c](docs/PLUGINS.md)) | Available (mounted by kb-ui) | Unreachable until the dashboard above is provisioned — plugin *chat* surfaces are unaffected. |
+| Anthropic credential | API key or Claude Code OAuth token | OAuth token only (`CLAUDE_CODE_OAUTH_TOKEN`); `ANTHROPIC_API_KEY` is deliberately unset |
 
 ## Architecture
 

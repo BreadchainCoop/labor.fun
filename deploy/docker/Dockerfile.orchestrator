@@ -30,6 +30,9 @@
 #                                    bakes these, but the orchestrator reads cwd)
 #     - rules/ setup/ docs/          agent guidance mounted read-only into the
 #                                    main group's agent pods (cwd project-root mount)
+#     - kb-ui/                       KB dashboard, run as a SECOND container
+#                                    from this image (not by the ENTRYPOINT) —
+#                                    see the COPY below for the contract
 #     - package.json                 version/engines metadata
 #   MOUNTED from the tenant (NOT in the image):
 #     - profiles/<org>/              PVC or hostPath; LABOR_PROFILE selects it.
@@ -113,6 +116,24 @@ COPY container/agent-runner ./container/agent-runner
 # next to dist/. See container/catalog-plugins/README.md and src/plugin-loader.ts.
 COPY container/catalog-plugins ./catalog-plugins
 COPY scripts ./scripts
+# KB dashboard. Not started by this image's ENTRYPOINT — the contract is that
+# the deployment runs a SECOND container from this SAME image with
+#   command: ["node", "kb-ui/server.mjs"]
+# so orchestrator and dashboard stay version-locked. That sidecar needs:
+#   - port:   KB_PORT (default 8080; see the PORT const in kb-ui/server.mjs)
+#   - mounts: the same profile PVC/hostPath as the orchestrator, at the same
+#             path — kb-ui resolves profiles/<LABOR_PROFILE>/ off process.cwd()
+#             (== /app) exactly like src/profile.ts does
+#   - env:    LABOR_PROFILE, and DB_PATH / CONTEXT_DIR when the orchestrator
+#             sets them (kb-ui defaults to <profile>/store/messages.db and
+#             <profile>/groups/<sharedKbGroup>/context), plus the Basic-Auth
+#             vars kb-ui/server.mjs reads for its user table.
+# Runtime deps (express, express-basic-auth, gray-matter, marked,
+# sanitize-html, better-sqlite3) are all production dependencies of the root
+# package.json, so `npm ci --omit=dev` above already installed them — including
+# the native better-sqlite3 binary built for this runtime stage, which the
+# orchestrator needs anyway. kb-ui has no package.json and no install step.
+COPY kb-ui ./kb-ui
 COPY rules ./rules
 COPY setup ./setup
 COPY docs ./docs
