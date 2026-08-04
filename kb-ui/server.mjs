@@ -1,7 +1,10 @@
 import express from 'express';
 import basicAuth from 'express-basic-auth';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { AsyncLocalStorage } from 'async_hooks';
+import { pathToFileURL } from 'node:url';
 import matter from 'gray-matter';
 import { marked } from 'marked';
 import sanitizeHtml from 'sanitize-html';
@@ -25,6 +28,76 @@ const require = createRequire(import.meta.url);
 const app = express();
 app.use(express.json());
 const PORT = process.env.KB_PORT || 8080;
+
+// --- Base path (mounting kb-ui under a reverse-proxy prefix) ---
+//
+// Self-hosted, kb-ui owns the root of its origin and every URL it emits is
+// root-relative ("/doc/tasks/X.md"). The hosted control plane instead serves
+// each tenant's dashboard under a per-org prefix
+// (https://cloud.lab0r.fun/dashboard/orgs/<orgId>/kb/...), strips that prefix
+// before forwarding, and tells kb-ui about it out-of-band via KB_BASE_PATH
+// (mirroring the X-Forwarded-Prefix header it sends). Every generated URL —
+// links, breadcrumbs, plugin nav cards, and the fetch() calls in the inline
+// client scripts — goes through url() so it carries the prefix.
+//
+// KB_BASE_PATH unset/empty (the self-host default) makes url() the identity
+// function, so the rendered bytes are exactly what they were before the proxy
+// existed.
+//
+// The prefix arrives ONLY in the env, never from X-Forwarded-Prefix: a header
+// is attacker-suppliable on any request that hasn't cleared the shared-secret
+// check below, and a prefix decides where every link on the page points. The
+// control plane therefore stamps KB_BASE_PATH into the tenant Secret from the
+// same helper it mounts the proxy with (labor-cloud src/kb/prefix.ts); the
+// header it also sends is an echo, and nothing here reads it.
+export function normalizeBasePath(raw, logger = console) {
+  const s = String(raw ?? '').trim();
+  if (s === '' || s === '/') return '';
+  const withLead = s.startsWith('/') ? s : '/' + s;
+  const trimmed = withLead.replace(/\/+$/, '');
+  const reject = () => {
+    logger.warn(
+      `[kb-ui] KB_BASE_PATH=${JSON.stringify(raw)} is not a safe path prefix — ignoring it (serving at the root)`,
+    );
+    return '';
+  };
+  // url() interpolates the prefix into HTML attributes and single-quoted
+  // JS string literals, so refuse anything that could break out of either.
+  if (!/^(\/[A-Za-z0-9._~%-]+)+$/.test(trimmed)) return reject();
+  // The character class above admits dots, so `/a/..` would pass it and every
+  // URL we emit would then be `/a/../x` — which the browser resolves to `/x`,
+  // OUTSIDE the prefix. Reject dot segments in the WHATWG URL sense, i.e.
+  // including their percent-encoded spellings (`%2e`, `.%2E`, `%2e%2e`, ...),
+  // since the browser treats those as dot segments too.
+  for (const seg of trimmed.slice(1).split('/')) {
+    const decoded = seg.replace(/%2e/gi, '.');
+    if (decoded === '.' || decoded === '..') return reject();
+  }
+  return trimmed;
+}
+const BASE_PATH = normalizeBasePath(process.env.KB_BASE_PATH);
+/** Prefix a root-relative app path with KB_BASE_PATH. `p` must start with '/'. */
+const url = (p) => BASE_PATH + p;
+/**
+ * Same, for a plugin-supplied href: root-relative ones get the prefix,
+ * absolute and protocol-relative ones are left exactly as the plugin wrote
+ * them (they point off-app).
+ */
+const pluginHref = (href) =>
+  typeof href === 'string' && href.startsWith('/') && !href.startsWith('//')
+    ? url(href)
+    : href;
+
+// Tolerate a proxy that forwards the prefix instead of stripping it: routes are
+// always registered at the un-prefixed path. No-op when KB_BASE_PATH is unset.
+if (BASE_PATH) {
+  app.use((req, _res, next) => {
+    if (req.url === BASE_PATH) req.url = '/';
+    else if (req.url.startsWith(BASE_PATH + '/')) req.url = req.url.slice(BASE_PATH.length);
+    else if (req.url.startsWith(BASE_PATH + '?')) req.url = '/' + req.url.slice(BASE_PATH.length);
+    next();
+  });
+}
 
 // Resolve the active profile (mirrors src/profile.ts) so local-dev defaults
 // point at profiles/<name>/. In production CONTEXT_DIR / DB_PATH are set
@@ -109,7 +182,7 @@ function loadUsers() {
   }
 }
 
-app.use(basicAuth({
+const basicAuthMiddleware = basicAuth({
   authorizer: (username, password) => {
     const users = loadUsers();
     return users[username] && basicAuth.safeCompare(password, users[username]);
@@ -117,22 +190,148 @@ app.use(basicAuth({
   authorizeAsync: false,
   challenge: true,
   realm: 'Breadbrich Engels Knowledge Base',
-}));
+});
+
+// --- Authenticating reverse proxy (hosted control plane) ---
+//
+// The control plane authenticates the human (its own session + org
+// membership) and then forwards to this app, asserting the identity with
+// headers. Those headers are worth exactly nothing on their own — they are
+// trusted ONLY when the request also carries the per-tenant shared secret in
+// X-KB-Proxy-Secret. There is no separate "trust proxy" flag: the secret IS
+// the trust decision.
+//
+//   X-KB-Proxy-Secret  must equal KB_PROXY_SECRET (constant-time compare)
+//   X-KB-User          email / stable user id -> req.auth.user
+//   X-KB-Roles         comma-separated kb-ui roles (see KB_ROLE_NAMES)
+//   X-Forwarded-Host / -Proto / -Prefix   used for origin checks + logging
+//
+// KB_PROXY_SECRET unset (self-host default) = the feature is off; every
+// request goes through Basic Auth and X-KB-* headers are ignored entirely.
+// A request with X-KB-* headers but a wrong/absent secret is a plain
+// unauthenticated request — never partially trusted.
+const KB_PROXY_SECRET = process.env.KB_PROXY_SECRET || '';
+
+// The roles kb-ui understands. The control plane maps ITS role names onto
+// these; today CP only has `owner`, which it maps to `admin`. Anything not on
+// this list is dropped, so a new CP role that nobody has mapped yet grants
+// NOTHING (default deny) instead of silently inheriting admin.
+const KB_ROLE_NAMES = new Set(['admin', 'superadmin', 'coordinator', 'resident']);
+
+// Per-request identity for proxied requests. Role predicates take a username
+// (they are also asked about *other* people on the admin page), so the roles
+// the proxy asserted for THIS request live in async-local storage and only
+// apply to that request's own user.
+const proxiedIdentity = new AsyncLocalStorage();
+
+/**
+ * Constant-time comparison against KB_PROXY_SECRET. Both sides are hashed to a
+ * fixed 32 bytes first so timingSafeEqual never throws on a length mismatch
+ * (and the comparison leaks neither content nor length).
+ */
+export function proxySecretMatches(provided, expected = KB_PROXY_SECRET) {
+  if (!expected) return false;
+  if (typeof provided !== 'string' || provided === '') return false;
+  const a = crypto.createHash('sha256').update(provided, 'utf8').digest();
+  const b = crypto.createHash('sha256').update(expected, 'utf8').digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+/** The asserted identity of a correctly-authenticated proxy request, else null. */
+function proxyIdentityFrom(req) {
+  const secret = req.headers['x-kb-proxy-secret'];
+  if (!proxySecretMatches(Array.isArray(secret) ? secret[0] : secret)) return null;
+  const rawUser = req.headers['x-kb-user'];
+  const user = (typeof rawUser === 'string' ? rawUser : '').trim();
+  if (!user) return null; // authenticated proxy, but no subject — not a login
+  const rawRoles = req.headers['x-kb-roles'];
+  const roles = new Set(
+    splitCsv(typeof rawRoles === 'string' ? rawRoles : '').filter((r) =>
+      KB_ROLE_NAMES.has(r),
+    ),
+  );
+  return { user, roles };
+}
+
+app.use((req, res, next) => {
+  const proxied = proxyIdentityFrom(req);
+  if (!proxied) return basicAuthMiddleware(req, res, next);
+  req.auth = { user: proxied.user };
+  req.kbProxied = true;
+  proxiedIdentity.run({ username: proxied.user, roles: proxied.roles }, next);
+});
+
+/**
+ * Roles the proxy asserted for `username` on the in-flight request, or null
+ * when this isn't a proxied request about its own user (-> env-var roles).
+ * An empty Set is a real answer: the proxy said "this user has no roles".
+ */
+function assertedRoles(username) {
+  const ctx = proxiedIdentity.getStore();
+  if (!ctx) return null;
+  if (String(username ?? '').toLowerCase() !== ctx.username.toLowerCase()) return null;
+  return ctx.roles;
+}
+
+function hasRole(username, role, envList) {
+  const asserted = assertedRoles(username);
+  if (asserted) return asserted.has(role);
+  return envList.includes(String(username ?? '').toLowerCase());
+}
 
 function isAdmin(username) {
-  return ADMINS.includes(username.toLowerCase());
+  return hasRole(username, 'admin', ADMINS);
 }
 
 function isSuperAdmin(username) {
-  return SUPERADMINS.includes(username.toLowerCase());
+  return hasRole(username, 'superadmin', SUPERADMINS);
 }
 
 function isCoordinator(username) {
-  return COORDINATORS.includes(username.toLowerCase());
+  return hasRole(username, 'coordinator', COORDINATORS);
 }
 
 function isResident(username) {
-  return RESIDENTS.includes(username.toLowerCase());
+  return hasRole(username, 'resident', RESIDENTS);
+}
+
+// --- Same-origin enforcement ---
+//
+// Behind the control plane the browser's Origin is the CP's host, not this
+// app's. Trust X-Forwarded-Host for the comparison ONLY on a request whose
+// proxy secret matched; otherwise the real Host header decides. The check
+// itself stays strict: exact host match, and an opaque ("null") or
+// unparseable Origin is rejected.
+function requestHost(req) {
+  if (req.kbProxied) {
+    const fwd = req.headers['x-forwarded-host'];
+    const first = (typeof fwd === 'string' ? fwd : '').split(',')[0].trim();
+    if (first) return first.toLowerCase();
+  }
+  return String(req.headers.host || '').toLowerCase();
+}
+
+function hostOfUrl(value) {
+  try {
+    return new URL(value).host.toLowerCase();
+  } catch {
+    return null; // "null", relative, or garbage — never same-origin
+  }
+}
+
+/**
+ * Is this mutation same-origin? Origin wins when present, else Referer; a
+ * request with neither (curl, some same-origin form posts) is allowed, as
+ * before. Exposed to plugin dashboard slices via PLUGIN_DEPS.
+ */
+function isSameOrigin(req) {
+  const host = requestHost(req);
+  if (!host) return false;
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && origin !== '') return hostOfUrl(origin) === host;
+  const referer = req.headers.referer;
+  if (typeof referer === 'string' && referer !== '') return hostOfUrl(referer) === host;
+  return true;
 }
 
 // --- File reading ---
@@ -332,8 +531,8 @@ function layout(title, body, username) {
 </head>
 <body>
   <div class="topbar">
-    <h1><a href="/" style="color:#fff">Breadbrich Engels</a></h1>
-    <div class="user">${username} ${isSuperAdmin(username) ? '<span class="role">admin</span> <span class="role" style="color:#7e7eda">super</span>' : isCoordinator(username) ? '<span class="role" style="color:#e0a050">coordinator</span>' : isAdmin(username) ? '<span class="role">admin</span>' : isResident(username) ? '<span class="role" style="color:#34d399">resident</span>' : ''}</div>
+    <h1><a href="${url('/')}" style="color:#fff">Breadbrich Engels</a></h1>
+    <div class="user">${esc(username)} ${isSuperAdmin(username) ? '<span class="role">admin</span> <span class="role" style="color:#7e7eda">super</span>' : isCoordinator(username) ? '<span class="role" style="color:#e0a050">coordinator</span>' : isAdmin(username) ? '<span class="role">admin</span>' : isResident(username) ? '<span class="role" style="color:#34d399">resident</span>' : ''}</div>
   </div>
   <div class="container">${body}</div>
 </body>
@@ -364,6 +563,13 @@ const PLUGIN_DEPS = {
   isCoordinator,
   isResident,
   usernameFromReq: (req) => req.auth.user,
+  // Reverse-proxy support (see the KB_BASE_PATH / KB_PROXY_SECRET blocks
+  // above). A slice MUST build its links with url() and gate its mutations
+  // with isSameOrigin(req) — hand-rolling a `req.headers.host` comparison
+  // breaks the moment the dashboard is served under the control plane.
+  BASE_PATH,
+  url,
+  isSameOrigin,
   Database, // better-sqlite3 constructor (may be null when unavailable)
   DB_PATH: process.env.DB_PATH || DEFAULT_DB_PATH,
   PROFILE_DIR,
@@ -409,12 +615,14 @@ app.get('/', (req, res) => {
 
   // --- Dashboards section ---
   let dashboardCards = '';
-  dashboardCards += `<a href="/projects" class="nav-card" style="border-color:#1a2a1a"><div class="icon">\u{1F4CA}</div><div class="label">Projects</div><div class="count">Project tracker</div></a>`;
+  dashboardCards += `<a href="${url('/projects')}" class="nav-card" style="border-color:#1a2a1a"><div class="icon">\u{1F4CA}</div><div class="label">Projects</div><div class="count">Project tracker</div></a>`;
 
   // Plugin-contributed nav cards (kb-ui/plugin-mount.mjs), role-filtered.
+  // A card's href is app-relative (the router is mounted at /<plugin id>), so
+  // it needs the same KB_BASE_PATH prefix every other link gets.
   for (const card of pluginNavCards) {
     if (!navCardVisible(card, username, { isAdmin, isSuperAdmin, isCoordinator, isResident })) continue;
-    dashboardCards += `<a href="${esc(card.href)}" class="nav-card" style="border-color:#1a2a2a">${card.icon ? `<div class="icon">${esc(card.icon)}</div>` : ''}<div class="label">${esc(card.title)}</div>${card.desc ? `<div class="count">${esc(card.desc)}</div>` : ''}</a>`;
+    dashboardCards += `<a href="${esc(pluginHref(card.href))}" class="nav-card" style="border-color:#1a2a2a">${card.icon ? `<div class="icon">${esc(card.icon)}</div>` : ''}<div class="label">${esc(card.title)}</div>${card.desc ? `<div class="count">${esc(card.desc)}</div>` : ''}</a>`;
   }
 
   // --- Raw Data section ---
@@ -422,19 +630,19 @@ app.get('/', (req, res) => {
   for (const cat of categories) {
     const icon = CATEGORY_ICONS[cat] || '\u{1F4C4}';
     const label = CATEGORY_LABELS[cat] || (cat.charAt(0).toUpperCase() + cat.slice(1));
-    rawDataCards += `<a href="/category/${cat}" class="nav-card"><div class="icon">${icon}</div><div class="label">${label}</div><div class="count">${catCounts[cat]} item${catCounts[cat] !== 1 ? 's' : ''}</div></a>`;
+    rawDataCards += `<a href="${url('/category/')}${cat}" class="nav-card"><div class="icon">${icon}</div><div class="label">${label}</div><div class="count">${catCounts[cat]} item${catCounts[cat] !== 1 ? 's' : ''}</div></a>`;
   }
 
-  rawDataCards += `<a href="/linkages" class="nav-card" style="border-color:#1a2a2a"><div class="icon">🔗</div><div class="label">Linkages</div><div class="count">Tasks ↔ Events</div></a>`;
+  rawDataCards += `<a href="${url('/linkages')}" class="nav-card" style="border-color:#1a2a2a"><div class="icon">🔗</div><div class="label">Linkages</div><div class="count">Tasks ↔ Events</div></a>`;
   // --- Admin section ---
   let adminCards = '';
   if (isAdmin(username)) {
-    adminCards += `<a href="/logs" class="nav-card" style="border-color:#2a2a1a"><div class="icon">\u{1F4CB}</div><div class="label">Request Logs</div><div class="count">All Breadbrich Engels requests</div></a>`;
-    adminCards += `<a href="/analytics" class="nav-card" style="border-color:#2a1a2a"><div class="icon">\u{1F4C8}</div><div class="label">Analytics</div><div class="count">Usage & knowledge gaps</div></a>`;
-    adminCards += `<a href="/architecture" class="nav-card" style="border-color:#1a1a2a"><div class="icon">\u{1F3D7}\u{FE0F}</div><div class="label">Architecture</div><div class="count">System diagram</div></a>`;
+    adminCards += `<a href="${url('/logs')}" class="nav-card" style="border-color:#2a2a1a"><div class="icon">\u{1F4CB}</div><div class="label">Request Logs</div><div class="count">All Breadbrich Engels requests</div></a>`;
+    adminCards += `<a href="${url('/analytics')}" class="nav-card" style="border-color:#2a1a2a"><div class="icon">\u{1F4C8}</div><div class="label">Analytics</div><div class="count">Usage & knowledge gaps</div></a>`;
+    adminCards += `<a href="${url('/architecture')}" class="nav-card" style="border-color:#1a1a2a"><div class="icon">\u{1F3D7}\u{FE0F}</div><div class="label">Architecture</div><div class="count">System diagram</div></a>`;
   }
   if (isSuperAdmin(username)) {
-    adminCards += `<a href="/admin" class="nav-card" style="border-color:#333"><div class="icon">\u{1F512}</div><div class="label">Admin</div><div class="count">Permissions & access</div></a>`;
+    adminCards += `<a href="${url('/admin')}" class="nav-card" style="border-color:#333"><div class="icon">\u{1F512}</div><div class="label">Admin</div><div class="count">Permissions & access</div></a>`;
   }
 
   // Read index.md for summary
@@ -501,7 +709,7 @@ app.get('/category/:name', (req, res) => {
           const sColor = statusColors[t.status] || '#888';
           const owners = esc((t.owners || []).join(', '));
           const dates = esc([t.start_date, t.end_date].filter(Boolean).join(' \u2192 '));
-          cards += `<a href="/doc/tasks/${encodeURIComponent(t.file)}" style="text-decoration:none;display:block;background:#131313;border:1px solid #222;border-left:3px solid ${sColor};border-radius:6px;padding:10px 14px;margin-bottom:6px;transition:border-color 0.15s">
+          cards += `<a href="${url('/doc/tasks/')}${encodeURIComponent(t.file)}" style="text-decoration:none;display:block;background:#131313;border:1px solid #222;border-left:3px solid ${sColor};border-radius:6px;padding:10px 14px;margin-bottom:6px;transition:border-color 0.15s">
             <div style="display:flex;justify-content:space-between;align-items:center">
               <span style="font-size:11px;color:#555;font-weight:600">${esc(t.id)}</span>
               <span style="font-size:10px;color:${sColor};text-transform:uppercase;font-weight:600">${esc((t.status || 'open').replace('_', ' '))}</span>
@@ -562,11 +770,11 @@ app.get('/category/:name', (req, res) => {
     const statusLabels = { open: 'Open', in_progress: 'In Progress', blocked: 'Blocked', backlog: 'Backlog', closed: 'Closed', done: 'Done', cancelled: 'Cancelled' };
 
     const body = `
-      <div class="breadcrumb"><a href="/">Home</a> / ${icon} Tasks</div>
+      <div class="breadcrumb"><a href="${url('/')}">Home</a> / ${icon} Tasks</div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h2 class="section-header" style="margin:0">Tasks</h2>
         <div style="display:flex;gap:8px;align-items:center">
-          <a href="/projects" style="font-size:13px;color:#7eb8da;padding:6px 14px;border:1px solid #333;border-radius:6px;text-decoration:none">Projects</a>
+          <a href="${url('/projects')}" style="font-size:13px;color:#7eb8da;padding:6px 14px;border:1px solid #333;border-radius:6px;text-decoration:none">Projects</a>
         </div>
       </div>
 
@@ -701,8 +909,8 @@ app.get('/category/:name', (req, res) => {
             var sColor = _statusColors[t.status] || '#888';
             var pColor = _priorityColors[t.priority] || '#888';
             html += '<tr style="border-bottom:1px solid #1a1a1a">'
-              + '<td style="padding:8px 10px;font-size:11px;color:#555;font-weight:600;white-space:nowrap"><a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="color:#555;text-decoration:none">' + esc(t.id) + '</a></td>'
-              + '<td style="padding:8px 10px"><a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="color:#ddd;text-decoration:none;font-size:13px">' + esc(t.title) + '</a></td>'
+              + '<td style="padding:8px 10px;font-size:11px;color:#555;font-weight:600;white-space:nowrap"><a href="${url('/doc/tasks/')}' + encodeURIComponent(t.file) + '" style="color:#555;text-decoration:none">' + esc(t.id) + '</a></td>'
+              + '<td style="padding:8px 10px"><a href="${url('/doc/tasks/')}' + encodeURIComponent(t.file) + '" style="color:#ddd;text-decoration:none;font-size:13px">' + esc(t.title) + '</a></td>'
               + '<td style="padding:8px 10px;font-size:11px;text-transform:uppercase;font-weight:600;color:' + sColor + '">' + esc(t.status.replace(/_/g, ' ')) + '</td>'
               + '<td style="padding:8px 10px;font-size:11px;color:' + pColor + '">' + esc(t.priority) + '</td>'
               + '<td style="padding:8px 10px;font-size:12px;color:#888">' + esc(t.owner) + '</td>'
@@ -1031,7 +1239,7 @@ app.get('/category/:name', (req, res) => {
     const artifactsJson = JSON.stringify(artifacts).replace(/</g, '\\u003c');
 
     const body = `
-      <div class="breadcrumb"><a href="/">Home</a> / ${icon} Artifacts</div>
+      <div class="breadcrumb"><a href="${url('/')}">Home</a> / ${icon} Artifacts</div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px">
         <h2 class="section-header" style="margin:0">Artifacts</h2>
         <div id="artifact-count" style="font-size:13px;color:#666"></div>
@@ -1135,7 +1343,7 @@ app.get('/category/:name', (req, res) => {
             a.visibility === 'restricted' ? '<span class="badge restricted">Restricted</span>' :
             a.visibility === 'private' ? '<span class="badge private">Private</span>' :
             '<span class="badge open">Open</span>';
-          return '<a class="artifact-card" href="/doc/artifacts/' + encodeURIComponent(a.file) + '">' +
+          return '<a class="artifact-card" href="${url('/doc/artifacts/')}' + encodeURIComponent(a.file) + '">' +
             '<div class="artifact-card-head">' +
               '<span class="artifact-title">' + escHtml(a.title) + '</span>' +
               badge +
@@ -1263,7 +1471,7 @@ app.get('/category/:name', (req, res) => {
     const badge = VISIBILITY_BADGES[vis] || '';
     const created = fm.created_at || '';
 
-    items += `<li><a href="/doc/${cat}/${encodeURIComponent(f.name)}"><div><span class="doc-title">${title}</span> ${tags}</div><div class="doc-meta">${created ? `<span>${created}</span>` : ''}${badge}</div></a></li>`;
+    items += `<li><a href="${url('/doc/')}${cat}/${encodeURIComponent(f.name)}"><div><span class="doc-title">${title}</span> ${tags}</div><div class="doc-meta">${created ? `<span>${created}</span>` : ''}${badge}</div></a></li>`;
   }
 
   if (!items) {
@@ -1271,7 +1479,7 @@ app.get('/category/:name', (req, res) => {
   }
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / ${icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / ${icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}</div>
     <ul class="doc-list">${items}</ul>`;
 
   res.send(layout(cat.charAt(0).toUpperCase() + cat.slice(1), body, username));
@@ -1318,7 +1526,7 @@ app.get('/doc/:category/:file', (req, res) => {
   const html = renderMarkdown(visibleContent);
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / <a href="/category/${cat}">${icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}</a> / ${title}</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / <a href="${url('/category/')}${cat}">${icon} ${cat.charAt(0).toUpperCase() + cat.slice(1)}</a> / ${title}</div>
     ${fmBar}
     <div class="doc-content">${html}</div>`;
 
@@ -1328,13 +1536,7 @@ app.get('/doc/:category/:file', (req, res) => {
 // --- Task PATCH API (drag-and-drop status/priority updates) ---
 
 app.patch('/api/tasks/:file', (req, res) => {
-  const origin = req.headers.origin || '';
-  const referer = req.headers.referer || '';
-  const host = req.headers.host || '';
-  if (origin && !origin.includes(host)) {
-    return res.status(403).json({ error: 'Cross-origin request blocked' });
-  }
-  if (!origin && referer && !referer.includes(host)) {
+  if (!isSameOrigin(req)) {
     return res.status(403).json({ error: 'Cross-origin request blocked' });
   }
 
@@ -1517,7 +1719,7 @@ app.get('/linkages', (req, res) => {
       <g opacity="${opacity}">
         <rect x="${n.x - 140}" y="${n.y - 22}" width="280" height="44" rx="6" fill="#161616" stroke="${border}" stroke-width="1.5"/>
         <circle cx="${n.x - 125}" cy="${n.y}" r="5" fill="${color}"/>
-        <a href="/doc/tasks/${encodeURIComponent(n.file)}">
+        <a href="${url('/doc/tasks/')}${encodeURIComponent(n.file)}">
           <text x="${n.x - 112}" y="${n.y + 1}" fill="#ddd" font-size="13" font-weight="500" dominant-baseline="middle">${n.id}</text>
           <text x="${n.x - 70}" y="${n.y + 1}" fill="#aaa" font-size="12" dominant-baseline="middle">${n.title.length > 25 ? n.title.slice(0, 25) + '...' : n.title}</text>
         </a>
@@ -1533,7 +1735,7 @@ app.get('/linkages', (req, res) => {
       <g opacity="${opacity}">
         <rect x="${n.x - 140}" y="${n.y - 22}" width="280" height="44" rx="6" fill="#161616" stroke="#2a4a2a" stroke-width="1.5"/>
         <circle cx="${n.x - 125}" cy="${n.y}" r="5" fill="${color}"/>
-        <a href="/doc/calendar/${encodeURIComponent(n.file)}">
+        <a href="${url('/doc/calendar/')}${encodeURIComponent(n.file)}">
           <text x="${n.x - 112}" y="${n.y + 1}" fill="#ddd" font-size="13" font-weight="500" dominant-baseline="middle">${n.id || 'EVT'}</text>
           <text x="${n.x - 70}" y="${n.y + 1}" fill="#aaa" font-size="12" dominant-baseline="middle">${n.title.length > 25 ? n.title.slice(0, 25) + '...' : n.title}</text>
         </a>
@@ -1574,9 +1776,9 @@ app.get('/linkages', (req, res) => {
   } else {
     for (const l of links) {
       linkRows += `<tr>
-        <td><a href="/doc/tasks/${encodeURIComponent(l.taskFile)}" style="color:#7eb8da">${l.taskId}</a></td>
+        <td><a href="${url('/doc/tasks/')}${encodeURIComponent(l.taskFile)}" style="color:#7eb8da">${l.taskId}</a></td>
         <td style="color:#ddd">${l.taskTitle}</td>
-        <td><a href="/doc/calendar/${encodeURIComponent(l.eventFile)}" style="color:#7eb8da">${l.eventId}</a></td>
+        <td><a href="${url('/doc/calendar/')}${encodeURIComponent(l.eventFile)}" style="color:#7eb8da">${l.eventId}</a></td>
         <td style="color:#ddd">${l.eventTitle}</td>
       </tr>`;
     }
@@ -1590,10 +1792,10 @@ app.get('/linkages', (req, res) => {
   if (unlinkedTasks.length > 0 || unlinkedEvents.length > 0) {
     let items = '';
     for (const t of unlinkedTasks) {
-      items += `<li><a href="/doc/tasks/${encodeURIComponent(t.file)}">${t.id}: ${t.title}</a> <span style="color:#555">(no linked events)</span></li>`;
+      items += `<li><a href="${url('/doc/tasks/')}${encodeURIComponent(t.file)}">${t.id}: ${t.title}</a> <span style="color:#555">(no linked events)</span></li>`;
     }
     for (const e of unlinkedEvents) {
-      items += `<li><a href="/doc/calendar/${encodeURIComponent(e.file)}">${e.id || 'EVT'}: ${e.title}</a> <span style="color:#555">(no linked tasks)</span></li>`;
+      items += `<li><a href="${url('/doc/calendar/')}${encodeURIComponent(e.file)}">${e.id || 'EVT'}: ${e.title}</a> <span style="color:#555">(no linked tasks)</span></li>`;
     }
     unlinkedHtml = `
       <h2 class="section-header" style="margin-top:24px">\u{26A0}\u{FE0F} Unlinked Items</h2>
@@ -1611,7 +1813,7 @@ app.get('/linkages', (req, res) => {
       const up = (t.upstream || []).join(', ') || '\u2014';
       const down = (t.downstream || []).join(', ') || '\u2014';
       depRows += `<tr>
-        <td><a href="/doc/tasks/${encodeURIComponent(t.file)}" style="color:#7eb8da">${t.id}</a></td>
+        <td><a href="${url('/doc/tasks/')}${encodeURIComponent(t.file)}" style="color:#7eb8da">${t.id}</a></td>
         <td style="color:#ddd">${t.title}</td>
         <td style="color:#999">${up}</td>
         <td style="color:#999">${down}</td>
@@ -1622,7 +1824,7 @@ app.get('/linkages', (req, res) => {
   }
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / \u{1F517} Linkages</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F517} Linkages</div>
 
     <h2 class="section-header">\u{1F5FA}\u{FE0F} Task \u2194 Event Graph</h2>
     <div class="doc-content" style="margin-bottom:24px;padding:16px;overflow-x:auto">
@@ -1734,7 +1936,7 @@ app.get('/logs', (req, res) => {
   }
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / \u{1F4CB} Request Logs</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F4CB} Request Logs</div>
     ${dbStats}
     <h2 class="section-header">\u{1F4DD} Breadbrich Engels Request Log</h2>
     <div class="doc-content" style="padding:16px">${logContent}</div>`;
@@ -1859,7 +2061,7 @@ app.get('/analytics', (req, res) => {
         <td style="color:#ddd">${q}</td>
         <td style="color:#f0ad4e;text-align:center">${u.count}</td>
         <td style="color:#777;font-size:12px">${when}</td>
-        <td><a href="/category/artifacts" title="Add a KB doc that answers this">+ Add to KB</a></td>
+        <td><a href="${url('/category/artifacts')}" title="Add a KB doc that answers this">+ Add to KB</a></td>
       </tr>`;
     }).join('') || `<tr><td colspan="4" style="color:#555">No knowledge gaps recorded \u{1F389}</td></tr>`;
 
@@ -1869,7 +2071,7 @@ app.get('/analytics', (req, res) => {
       `<tr><td style="color:#ddd">${esc(u.name)}</td><td style="color:#999">${u.count}</td></tr>`).join('') || `<tr><td colspan="2" style="color:#555">No named users (privacy config may redact senders).</td></tr>`;
 
     body = `
-      <div class="breadcrumb"><a href="/">Home</a> / \u{1F4C8} Analytics</div>
+      <div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F4C8} Analytics</div>
 
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px">
         <div class="doc-content" style="padding:16px;text-align:center"><div style="font-size:32px;font-weight:700;color:#7eb8da">${resolutionPct}%</div><div style="color:#888;font-size:12px">Resolution rate</div></div>
@@ -1904,7 +2106,7 @@ app.get('/analytics', (req, res) => {
         </div>
       </div>`;
   } catch (e) {
-    body = `<div class="breadcrumb"><a href="/">Home</a> / \u{1F4C8} Analytics</div>
+    body = `<div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F4C8} Analytics</div>
       <div class="doc-content" style="padding:16px"><p style="color:#666">Analytics unavailable: ${esc(e.message)}</p></div>`;
   }
 
@@ -1968,7 +2170,7 @@ app.get('/admin', (req, res) => {
     <tr><td colspan="2" style="color:#555;font-style:italic">Other tags cannot assign tags</td></tr>`;
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / \u{1F512} Admin Dashboard</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F512} Admin Dashboard</div>
 
     <h2 class="section-header">\u{1F465} Users & Credentials</h2>
     <div class="doc-content" style="margin-bottom:24px;padding:16px">
@@ -2072,7 +2274,7 @@ app.get('/architecture', (req, res) => {
   }
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / \u{1F3D7}\u{FE0F} Architecture</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F3D7}\u{FE0F} Architecture</div>
     <style>
       .arch-diagram { position: relative; width: 100%; overflow-x: auto; }
       .arch-svg { width: 100%; min-width: 900px; }
@@ -2788,7 +2990,7 @@ app.get('/projects', (req, res) => {
   }
 
   const body = `
-    <div class="breadcrumb"><a href="/">Home</a> / \u{1F4CA} Projects</div>
+    <div class="breadcrumb"><a href="${url('/')}">Home</a> / \u{1F4CA} Projects</div>
 
     <h2 class="section-header">\u{1F4CB} Projects</h2>
     <div class="nav" style="margin-bottom:24px">${projectCards}</div>
@@ -2967,7 +3169,7 @@ app.get('/projects', (req, res) => {
 
               // Persist to server — clean origin URL (no embedded credentials)
               var cleanOrigin = window.location.protocol + '//' + window.location.host;
-              fetch(cleanOrigin + '/api/tasks/' + encodeURIComponent(file), {
+              fetch(cleanOrigin + '${url('/api/tasks/')}' + encodeURIComponent(file), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(update)
@@ -3072,7 +3274,7 @@ app.get('/projects', (req, res) => {
           var h = '<div class="kanban-card"' + dragAttr + ' data-file="' + t.file + '" data-status="' + (t.status||'') + '" data-priority="' + (t.priority||'') + '">';
           var ghHeader = t.gh_url ? '<a href="' + t.gh_url + '" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open on GitHub" style="color:#7eb8da;text-decoration:none;margin-left:6px">↗</a>' : '';
           h += '<div style="display:flex;justify-content:space-between;align-items:center"><span><span class="task-id">' + t.id + '</span>' + ghHeader + '</span><span class="priority-dot" style="background:' + pc + '" title="' + t.priority + '"></span></div>';
-          h += '<a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="text-decoration:none" onclick="event.stopPropagation()"><div class="task-title">' + t.title + '</div></a>';
+          h += '<a href="${url('/doc/tasks/')}' + encodeURIComponent(t.file) + '" style="text-decoration:none" onclick="event.stopPropagation()"><div class="task-title">' + t.title + '</div></a>';
           h += '<div class="task-meta">';
           if (t.owner) h += '<span>' + t.owner + '</span>';
           if (projLabel) h += '<span style="color:#7eb8da">' + projLabel + '</span>';
@@ -3148,7 +3350,7 @@ app.get('/projects', (req, res) => {
           const pc = priorityColors[t.priority] || '#666';
           const projLabel = t.project ? (projects.find(p => p.id === t.project)?.title || t.project) : '';
           html += '<tr>';
-          html += '<td><a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="color:#7eb8da;font-weight:600">' + t.id + '</a></td>';
+          html += '<td><a href="${url('/doc/tasks/')}' + encodeURIComponent(t.file) + '" style="color:#7eb8da;font-weight:600">' + t.id + '</a></td>';
           var ghLink = t.gh_url ? ' <a href="' + t.gh_url + '" target="_blank" rel="noopener" title="Open on GitHub" style="color:#7eb8da;text-decoration:none">↗</a>' : '';
           html += '<td>' + t.title + ghLink + '</td>';
           html += '<td><span style="display:inline-flex;align-items:center;gap:6px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + sc + '"></span>' + t.status + '</span></td>';
@@ -3281,7 +3483,7 @@ app.get('/projects', (req, res) => {
           var truncTitle = title.length > 22 ? title.slice(0, 22) + '...' : title;
           taskLabelsHtml += '<div style="height:' + rowHeight + 'px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #1a1a1a">'
             + '<span style="width:8px;height:8px;border-radius:50%;background:' + pColor + ';flex-shrink:0"></span>'
-            + '<a href="/doc/tasks/' + encodeURIComponent(t.file) + '" style="color:#ddd;font-size:12px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + title + '">' + (t.id ? t.id + ' ' : '') + truncTitle + '</a>'
+            + '<a href="${url('/doc/tasks/')}' + encodeURIComponent(t.file) + '" style="color:#ddd;font-size:12px;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + title + '">' + (t.id ? t.id + ' ' : '') + truncTitle + '</a>'
             + '</div>';
 
           var barStart = t.start_date || t.created_at || today;
@@ -3296,7 +3498,7 @@ app.get('/projects', (req, res) => {
           var barOpacity = isDone ? '0.4' : '0.85';
 
           taskBars += '<line x1="0" y1="' + (y + rowHeight) + '" x2="' + chartWidth + '" y2="' + (y + rowHeight) + '" stroke="#1a1a1a" stroke-width="0.5"/>';
-          taskBars += '<a href="/doc/tasks/' + encodeURIComponent(t.file) + '">'
+          taskBars += '<a href="${url('/doc/tasks/')}' + encodeURIComponent(t.file) + '">'
             + '<rect x="' + barX + '" y="' + barY + '" width="' + barW + '" height="' + barH + '" rx="4" fill="' + pColor + '" opacity="' + barOpacity + '" style="cursor:pointer"/>'
             + '<text x="' + (barX + 6) + '" y="' + (barY + barH/2 + 1) + '" fill="#fff" font-size="10" font-weight="500" dominant-baseline="middle" style="pointer-events:none">' + (barW > 60 ? (t.id || '') : '') + '</text>'
             + '</a>';
@@ -3357,6 +3559,28 @@ app.get('/projects', (req, res) => {
   res.send(layout('Projects', body, username));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Knowledge Base UI running at http://0.0.0.0:${PORT}`);
-});
+// Listen only when this file is the process entrypoint (`node kb-ui/server.mjs`,
+// which is what the systemd unit and the hosted kb-ui sidecar run). Importing
+// the module — as the tests do — gives you a configured `app` and binds nothing.
+function isEntrypoint() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    // realpath because Node resolves import.meta.url through symlinks while
+    // argv[1] keeps whatever path the operator typed (a symlinked deploy root
+    // would otherwise stop the service from ever listening).
+    return pathToFileURL(fs.realpathSync(entry)).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(
+      `Knowledge Base UI running at http://0.0.0.0:${PORT}${BASE_PATH || ''}`,
+    );
+  });
+}
+
+export { app, url, isSameOrigin, BASE_PATH };
