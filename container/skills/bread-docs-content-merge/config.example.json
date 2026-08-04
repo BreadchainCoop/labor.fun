@@ -1,0 +1,17 @@
+{
+  "repo": "BreadchainCoop/bread-docs",
+  "mode": "watch",
+  "contentPaths": ["src/content/"],
+  "contentExtensions": [".md", ".mdx"],
+  "requiredChecks": [
+    "netlify/bread-docs/deploy-preview",
+    "Redirect rules - bread-docs",
+    "Header rules - bread-docs"
+  ],
+  "mergeMethod": "merge",
+  "branchPrefix": "keystatic/",
+  "idleMinutes": 60,
+  "maintainer": "rathermercurial",
+  "consentOptoutPath": "preferences/dm-consent.md",
+  "statePath": ".bread-docs-content-merge-state.json"
+}
