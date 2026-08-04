@@ -11,6 +11,10 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), error: vi.fn(), debug: vi.fn(), warn: vi.fn() },
 }));
 
+import {
+  OAUTH_CREATE_API_KEY_PATH,
+  anthropicAuthHeaders,
+} from './anthropic-auth.js';
 import { startCredentialProxy } from './credential-proxy.js';
 
 function makeRequest(
@@ -117,6 +121,38 @@ describe('credential-proxy', () => {
 
     expect(lastUpstreamHeaders['authorization']).toBe(
       'Bearer real-oauth-token',
+    );
+  });
+
+  // Anti-drift lock: the container path (this relay) and the host path
+  // (anthropic-auth.ts getAnthropicApiKey) must speak ONE OAuth protocol. If
+  // either the exchange path or the credential header changes on one side,
+  // this fails.
+  it('relays the exchange on the same path, with the same Authorization, that the shared module uses', async () => {
+    proxyPort = await startProxy({
+      CLAUDE_CODE_OAUTH_TOKEN: 'real-oauth-token',
+    });
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        // Path constant comes from the shared module, not a literal.
+        path: OAUTH_CREATE_API_KEY_PATH,
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer placeholder',
+        },
+      },
+      '{}',
+    );
+
+    expect(OAUTH_CREATE_API_KEY_PATH).toBe(
+      '/api/oauth/claude_cli/create_api_key',
+    );
+    expect(lastUpstreamHeaders['authorization']).toBe(
+      anthropicAuthHeaders({ mode: 'oauth', token: 'real-oauth-token' })
+        .authorization,
     );
   });
 

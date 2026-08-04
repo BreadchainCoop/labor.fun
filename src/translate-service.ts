@@ -8,20 +8,35 @@
  *   1. OpenAI-compatible endpoint when the local/NEAR AI backend is active
  *      (NANOCLAW_BACKEND=local — set explicitly or implied by NEAR_AI_API_KEY;
  *      wire config is LOCAL_LLM_BASE_URL / LOCAL_LLM_API_KEY / LOCAL_LLM_MODEL).
- *   2. Anthropic Messages API with a small fast model when an
- *      ANTHROPIC_API_KEY is available (process.env or .env).
+ *   2. Anthropic Messages API with a small fast model when ANY Anthropic
+ *      credential is available — an API key OR a Claude Code OAuth token.
+ *      Both are resolved through src/anthropic-auth.ts, the same module the
+ *      credential proxy uses, because hosted tenants run OAuth-only (the
+ *      control plane deliberately leaves ANTHROPIC_API_KEY unset). An OAuth
+ *      token is exchanged there for a temporary API key first — /v1/messages
+ *      never sees a Bearer token.
  *   3. Neither → translation is "not configured"; callers reply with a
- *      friendly message and never crash.
+ *      friendly message and never crash. A failing OAuth exchange collapses
+ *      into this same state (see isTranslationConfigured) instead of
+ *      producing a failure reply per message.
  */
 import { detectAll } from 'tinyld';
 
+import {
+  ANTHROPIC_API_BASE,
+  AnthropicAuth,
+  anthropicMessagesHeaders,
+  getAnthropicApiKey,
+  invalidateAnthropicApiKey,
+  isAnthropicOAuthExchangeDegraded,
+  resolveAnthropicAuth,
+} from './anthropic-auth.js';
 import {
   LOCAL_LLM_API_KEY,
   LOCAL_LLM_BASE_URL,
   LOCAL_LLM_MODEL,
   NANOCLAW_BACKEND,
 } from './config.js';
-import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 // --- Language catalog (port of translate_lang.rs) ---
@@ -341,19 +356,21 @@ export type TranslateProvider =
       apiKey?: string;
       model?: string;
     }
-  | { kind: 'anthropic'; apiKey: string };
+  | { kind: 'anthropic'; auth: AnthropicAuth };
 
 export interface TranslateProviderConfig {
   backend: 'claude' | 'local';
   localBaseUrl: string;
   localApiKey?: string;
   localModel?: string;
-  anthropicApiKey?: string;
+  /** Resolved Anthropic credential (api-key OR OAuth), or null when absent. */
+  anthropicAuth?: AnthropicAuth | null;
 }
 
 /**
  * Pure provider-selection logic (exported for tests): OpenAI-compatible when
- * the local/NEAR backend is configured, Anthropic key fallback, else null.
+ * the local/NEAR backend is configured, Anthropic fallback whenever ANY
+ * Anthropic credential resolved (api-key or OAuth), else null.
  */
 export function selectTranslateProvider(
   cfg: TranslateProviderConfig,
@@ -366,20 +383,10 @@ export function selectTranslateProvider(
       model: cfg.localModel,
     };
   }
-  if (cfg.anthropicApiKey) {
-    return { kind: 'anthropic', apiKey: cfg.anthropicApiKey };
+  if (cfg.anthropicAuth) {
+    return { kind: 'anthropic', auth: cfg.anthropicAuth };
   }
   return null;
-}
-
-function readAnthropicKey(): string | undefined {
-  // process.env first (hosted Kubernetes mode), .env fallback — the same
-  // convention as the credential proxy's readSecrets.
-  return (
-    process.env.ANTHROPIC_API_KEY ||
-    readEnvFile(['ANTHROPIC_API_KEY']).ANTHROPIC_API_KEY ||
-    undefined
-  );
 }
 
 /** Resolve the active provider from live orchestrator config. */
@@ -389,13 +396,32 @@ export function resolveTranslateProvider(): TranslateProvider | null {
     localBaseUrl: LOCAL_LLM_BASE_URL,
     localApiKey: LOCAL_LLM_API_KEY,
     localModel: LOCAL_LLM_MODEL,
-    anthropicApiKey: readAnthropicKey(),
+    anthropicAuth: resolveAnthropicAuth(),
   });
 }
 
-/** True when some translation backend is available. */
+/**
+ * True when some translation backend is available.
+ *
+ * Credential presence is the test (an API key OR an OAuth token OR the local
+ * backend). The one extra case: in OAuth mode the credential is only usable
+ * after a `create_api_key` exchange, so while that exchange is failing we
+ * report "not configured" — the honest degrade. That keeps the auto-translate
+ * path silent (translate-commands.ts checks this before every message) and
+ * makes the one-shot commands answer "Translation is not configured for this
+ * deployment." instead of apologizing once per message.
+ */
 export function isTranslationConfigured(): boolean {
-  return resolveTranslateProvider() !== null;
+  const provider = resolveTranslateProvider();
+  if (!provider) return false;
+  if (
+    provider.kind === 'anthropic' &&
+    provider.auth.mode === 'oauth' &&
+    isAnthropicOAuthExchangeDegraded()
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -447,22 +473,54 @@ export async function translateWith(
         : null;
     }
 
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': provider.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: ANTHROPIC_TRANSLATE_MODEL,
-        max_tokens: 1024,
-        temperature: 0.3,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: userPrompt(text, target) }],
-      }),
-      signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
-    });
+    // /v1/messages is always authenticated with an x-api-key. In OAuth mode
+    // that key is produced by the shared create_api_key exchange (cached) —
+    // the same protocol the credential proxy relays for container traffic.
+    // Sending the raw OAuth token as `Authorization: Bearer` here would 401.
+    const resolved = await getAnthropicApiKey(provider.auth);
+    if (!resolved) {
+      // No usable credential: either none configured, or the OAuth exchange is
+      // failing. Both are "unavailable", not "this message failed" — the
+      // exchange's cooldown makes isTranslationConfigured() report false, so
+      // callers stop attempting instead of apologizing per message.
+      // debug, not warn: the exchange itself already logged the failure once
+      // per cooldown window, and this branch is reached once per message while
+      // degraded — a warn here would just move the storm into the logs.
+      logger.debug(
+        { mode: provider.auth.mode },
+        'translate: no usable Anthropic API key (OAuth exchange unavailable)',
+      );
+      return null;
+    }
+
+    const postMessages = (apiKey: string) =>
+      fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+        method: 'POST',
+        headers: anthropicMessagesHeaders(apiKey),
+        body: JSON.stringify({
+          model: ANTHROPIC_TRANSLATE_MODEL,
+          max_tokens: 1024,
+          temperature: 0.3,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: userPrompt(text, target) }],
+        }),
+        signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
+      });
+
+    res = await postMessages(resolved.key);
+
+    // An exchanged key has an unpublished TTL. If it turns out to be stale,
+    // drop it and re-exchange once rather than waiting for our own cache TTL.
+    if (
+      (res.status === 401 || res.status === 403) &&
+      resolved.mode === 'oauth'
+    ) {
+      invalidateAnthropicApiKey(provider.auth);
+      const refreshed = await getAnthropicApiKey(provider.auth);
+      if (!refreshed) return null;
+      res = await postMessages(refreshed.key);
+    }
+
     if (!res.ok) {
       logger.warn(
         { status: res.status },

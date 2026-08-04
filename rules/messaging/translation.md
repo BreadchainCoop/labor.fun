@@ -46,10 +46,26 @@ message loop):
 1. **OpenAI-compatible endpoint** when the local/NEAR AI backend is active
    (`NANOCLAW_BACKEND=local`, or implied by `NEAR_AI_API_KEY`) — uses
    `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_API_KEY` / `LOCAL_LLM_MODEL`.
-2. **Anthropic API** (small fast model) when an `ANTHROPIC_API_KEY` is
-   available to the orchestrator.
+2. **Anthropic API** (small fast model) when *any* Anthropic credential is
+   available to the orchestrator — `ANTHROPIC_API_KEY` **or** a Claude Code
+   OAuth token (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN`). Hosted
+   tenants are OAuth-only, so both must work. The credential is resolved by
+   `src/anthropic-auth.ts`, shared with the credential proxy.
+
+   `/v1/messages` is **always** authenticated with `x-api-key`. An OAuth token
+   is not accepted there: it is first exchanged for a temporary API key via
+   `POST /api/oauth/claude_cli/create_api_key` (`Authorization: Bearer <token>`
+   \+ the `oauth-2025-04-20` beta → `{ "raw_key": … }`) — the same exchange the
+   credential proxy relays for container traffic. The exchanged key is cached
+   (~10 min, re-exchanged on a 401), so a busy group does one exchange, not one
+   per message.
 3. Neither → commands reply "Translation is not configured for this
    deployment."
+
+If the OAuth exchange itself fails (bad/expired token, network), translation
+reports **not configured** for a cooldown window rather than failing per
+message: auto-translate stays silent and explicit commands give the honest
+"not configured" reply.
 
 ## State
 

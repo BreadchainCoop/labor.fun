@@ -404,13 +404,50 @@ The **orchestrator** image is the one a tenant Deployment runs; the hosted
 control plane references it as `TENANT_ORCHESTRATOR_IMAGE`. It bundles a pinned
 `kubectl` (needed to spawn agent pods) plus the runtime assets the orchestrator
 reads relative to its working directory (`container/skills/`,
-`container/agent-runner/`, `scripts/`, `rules/`, `setup/`, `docs/`). It does
-**not** bake any `profiles/<org>/` data — that comes from the tenant's PVC or
-hostPath mount, selected by `LABOR_PROFILE`. Build it locally with:
+`container/agent-runner/`, `scripts/`, `rules/`, `setup/`, `docs/`, `kb-ui/`).
+It does **not** bake any `profiles/<org>/` data — that comes from the tenant's
+PVC or hostPath mount, selected by `LABOR_PROFILE`. Build it locally with:
 
 ```bash
 docker build -f deploy/docker/Dockerfile.orchestrator -t nanoclaw-orchestrator:latest .
 ```
+
+### KB dashboard as a second container from the same image
+
+The image ships `/app/kb-ui` but does **not** start it — the ENTRYPOINT is
+still `node dist/index.js`. To expose the dashboard, add a second container to
+the tenant Deployment using the *same* image, so orchestrator and dashboard
+can't drift apart across a rollout:
+
+```yaml
+- name: kb-ui
+  image: REPLACE_WITH_ORCHESTRATOR_IMAGE   # identical to the orchestrator's
+  command: ['node', 'kb-ui/server.mjs']
+  env:
+    - name: KB_PORT
+      value: '8080'
+    - name: LABOR_PROFILE
+      value: tenant-example
+  ports:
+    - containerPort: 8080
+  volumeMounts: # the SAME profile volume, at the SAME path
+    - name: profile-data
+      mountPath: /app/profiles/tenant-example
+```
+
+`kb-ui/server.mjs` listens on `KB_PORT` (default `8080`) and resolves the
+profile off `process.cwd()` (`/app`) the same way `src/profile.ts` does, so its
+mounts must match the orchestrator's exactly. Override `DB_PATH` /
+`CONTEXT_DIR` only if the orchestrator overrides them too; otherwise it derives
+`<profile>/store/messages.db` and `<profile>/groups/<sharedKbGroup>/context`.
+It authenticates with Basic Auth from its own env vars — put it behind ingress
+auth or keep it cluster-internal; do not expose it unauthenticated.
+
+**Status: not provisioned by the hosted control plane today.** Shipping the
+files in the image is the enabling half; the control plane does not yet create
+this container or route to it, so hosted tenants have no dashboard (and no
+plugin dashboard slices — see [PLUGINS.md §2c](PLUGINS.md)). Self-host
+deployments can add the block above now.
 
 ## Self-host-on-Kubernetes quickstart
 

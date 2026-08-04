@@ -43,6 +43,8 @@ groups
 # src/ and are excluded from the compiled dist by tsc anyway; drop them from the
 # context to keep the build lean).
 **/*.test.ts
+# kb-ui ships as .mjs (no build step), so its tests need excluding by name.
+**/*.test.mjs
 coverage
 .nyc_output
 
