@@ -14,8 +14,9 @@ export default defineConfig({
       // non-recursive directory scan ignores).
       'profiles/example/plugins/__tests__/*.test.mjs',
       // kb-ui is a plain .mjs Express app; its pure helpers (e.g. roster.mjs)
-      // are unit-tested beside them. The test files import only the helpers,
-      // never server.mjs (which starts a server on import).
+      // are unit-tested beside them. server.mjs itself is testable too — it
+      // only calls app.listen() when it is the process entrypoint, so
+      // server.test.mjs imports it and drives the app over an ephemeral port.
       'kb-ui/**/*.test.mjs',
       // agenda-web page renderers are plain .mjs (no build step); their tests
       // live beside them and import only the pure render fns, never serve.mjs

@@ -272,3 +272,70 @@ mode).
   tick, never fatal.
 - Table + cursor: `schema/tables.md` → `api_usage` and the
   `control_plane_usage_cursor` key in `router_state`.
+
+## Serving kb-ui behind the control plane
+
+kb-ui (`kb-ui/server.mjs`) normally owns the root of its own origin and
+authenticates with Basic Auth. The hosted control plane instead exposes each
+tenant's dashboard at
+
+```
+GET|POST|PATCH|DELETE https://cloud.lab0r.fun/dashboard/orgs/<orgId>/kb/*
+```
+
+It authenticates the human itself (control-plane session + org membership),
+strips the prefix, and forwards to the tenant's kb-ui port, asserting the
+identity with headers. Two env vars on the kb-ui side turn this on — both are
+**off by default**, so a self-hosted dashboard is byte-for-byte what it was:
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `KB_BASE_PATH` | `''` | Path prefix every generated URL carries (`/dashboard/orgs/<orgId>/kb`). Normalised to a leading slash with no trailing slash; a value with characters that could break out of an HTML attribute or JS string — or with a `..`/`.` segment, which the browser would resolve back *out* of the prefix — is refused (warn + serve at the root). Empty = kb-ui owns the root. |
+| `KB_PROXY_SECRET` | `''` | Per-tenant shared secret, generated like `KB_DEFAULT_PASSWORD`. Empty = the proxy path is off entirely. |
+
+Headers the proxy sends (kb-ui reads the identity ones **only** when the
+secret matches):
+
+| Header | Purpose |
+|--------|---------|
+| `X-KB-Proxy-Secret` | Must equal `KB_PROXY_SECRET` (constant-time compare). This *is* the trust decision — there is no separate "trust proxy" flag. |
+| `X-KB-User` | Email / stable user id; becomes the kb-ui username. |
+| `X-KB-Roles` | Comma-separated kb-ui roles: `admin`, `superadmin`, `coordinator`, `resident`. |
+| `X-Forwarded-Host` | The host the same-origin check on mutations compares against — the browser's `Origin` is the control plane's host, not the tenant Service's. |
+| `X-Forwarded-Proto` | Sent for completeness; kb-ui emits only relative URLs and compares hosts, so it currently reads nothing from it. |
+| `X-Forwarded-Prefix` | **Informational only — kb-ui does not read it.** The prefix arrives in `KB_BASE_PATH` (see below). |
+| `Origin` / `Referer` | The **client's own** values, relayed verbatim by the proxy so the same-origin check below has something real to judge. |
+
+Rules kb-ui enforces:
+
+- **The prefix comes from the env, never from the header.** A prefix decides
+  where every link on the page points, and `X-Forwarded-Prefix` can be set by
+  anyone who can reach the port — including a request that has *not* cleared the
+  secret check. So kb-ui reads `KB_BASE_PATH` and nothing else. The hosted
+  control plane stamps it into the tenant Secret from the same helper it mounts
+  the proxy with (`labor-cloud src/kb/prefix.ts`), and the two are asserted
+  byte-equal on the control-plane side. If they ever disagree the page still
+  renders — and every link on it 404s at the control plane's root, which is
+  exactly the failure this arrangement exists to prevent.
+
+- **No secret, no trust.** A wrong or absent `X-KB-Proxy-Secret` makes the
+  request a plain unauthenticated one: the `X-KB-*` headers are ignored
+  completely (not partially trusted) and Basic Auth applies exactly as before,
+  including for the `X-Forwarded-Host` origin check.
+- **Default deny on roles.** Only the four names above are recognised. The
+  control plane's role map is currently `owner → admin` — its only role today.
+  **A new control-plane role must be added to that map explicitly**; an
+  unmapped or empty role list grants nothing (it does *not* fall back to
+  `admin`, and it does *not* fall back to the `KB_ADMINS`/`KB_*` env lists,
+  which only apply to Basic Auth users).
+- **Origin checks stay strict, and stay real.** Mutations require an exact host
+  match against the forwarded host (proxied requests) or the real `Host`
+  (direct requests); an opaque `null` or unparseable `Origin` is rejected. This
+  is a genuine second opinion, not a formality: the control plane refuses a
+  foreign `Origin` itself and then forwards the client's **actual**
+  `Origin`/`Referer` rather than a synthesised one, so a request that only
+  carries a foreign `Referer` (which the proxy doesn't inspect) is refused
+  *here*. Plugin dashboard slices get the same helper via
+  `deps.isSameOrigin(req)` — see [docs/PLUGINS.md §2c](PLUGINS.md).
+- **Prefix tolerance.** Routes are registered un-prefixed; if a proxy forwards
+  the prefix instead of stripping it, kb-ui strips it before routing.

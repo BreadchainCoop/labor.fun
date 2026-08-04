@@ -11,6 +11,9 @@ WorkingDirectory=${DEPLOY_ROOT}
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # All non-secret config (NODE_ENV, KB_PORT, CONTEXT_DIR, USERS_FILE, KB_ADMINS,
 # KB_SUPERADMINS, DB_PATH, LABOR_PROFILE, ...) lives in the per-org deploy env.
+# Serving this dashboard under a reverse-proxy prefix additionally needs
+# KB_BASE_PATH (+ KB_PROXY_SECRET to accept proxy-asserted identity) — see
+# docs/HOSTED.md "Serving kb-ui behind the control plane".
 EnvironmentFile=-${DEPLOY_ENV_FILE}
 ExecStart=/usr/bin/node ${DEPLOY_ROOT}/kb-ui/server.mjs
 Restart=always
