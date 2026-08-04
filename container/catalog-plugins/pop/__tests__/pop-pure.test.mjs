@@ -181,6 +181,29 @@ describe('frontmatter helpers', () => {
     expect(payoutNumber(null)).toBe('');
   });
 
+  it('warns when orgId is missing, because the identity URL must never change', async () => {
+    // Omitting orgId falls back to the org NAME in pop_url. That URL is the
+    // Linear attachment join key, so adding the real hex id later would
+    // silently orphan every existing link. The warning is the only thing
+    // standing between an operator and that.
+    const pop = await import('../../pop.mjs');
+    const warnings = [];
+    const api = {
+      registerIntegration: (i) => i.start(),
+      registerChannel() {},
+      registerChatFlow() {},
+      readEnvFile: () => ({}),
+      logger: { info() {}, debug() {}, error() {}, warn: (o, m) => warnings.push(String(m)) },
+      profileDir: '/tmp/nonexistent',
+    };
+    await pop.default(api, { orgs: [{ name: 'Acme', chainId: 100 }] });
+    expect(warnings.some((w) => /no orgId configured/.test(w))).toBe(true);
+
+    warnings.length = 0;
+    await pop.default(api, { orgs: [{ name: 'Acme', chainId: 100, orgId: '0xabc' }] });
+    expect(warnings.some((w) => /no orgId configured/.test(w))).toBe(false);
+  });
+
   it('builds an immutable, deployment-independent task URL', () => {
     // The URL is the Linear attachment join key, so it must never depend on
     // anything an operator can reconfigure (e.g. kbDashboardUrl).

@@ -137,6 +137,47 @@ Everything an org owns lives in its profile — no framework edits:
   auto-loaded at startup. See [PLUGINS.md](PLUGINS.md) §0.
 - **Agent skills**: drop a `SKILL.md` folder in
   `profiles/acme/container-skills/`. It overlays the core `container/skills/`.
+- **First-party catalog plugins** (ship with the framework, **off for every org
+  until you ask for them**): opt in by listing their ids in `enabledPlugins`.
+  See [container/catalog-plugins/README.md](../container/catalog-plugins/README.md)
+  for the menu.
+
+> **One gotcha when you opt in.** `enabledPlugins` is absent by default, and
+> absent means _gating off_: every plugin in `profiles/acme/plugins/`
+> auto-registers and the catalog stays dark. The moment you add the key — even
+> as `[]` — gating turns **on**, and only listed ids register, **from either
+> source**. So if you already have profile-dir plugins, list them too:
+>
+> ```jsonc
+> { "enabledPlugins": ["my-existing-plugin", "pop"] }
+> ```
+
+### Example: on-chain tasks (POP) — entirely optional
+
+Nothing in labor.fun requires a blockchain. The `pop` catalog plugin mirrors a
+POP org's on-chain tasks into your KB so the reminder engine, PM orchestrator and
+digests operate on them; an org that does not use POP simply never enables it.
+
+```jsonc
+// profiles/acme/profile.config.json
+{
+  "enabledPlugins": ["pop"],
+  "pluginConfig": {
+    "pop": {
+      "orgs": [{ "name": "Acme", "chainId": 100, "orgId": "0x112d…" }]
+    }
+  }
+}
+```
+
+Get `orgId` from `npx pop org list --json`. **Set it before you link anything to
+the generated task URLs** — it feeds a task identity URL that is meant to be
+immutable, so adding it later rewrites every task's `pop_url`. The plugin warns
+at startup when it is missing.
+
+The mirror is read-only: it hardwires `POP_READONLY=1`, so it cannot sign or
+broadcast even if a key were present, and it needs no wallet and no credentials.
+Omit `pluginConfig.pop` (or leave `orgs` empty) and it stays dormant.
 
 ## 9. (Optional) Your own production infrastructure
 

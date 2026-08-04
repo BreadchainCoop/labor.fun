@@ -178,6 +178,23 @@ export default function register(api, config) {
         return;
       }
 
+      // `orgId` is optional today but it feeds the task IDENTITY URL, which is
+      // designed to be immutable — it becomes the Linear attachment join key,
+      // and `attachmentsForURL` makes that join stateless precisely because the
+      // URL never changes. Omitting it falls back to the org NAME, so adding
+      // the real hex id later would silently rewrite every task's `pop_url` and
+      // orphan every Linear link already attached. Warn now, while the only
+      // cost is a re-mirror.
+      for (const o of cfg.orgs) {
+        if (!o.orgId) {
+          logger.warn(
+            { org: o.name, chainId: o.chainId },
+            '[pop] no orgId configured — the task identity URL will use the org NAME. ' +
+              'Set orgId (from `pop org list --json`) before linking anything to these URLs.',
+          );
+        }
+      }
+
       const tick = () => {
         if (running) {
           logger.debug('[pop] previous tick still running — skipping');
