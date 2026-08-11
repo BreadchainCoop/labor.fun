@@ -31,6 +31,11 @@ export default defineConfig({
       // Container git hooks are plain .mjs run inside the agent image; their
       // pure logic (coauthor.mjs) is unit-tested beside them.
       'container/hooks/*.test.mjs',
+      // Catalog plugins are plain .mjs (no build step). Their pure modules are
+      // unit-tested beside them in __tests__/, which the plugin loader's
+      // non-recursive, file-only scan never sees. Nothing here touches the
+      // network — the POP CLI is stubbed.
+      'container/catalog-plugins/**/__tests__/*.test.mjs',
     ],
   },
 });
