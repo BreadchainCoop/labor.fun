@@ -170,14 +170,41 @@ digests operate on them; an org that does not use POP simply never enables it.
 }
 ```
 
-Get `orgId` from `npx pop org list --json`. **Set it before you link anything to
-the generated task URLs** — it feeds a task identity URL that is meant to be
-immutable, so adding it later rewrites every task's `pop_url`. The plugin warns
-at startup when it is missing.
-
 The mirror is read-only: it hardwires `POP_READONLY=1`, so it cannot sign or
 broadcast even if a key were present, and it needs no wallet and no credentials.
 Omit `pluginConfig.pop` (or leave `orgs` empty) and it stays dormant.
+
+You do not have to hand-write that config — there is a setup step for it:
+
+```bash
+npm run setup -- --step pop-org check    # what is my org id? does it exist yet?
+npm run setup -- --step pop-org link     # org already on chain → wire the profile
+npm run setup -- --step pop-org init     # write a starter deploy config to edit
+npm run setup -- --step pop-org deploy --confirm   # deploy a NEW org (gas!)
+```
+
+`check`, `init` and `link` are all safe — no key, no gas, no chain writes.
+`link` is the common path: it verifies the org exists, derives its id, and writes
+`pluginConfig.pop` for you. It also **preserves your existing `enabledPlugins`**
+and carries your profile-dir plugins across when it has to turn gating on.
+
+The org id is `keccak256` of the lowercased, hyphenated org name, so `check` and
+`link` can resolve it locally without a deploy having happened.
+
+> ### ⚠️ Read this before `deploy`
+>
+> `pop org deploy` broadcasts a ~15,000,000-gas transaction and **pins your org's
+> description and links to public IPFS, permanently**.
+>
+> **`--dry-run` does not avoid the pin.** In the CLI the pin runs *before* the
+> dry-run check, so a "rehearsal" still publishes. There is no private way to
+> practise this. That is why `check` validates locally rather than shelling out
+> to a dry run.
+>
+> `deploy` therefore refuses without an explicit `--confirm`, refuses if the org
+> already exists on chain (an org id is derived from the name, so a second deploy
+> under the same name would revert *after* spending gas), and refuses if this
+> profile is already linked. `POP_PRIVATE_KEY` comes from the env/vault only.
 
 ## 9. (Optional) Your own production infrastructure
 
