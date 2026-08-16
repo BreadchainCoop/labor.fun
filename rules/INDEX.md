@@ -6,6 +6,7 @@ Operational rules, access control policies, and process definitions. The assista
 
 When the assistant starts a conversation, it reads the relevant rules based on context:
 - **Every interaction**: [Access Control](access-control/README.md), [Privacy Policy](access-control/privacy-policy.md), [Voice & Register](identity/voice.md)
+- **Before doing vs. proposing any action**: [Action Envelope](action-envelope.md) — do only what finishes and verifies in one turn
 - **KB operations**: [Knowledge Base](knowledge-base/README.md) and its sub-rules
 - **Cross-channel requests**: [Messaging](messaging/README.md)
 - **Answering from a specific doc/page/item**: [Citations](messaging/citations.md) — append a Sources block
@@ -27,6 +28,7 @@ When the assistant starts a conversation, it reads the relevant rules based on c
 | [Access Control](access-control/README.md) | `rules/access-control/` | Every interaction — confirm requester is allowlisted |
 | [Privacy Policy](access-control/privacy-policy.md) | `rules/access-control/privacy-policy.md` | Before sharing ANY KB content |
 | [Capability Matrix](access-control/role-matrix.md) | `rules/access-control/role-matrix.md` | Allowlisted vs unknown — what each can do |
+| [Action Envelope](action-envelope.md) | `rules/action-envelope.md` | Deciding whether to *do* an action vs. *propose / hand off* — do only what finishes and verifies in one turn |
 | [Knowledge Base](knowledge-base/README.md) | `rules/knowledge-base/` | Any KB read/write operation |
 | [Task Management](knowledge-base/tasks.md) | `rules/knowledge-base/tasks.md` | Creating, updating, or querying tasks |
 | [Storage Systems](knowledge-base/storage.md) | `rules/knowledge-base/storage.md` | Understanding markdown KB vs SQLite DB |
