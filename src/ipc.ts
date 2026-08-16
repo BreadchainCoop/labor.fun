@@ -842,11 +842,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   deps,
                   ipcBaseDir,
                 );
-              } else if (
-                data.type === 'add_kb_user' &&
-                data.username &&
-                data.target_telegram_jid
-              ) {
+              } else if (data.type === 'add_kb_user' && data.username) {
                 // Create a KB-UI auth entry + DM the credentials.
                 // Flat model: any allowlisted sender may invoke. This op
                 // creates auth credentials so we require a validated
@@ -854,6 +850,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 // implicit isMain (scheduled task in the control channel)
                 // does NOT pass; the orchestrator must attach a sender.
                 const senderCtx = readSenderCtxFromDir(ipcBaseDir, sourceGroup);
+                // Channel-agnostic credential delivery: use an explicit target
+                // if one was given (any channel), otherwise fall back to the
+                // chat the request came from. `deps.sendMessage` routes by JID
+                // prefix (tg:/dc:/slack:), so this works on Discord and Slack
+                // orgs too — not just Telegram. `target_telegram_jid` is still
+                // accepted for backward compatibility.
+                const targetJid =
+                  data.target_jid ||
+                  data.target_telegram_jid ||
+                  data.chatJid ||
+                  findChatJidForGroup(registeredGroups, sourceGroup);
 
                 if (!senderCtx) {
                   logger.warn(
@@ -868,6 +875,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { username: data.username, sourceGroup },
                     'add_kb_user rejected — invalid username format',
+                  );
+                } else if (!targetJid) {
+                  logger.warn(
+                    { username: data.username, sourceGroup },
+                    'add_kb_user rejected — could not resolve a delivery channel for the credentials',
                   );
                 } else {
                   const usersFile =
@@ -901,12 +913,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                         usersFile,
                         JSON.stringify(users, null, 2),
                       );
-                      const dmText = `Your Breadbrich Engels KB-UI account is ready.\n\nUsername: ${data.username}\nPassword: ${password}\nLogin: https://kb.example.com\n\n(Password sent via DM only; please log in and change/note it.)`;
-                      await deps.sendMessage(data.target_telegram_jid, dmText);
+                      const loginUrl =
+                        process.env.KB_DASHBOARD_URL ||
+                        'https://kb.example.com';
+                      const dmText = `Your Breadbrich Engels KB-UI account is ready.\n\nUsername: ${data.username}\nPassword: ${password}\nLogin: ${loginUrl}\n\n(Password sent via DM only; please log in and change/note it.)`;
+                      await deps.sendMessage(targetJid, dmText);
                       logger.info(
                         {
                           username: data.username,
-                          target: data.target_telegram_jid,
+                          target: targetJid,
                           sourceGroup,
                           createdBy: senderCtx.user_id,
                         },
