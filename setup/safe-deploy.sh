@@ -281,6 +281,28 @@ if [ -f "$AD_SRC" ] && ! cmp -s "$AD_SRC" "$AD_DST" 2>/dev/null; then
   log "auto-deploy.sh installed/updated"
 fi
 
+# --- 7a-ter. Install / refresh the logrotate policy (safety net for logs). ---
+# The services write to $DEPLOY_ROOT/logs/*.log via systemd append: and hold
+# the fd open, so an unbounded log (a runaway WARN/ERROR) can fill the disk —
+# it once hit 682MB. Render the template with this org's DEPLOY_ROOT and drop
+# it in /etc/logrotate.d/ so the system logrotate rotates by size with
+# copytruncate. Non-fatal: a broken logrotate config must not roll back an
+# otherwise-healthy deploy, so failures here only warn.
+LR_SRC="$GIT_DIR/setup/logrotate/labor.fun.conf.in"
+LR_DST="/etc/logrotate.d/$SERVICE_NAME"
+if [ -f "$LR_SRC" ]; then
+  if command -v envsubst >/dev/null 2>&1; then
+    lr_rendered="$(DEPLOY_ROOT="$DEPLOY_ROOT" envsubst '${DEPLOY_ROOT}' < "$LR_SRC")"
+    if ! printf '%s' "$lr_rendered" | cmp -s - "$LR_DST" 2>/dev/null; then
+      printf '%s' "$lr_rendered" > "$LR_DST"
+      chmod 644 "$LR_DST"; chown root:root "$LR_DST"
+      log "logrotate policy installed/updated -> $LR_DST"
+    fi
+  else
+    log "WARN: envsubst missing — skipping logrotate install (install gettext-base)"
+  fi
+fi
+
 # --- 7b. Restart services ---
 log "Restart services"
 systemctl restart "$SERVICE_NAME"
