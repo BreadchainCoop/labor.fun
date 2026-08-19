@@ -861,6 +861,27 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   data.target_telegram_jid ||
                   data.chatJid ||
                   findChatJidForGroup(registeredGroups, sourceGroup);
+                // Where we report the OUTCOME back to the human who asked. This
+                // is always the origin chat (never a guessed cross-channel
+                // target), so that even when credential delivery to `targetJid`
+                // fails, the requester still sees a clear success/failure. #202
+                const requesterJid =
+                  data.chatJid ||
+                  findChatJidForGroup(registeredGroups, sourceGroup);
+                // Best-effort outcome notification to the requester. Every
+                // branch below MUST surface a result — no silent logger-only
+                // dead-ends (that was the core of #202).
+                const notify = async (text: string): Promise<void> => {
+                  if (!requesterJid) return;
+                  try {
+                    await deps.sendMessage(requesterJid, text);
+                  } catch (notifyErr) {
+                    logger.warn(
+                      { notifyErr, requesterJid },
+                      'add_kb_user — failed to surface outcome to requester',
+                    );
+                  }
+                };
 
                 if (!senderCtx) {
                   logger.warn(
@@ -871,66 +892,139 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     },
                     'add_kb_user rejected — requires validated allowlisted sender (user_id)',
                   );
+                  await notify(
+                    `⚠️ Couldn't create the KB-UI account for \`${data.username}\` — this action needs a validated allowlisted sender.`,
+                  );
                 } else if (!/^[a-z][a-z0-9_-]{0,31}$/.test(data.username)) {
                   logger.warn(
                     { username: data.username, sourceGroup },
                     'add_kb_user rejected — invalid username format',
+                  );
+                  await notify(
+                    `⚠️ Couldn't create the KB-UI account — \`${data.username}\` isn't a valid username (start with a lowercase letter, then letters/digits/_/-, max 32 chars).`,
                   );
                 } else if (!targetJid) {
                   logger.warn(
                     { username: data.username, sourceGroup },
                     'add_kb_user rejected — could not resolve a delivery channel for the credentials',
                   );
+                  await notify(
+                    `⚠️ Couldn't create the KB-UI account for \`${data.username}\` — no delivery channel could be resolved for the credentials.`,
+                  );
                 } else {
                   const usersFile =
                     process.env.USERS_FILE ||
                     path.join(PROJECT_ROOT, 'kb-ui', 'users.json');
                   let users: Record<string, string> = {};
+                  let readOk = true;
                   try {
                     if (fs.existsSync(usersFile)) {
                       users = JSON.parse(fs.readFileSync(usersFile, 'utf-8'));
                     }
                   } catch (err) {
+                    readOk = false;
                     logger.error(
                       { err, usersFile },
                       'add_kb_user — could not read users file',
                     );
                   }
 
-                  if (users[data.username]) {
-                    logger.warn(
-                      { username: data.username, sourceGroup },
-                      'add_kb_user rejected — username already exists',
+                  if (!readOk) {
+                    await notify(
+                      `⚠️ Couldn't create the KB-UI account for \`${data.username}\` — the user store couldn't be read. Try again shortly, or ping an admin.`,
                     );
                   } else {
+                    // Rotate-and-resend instead of a hard "already exists"
+                    // reject: a prior *failed delivery* may have left a
+                    // dangling entry, so a same-username retry must be able to
+                    // re-issue a fresh password rather than silently no-op. #202
+                    const isReissue = Boolean(users[data.username]);
+                    const previousPassword = users[data.username];
                     const crypto = await import('crypto');
                     const password = `cnvt-${data.username.slice(0, 2)}-${crypto
                       .randomBytes(6)
                       .toString('base64url')}`;
                     users[data.username] = password;
+
+                    let committed = false;
                     try {
                       fs.writeFileSync(
                         usersFile,
                         JSON.stringify(users, null, 2),
                       );
+                      committed = true;
                       const loginUrl =
                         process.env.KB_DASHBOARD_URL ||
                         'https://kb.example.com';
                       const dmText = `Your Breadbrich Engels KB-UI account is ready.\n\nUsername: ${data.username}\nPassword: ${password}\nLogin: ${loginUrl}\n\n(Password sent via DM only; please log in and change/note it.)`;
-                      await deps.sendMessage(targetJid, dmText);
+
+                      // `deps.sendMessage` returns false on a dropped/failed
+                      // send and throws when no connected channel owns the JID
+                      // (post-#182). Treat BOTH as a delivery failure — never
+                      // log an unconditional "DM'd" success. #202
+                      const delivered = await deps.sendMessage(
+                        targetJid,
+                        dmText,
+                      );
+                      if (!delivered) {
+                        throw new Error('credential_delivery_failed');
+                      }
                       logger.info(
                         {
                           username: data.username,
                           target: targetJid,
                           sourceGroup,
                           createdBy: senderCtx.user_id,
+                          isReissue,
                         },
                         "KB user created and credentials DM'd",
                       );
+                      // Confirm to the requester. If credentials went to a
+                      // different channel than the request came from, say so.
+                      if (requesterJid && requesterJid !== targetJid) {
+                        await notify(
+                          `✅ KB-UI account \`${data.username}\` ${isReissue ? 're-issued' : 'created'} — credentials delivered to ${targetJid}.`,
+                        );
+                      }
                     } catch (err) {
+                      const msg = String(
+                        (err as Error)?.message || err,
+                      ).toLowerCase();
+                      const isTelegramColdStart =
+                        /can't initiate|cant initiate|chat not found|403|forbidden/.test(
+                          msg,
+                        );
+                      // Roll back so a failed delivery never leaves a dangling
+                      // account holding a password nobody received. Fresh
+                      // create → remove the entry; re-issue → restore the prior
+                      // password. Only rewrite if we actually committed. #202
+                      if (!isReissue) {
+                        delete users[data.username];
+                      } else if (previousPassword !== undefined) {
+                        users[data.username] = previousPassword;
+                      }
+                      if (committed) {
+                        try {
+                          fs.writeFileSync(
+                            usersFile,
+                            JSON.stringify(users, null, 2),
+                          );
+                        } catch (rollbackErr) {
+                          logger.error(
+                            { rollbackErr, username: data.username },
+                            'add_kb_user — rollback write failed',
+                          );
+                        }
+                      }
                       logger.error(
-                        { err, username: data.username },
+                        { err, username: data.username, target: targetJid },
                         'add_kb_user — write or DM failed',
+                      );
+                      const reachHint = isTelegramColdStart
+                        ? ` The target hasn't started the Telegram bot, so it can't be DM'd — have them message the bot once (\`/start\`), or provide a Discord/Slack target instead.`
+                        : '';
+                      await notify(
+                        `⚠️ Couldn't deliver credentials for \`${data.username}\` to ${targetJid} — nothing was left behind, so it's safe to retry with a reachable channel.${reachHint}`,
                       );
                     }
                   }
