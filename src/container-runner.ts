@@ -21,6 +21,7 @@ import {
   DATA_DIR,
   ENABLED_SKILLS,
   GITHUB_APP_MODE,
+  COMMUNITY_KB_SUBDIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   K8S_NAMESPACE,
@@ -138,6 +139,11 @@ export interface ContainerInput {
    * in addition to the global CLAUDE.md.
    */
   systemPromptAppend?: string;
+  /**
+   * Shared-KB mount scope. Unset = full KB (normal/privileged runs). Sandboxed
+   * chat flows pass `'none'` (no KB mount) or `'public'` (public subtree only).
+   */
+  kbScope?: 'none' | 'public';
   /**
    * Override the orchestrator model for this single run, taking precedence
    * over the global NANOCLAW_MODEL. Lets a durable-workflow step (see
@@ -343,6 +349,7 @@ function mountSource(hostPath: string): string | null {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  kbScope?: 'none' | 'public',
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -483,13 +490,23 @@ function buildVolumeMounts(
   // resolve "who is X" / "what's on the calendar" lookups without
   // needing the files duplicated under their own group folder.
   // Set SHARED_KB_GROUP in .env to override the source group (default: slack_main).
-  const sharedKbDir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context');
-  if (fs.existsSync(sharedKbDir)) {
-    mounts.push({
-      hostPath: sharedKbDir,
-      containerPath: '/workspace/shared-kb',
-      readonly: true,
-    });
+  // Normal/privileged runs (kbScope unset) get the full KB. Sandboxed chat
+  // flows get a restricted view: 'public' mounts ONLY the curated public
+  // subtree; 'none' mounts nothing. This is a real filesystem boundary, not a
+  // policy the untrusted agent is trusted to self-enforce.
+  if (kbScope !== 'none') {
+    const contextDir = path.join(GROUPS_DIR, SHARED_KB_GROUP, 'context');
+    const sharedKbDir =
+      kbScope === 'public'
+        ? path.join(contextDir, COMMUNITY_KB_SUBDIR)
+        : contextDir;
+    if (fs.existsSync(sharedKbDir)) {
+      mounts.push({
+        hostPath: sharedKbDir,
+        containerPath: '/workspace/shared-kb',
+        readonly: true,
+      });
+    }
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -1344,7 +1361,7 @@ export async function runContainerAgent(
   // agent runs without GitHub.
   const githubToken = await resolveGithubToken();
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, input.kbScope);
   const containerName = buildAgentContainerName(group.folder, Date.now());
   const { bin: runtimeBin, args: containerArgs } = buildSpawnCommand(
     mounts,

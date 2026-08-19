@@ -80,6 +80,7 @@ const envConfig = readEnvFile([
   'DISCORD_MEMBERS_SYNC_INTERVAL_MS',
   'SLACK_MEMBERS_SYNC_INTERVAL_MS',
   'SHARED_KB_GROUP',
+  'COMMUNITY_KB_SUBDIR',
   'LABOR_PROFILE',
   'ENABLED_SKILLS',
   'ENABLED_PLUGINS',
@@ -862,6 +863,11 @@ export const OPS_REPORT_PAGEDATA_DIR = (
 // the page won't see synced data. Default: slack_main.
 export const SHARED_KB_GROUP =
   envVal('SHARED_KB_GROUP') || PROFILE.sharedKbGroup || 'slack_main';
+
+// Subdirectory (under the shared-KB group's `context/`) holding PUBLIC-facing
+// docs. Community-tier chat flows mount ONLY this subtree, read-only, so they
+// can answer public questions without exposing the rest of the KB. Default: 'public'.
+export const COMMUNITY_KB_SUBDIR = envVal('COMMUNITY_KB_SUBDIR') || 'public';
 
 // How often the Discord-members → KB people sync re-runs in the background
 // (alongside the DM-allowlist refresh, but on its own cadence). Default 1
