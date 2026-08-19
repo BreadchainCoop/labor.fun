@@ -18,6 +18,7 @@ edit setup/... → push → merge → safe-deploy.sh
 | `setup/systemd/breadbrich-auto-deploy.service` | `/etc/systemd/system/breadbrich-auto-deploy.service` | root:root, 644 |
 | `setup/systemd/breadbrich-auto-deploy.timer` | `/etc/systemd/system/breadbrich-auto-deploy.timer` | root:root, 644 |
 | `setup/breadbrich-deploy.env` | `/opt/breadbrich/setup/breadbrich-deploy.env` *(via rsync)* | breadbrich:breadbrich, 644 |
+| `setup/logrotate/labor.fun.conf.in` | `/etc/logrotate.d/<service>` *(rendered, `${DEPLOY_ROOT}` filled)* | root:root, 644 |
 
 ## How updates propagate (steady state)
 
@@ -34,6 +35,34 @@ edit setup/... → push → merge → safe-deploy.sh
 
 Net result: once this is bootstrapped, you never touch the droplet for
 deploy-infra changes. Edit the file in the repo, merge, deploy.
+
+## Log rotation (disk-fill safety net)
+
+The services write to `${DEPLOY_ROOT}/logs/*.log` and `*.error.log` via
+systemd `StandardOutput/StandardError=append:…`. Nothing rotated these, and a
+hot-path WARN once flooded an error log to **682MB and filled the droplet's
+disk**. Every deploy now installs a logrotate policy that caps them.
+
+- **Template:** `setup/logrotate/labor.fun.conf.in`
+  (`${DEPLOY_ROOT}/logs/*.log` — the `*.log` glob also matches `*.error.log`).
+- **Installed to:** `/etc/logrotate.d/<service>` by `safe-deploy.sh` **step
+  7a-ter**, rendered with this org's `DEPLOY_ROOT` via `envsubst` (same
+  mechanism as the systemd units). Idempotent byte-compare; non-fatal so a bad
+  logrotate config can't roll back an otherwise-healthy deploy.
+- **Policy:** `size 100M`, `rotate 3`, `compress`, `missingok`, `notifempty`,
+  **`copytruncate`**.
+- **Why `copytruncate`:** the app holds each log's file descriptor open for the
+  life of the process (systemd `append:`). A rename+create rotation (the
+  default, or `create`) would leave the process writing to the now-rotated
+  inode — the "current" log would freeze while the rotated file grew unbounded,
+  defeating rotation. `copytruncate` copies then truncates the file in place, so
+  the held fd keeps writing to the same (now-empty) inode. The app's log
+  transport is unchanged; rotation is entirely external. (There is no clean
+  systemd-native size cap for `append:` files short of switching to journald,
+  which we don't; logrotate + copytruncate is the mechanism.)
+- Rotation is gated by **size, not time**: a flood fills the disk in hours, well
+  before a daily/weekly rotate would fire. The system logrotate cron/timer runs
+  the check periodically and rotates whenever a file is past 100M.
 
 ## Per-deployment customization
 
@@ -76,6 +105,14 @@ systemctl enable --now breadbrich breadbrich-kb
 install -m 755 -o root -g root \
   /opt/breadbrich-git/setup/safe-deploy.sh \
   /opt/breadbrich-backups/safe-deploy.sh
+
+# Install the logrotate policy (renders ${DEPLOY_ROOT}). safe-deploy.sh
+# re-installs this on every run, so this is only needed if you want it in
+# place before the first deploy.
+DEPLOY_ROOT=/opt/breadbrich envsubst '${DEPLOY_ROOT}' \
+  < /opt/breadbrich-git/setup/logrotate/labor.fun.conf.in \
+  > /etc/logrotate.d/breadbrich
+chmod 644 /etc/logrotate.d/breadbrich
 ```
 
 From here on, just merge changes to `main` and run

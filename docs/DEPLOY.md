@@ -147,6 +147,19 @@ Each snapshot:
 
 Average snapshot size: **~21MB**. Disk footprint with all retention slots full: ~880MB.
 
+### Log rotation
+
+The services write to `/opt/breadbrich/logs/*.log` and `*.error.log` (systemd
+`append:`) and hold the fd open. A hot-path WARN once flooded an error log to
+**682MB and filled the disk**. `safe-deploy.sh` (step 7a-ter) renders
+`setup/logrotate/labor.fun.conf.in` with this org's `DEPLOY_ROOT` and installs
+it to `/etc/logrotate.d/<service>`, so a fresh deploy is protected by default.
+Policy: `size 100M`, `rotate 3`, `compress`, `missingok`, `notifempty`,
+**`copytruncate`** — copytruncate is required because the process holds the log
+fd open, so a rename+`create` rotation would leave it writing to the rotated
+inode (the live log would freeze while the rotated file grew unbounded).
+Rotation is size-gated, not time-gated. Full rationale: `setup/DEPLOY-INFRA.md`.
+
 ### Off-site mirror
 
 `scripts/pull-backups.sh` rsyncs `/opt/breadbrich-backups/` → `~/Documents/Code/Claude/breadbrich-backups/` on your Mac. Not automated — run manually or via launchd if desired.

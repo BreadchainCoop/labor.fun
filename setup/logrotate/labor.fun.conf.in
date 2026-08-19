@@ -1,0 +1,46 @@
+# labor.fun log rotation — SAFETY NET against a runaway-log disk-fill.
+#
+# Rendered from this template by safe-deploy.sh (the ${DEPLOY_ROOT} placeholder
+# is filled with this org's install root via envsubst) and installed to
+# /etc/logrotate.d/<service> so a fresh deploy is protected by default. Runs
+# under the system logrotate cron/timer (typically daily), but rotation is
+# gated by SIZE, not time — see below.
+#
+# Background: the orchestrator, kb, and auto-deploy services write to
+# ${DEPLOY_ROOT}/logs/*.log and *.error.log via systemd
+# `StandardOutput/StandardError=append:...`. A hot-path WARN once flooded an
+# error log to 682MB and filled the droplet's disk. Nothing rotated these.
+#
+# Design:
+#   size 100M      Rotate on SIZE, not on a daily/weekly clock. A flood can
+#                  fill the disk in hours — long before a time-based rotate
+#                  would fire — so cap each file instead. logrotate rotates
+#                  whenever its periodic run finds a file past 100M.
+#   rotate 3       Keep 3 old copies (≈300M raw, far less compressed) then drop
+#                  the oldest. Bounds worst-case disk use.
+#   compress       gzip rotated copies to save space.
+#   missingok      A log that doesn't exist yet (e.g. no error output) is fine.
+#   notifempty     Don't rotate an empty file.
+#   copytruncate   REQUIRED here. The services hold the log file descriptor
+#                  open for the life of the process (systemd append:). The
+#                  default rename+create (or `create`) rotation would leave the
+#                  process still writing to the now-rotated inode: the "current"
+#                  log would appear frozen while the rotated file kept growing
+#                  unbounded — defeating rotation entirely and never freeing the
+#                  disk. copytruncate instead copies the file, then truncates
+#                  the original in place, so the held fd keeps writing to the
+#                  same (now-empty) inode. The small race (a few log lines
+#                  written between copy and truncate can be lost) is an
+#                  acceptable trade for logs. Do NOT switch to create/rename
+#                  unless the app is changed to reopen its log fds on SIGHUP.
+#
+# The glob deliberately matches *.log, which also covers *.error.log (and any
+# future logs the framework writes into this dir).
+${DEPLOY_ROOT}/logs/*.log {
+    size 100M
+    rotate 3
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

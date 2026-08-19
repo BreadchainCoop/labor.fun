@@ -558,6 +558,61 @@ function refreshOutboundSnapshot(groupFolder: string, chatJid: string): void {
 
 let ipcWatcherRunning = false;
 
+// Sandboxed external chat-flow groups have their IPC discarded on every poll
+// (defense in depth). That discard is expected, steady-state behaviour, so we
+// must NOT re-log it at WARN each time — on a busy chat-flow that floods the
+// error log (a droplet once hit 682MB and filled the disk). We log the FIRST
+// occurrence per distinct source at WARN so a genuinely new/misbehaving source
+// still surfaces exactly once, then stay silent (debug) for the steady stream.
+// Bounded by the number of distinct sandboxed source folders (small).
+const warnedSandboxedSources = new Set<string>();
+
+/**
+ * Discard ALL IPC (messages + tasks) from a sandboxed external chat-flow
+ * source folder. This is defense in depth: a prompt-injected flow run must
+ * never reach a privileged op. The discard runs on every poll for every
+ * sandboxed source — expected, benign, steady-state behaviour — so we log it
+ * at WARN only the FIRST time a distinct source is seen (so a genuinely new /
+ * misbehaving source still surfaces once) and at DEBUG thereafter, to keep it
+ * out of the error log. The warned-set is bounded by the (small) number of
+ * distinct sandboxed source folders.
+ *
+ * Exported for testing; the discard behaviour must remain unconditional.
+ */
+export function discardSandboxedIpc(
+  ipcBaseDir: string,
+  sourceGroup: string,
+): void {
+  try {
+    for (const sub of ['messages', 'tasks']) {
+      const d = path.join(ipcBaseDir, sourceGroup, sub);
+      if (!fs.existsSync(d)) continue;
+      for (const f of fs.readdirSync(d)) {
+        if (f.endsWith('.json')) fs.unlinkSync(path.join(d, f));
+      }
+    }
+  } catch {
+    /* best-effort cleanup */
+  }
+  if (!warnedSandboxedSources.has(sourceGroup)) {
+    warnedSandboxedSources.add(sourceGroup);
+    logger.warn(
+      { sourceGroup },
+      'Ignoring IPC from external chat-flow channel (sandboxed)',
+    );
+  } else {
+    logger.debug(
+      { sourceGroup },
+      'Ignoring IPC from external chat-flow channel (sandboxed)',
+    );
+  }
+}
+
+/** Test hook: reset the once-per-source warn cache for isolation. */
+export function _resetSandboxedWarnCache(): void {
+  warnedSandboxedSources.clear();
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -598,21 +653,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
       // tools; defense in depth — ignore ALL IPC from them so a
       // prompt-injected flow run can never reach a privileged op.
       if (chatFlowFolders.has(sourceGroup)) {
-        try {
-          for (const sub of ['messages', 'tasks']) {
-            const d = path.join(ipcBaseDir, sourceGroup, sub);
-            if (!fs.existsSync(d)) continue;
-            for (const f of fs.readdirSync(d)) {
-              if (f.endsWith('.json')) fs.unlinkSync(path.join(d, f));
-            }
-          }
-        } catch {
-          /* best-effort cleanup */
-        }
-        logger.warn(
-          { sourceGroup },
-          'Ignoring IPC from external chat-flow channel (sandboxed)',
-        );
+        discardSandboxedIpc(ipcBaseDir, sourceGroup);
         continue;
       }
       // Flat-access (cooperative) mode: every group authorizes IPC ops as
