@@ -38,6 +38,13 @@ export interface ChatFlow {
   /** Persona appended to the system prompt for this flow's runs. */
   systemPrompt: string;
   /**
+   * How much of the shared KB this flow's container may read.
+   * - `'none'` (default when unset): no shared-KB mount at all.
+   * - `'public'`: mount ONLY the curated public subtree (read-only).
+   * A flow never gets the full KB — that's reserved for privileged runs.
+   */
+  kbScope?: 'none' | 'public';
+  /**
    * Post-process the agent's output (internal tags already stripped) and
    * return the user-facing reply ('' = stay silent). Runs privileged; this is
    * where records get filed and notifications sent. `triggerMsg` carries the
