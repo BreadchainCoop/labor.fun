@@ -810,10 +810,18 @@ export const PM_LEAD = envVal('PM_LEAD') || '';
 // bottleneck digest). Deterministic — no agent run, no API spend. Default
 // weekly; 0 disables the loop. Sweeps more often than it posts (idempotent
 // per-period via ops_report_log), so a daily sweep still posts once a week.
-export const OPS_REPORT_INTERVAL_MS = Math.max(
-  0,
-  parseInt(envVal('OPS_REPORT_INTERVAL_MS') || '86400000', 10) || 86400000,
-);
+// NB: a plain `parseInt(x) || DEFAULT` turns an explicit 0 back into the
+// default (0 is falsy), which would make the documented "0 disables the loop"
+// impossible. Parse the raw value and only fall back to the default when it's
+// unset / blank / non-numeric, so 0 (or a negative) genuinely disables.
+const opsReportIntervalRaw = envVal('OPS_REPORT_INTERVAL_MS');
+const opsReportIntervalParsed =
+  opsReportIntervalRaw === undefined || opsReportIntervalRaw.trim() === ''
+    ? NaN
+    : parseInt(opsReportIntervalRaw, 10);
+export const OPS_REPORT_INTERVAL_MS = Number.isNaN(opsReportIntervalParsed)
+  ? 86400000
+  : Math.max(0, opsReportIntervalParsed);
 // Group whose chat receives the report. Empty → SHARED_KB_GROUP. Point this at a
 // private leadership channel when the audience is 'leaders'.
 export const OPS_REPORT_TARGET_GROUP = envVal('OPS_REPORT_TARGET_GROUP') || '';
