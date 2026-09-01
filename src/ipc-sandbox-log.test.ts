@@ -15,7 +15,10 @@ import { discardSandboxedIpc, _resetSandboxedWarnCache } from './ipc.js';
 
 const SOURCE = 'chatflow-sandboxed-src';
 
-function writeIpcFiles(sourceGroup: string): { messages: string; tasks: string } {
+function writeIpcFiles(sourceGroup: string): {
+  messages: string;
+  tasks: string;
+} {
   const messagesDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'messages');
   const tasksDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'tasks');
   fs.mkdirSync(messagesDir, { recursive: true });
