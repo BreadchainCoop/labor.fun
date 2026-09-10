@@ -25,6 +25,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { parseIntervalMs } from './schedule-interval.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -47,14 +48,19 @@ export function computeNextRun(task: ScheduledTask): string | null {
   }
 
   if (task.schedule_type === 'interval') {
-    const ms = parseInt(task.schedule_value, 10);
-    if (!ms || ms <= 0) {
-      // Guard against malformed interval that would cause an infinite loop
+    const ms = parseIntervalMs(task.schedule_value);
+    if (ms === null) {
+      // A value the parser rejects has no knowable period, so there is no safe
+      // next run: falling back to "now + 1 minute" (the old behaviour) left the
+      // task active and firing 1,440 times a day — the same cost class as the
+      // incident this parser exists to prevent, just relabelled. Returning null
+      // is terminal: updateTaskAfterRun marks the row completed and runTask
+      // pauses it for repair, so a bad value costs at most one extra run.
       logger.warn(
         { taskId: task.id, value: task.schedule_value },
-        'Invalid interval value',
+        'Invalid interval value — stopping task instead of rescheduling',
       );
-      return new Date(now + 60_000).toISOString();
+      return null;
     }
     // Anchor to the scheduled time, not now, to prevent drift.
     // Skip past any missed intervals so we always land in the future.
@@ -246,6 +252,22 @@ async function runTask(
       ? result.slice(0, 200)
       : 'Completed';
   updateTaskAfterRun(task.id, nextRun, resultSummary);
+
+  if (nextRun === null && task.schedule_type !== 'once') {
+    // A recurring task with no computable next run has a malformed
+    // schedule_value. updateTaskAfterRun already marked it 'completed'; park it
+    // as 'paused' instead so it reads as "needs repair" rather than "finished",
+    // matching the invalid-group-folder handling above.
+    updateTask(task.id, { status: 'paused' });
+    logger.warn(
+      {
+        taskId: task.id,
+        scheduleType: task.schedule_type,
+        scheduleValue: task.schedule_value,
+      },
+      'Paused recurring task with unparseable schedule value',
+    );
+  }
 }
 
 let schedulerRunning = false;

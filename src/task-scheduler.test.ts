@@ -77,6 +77,50 @@ describe('task scheduler', () => {
     expect(new Date(nextRun!).getTime()).toBe(expected);
   });
 
+  it('computeNextRun stops — not reschedules — a task with an unparseable interval', () => {
+    // The old behaviour returned now + 60_000 and left the task active, i.e.
+    // 1,440 runs/day: the same runaway cost class as the "6h" incident.
+    const task = {
+      id: 'bad-interval',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'interval' as const,
+      schedule_value: 'every 6h',
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+    };
+
+    expect(computeNextRun(task)).toBeNull();
+  });
+
+  it('computeNextRun rejects an out-of-Date-range interval instead of throwing', () => {
+    // '100000000d' multiplies out past the maximum representable Date, so
+    // toISOString() used to throw here, leaving next_run unwritten and the row
+    // permanently due.
+    const task = {
+      id: 'overflow-interval',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'test',
+      schedule_type: 'interval' as const,
+      schedule_value: '100000000d',
+      context_mode: 'isolated' as const,
+      next_run: new Date(Date.now() - 1000).toISOString(),
+      last_run: null,
+      last_result: null,
+      status: 'active' as const,
+      created_at: '2026-01-01T00:00:00.000Z',
+    };
+
+    expect(() => computeNextRun(task)).not.toThrow();
+    expect(computeNextRun(task)).toBeNull();
+  });
+
   it('computeNextRun returns null for once-tasks', () => {
     const task = {
       id: 'once-test',

@@ -7,8 +7,21 @@ The assistant can schedule tasks to run later or on a recurring basis using `sch
 | Type | `schedule_type` | `schedule_value` | Example |
 |------|----------------|-------------------|--------|
 | Cron | `cron` | Cron expression | `0 9 * * 1` (Mondays 9am) |
-| Interval | `interval` | Milliseconds | `3600000` (every hour) |
+| Interval | `interval` | Milliseconds or a unit suffix (`30m`, `6h`, `2d`) | `6h` or `3600000` (every hour) |
 | One-time | `once` | ISO date | `2026-04-15T14:00:00` |
+
+### Interval values
+
+A bare number is milliseconds (`3600000`); a suffixed number uses that unit —
+`ms`, `s`, `m`, `h`, `d`, case-insensitive (`6h`, `30m`, `2d`).
+
+- **Minimum 1 minute.** A single agent run takes ~50s, so a sub-minute interval
+  re-triggers before the previous run finishes. Anything below `60000` ms is
+  rejected outright.
+- **Maximum 365 days.** Longer periods are rejected as typos.
+- **A rejected value is not persisted.** `schedule_task` / `update_task` return
+  an error, and a task that somehow already holds an unparseable interval is
+  **paused** after its next run rather than rescheduled.
 
 ## Scripts (Gate Pattern)
 

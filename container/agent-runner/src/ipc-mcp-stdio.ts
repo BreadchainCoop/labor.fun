@@ -11,6 +11,8 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
+import { parseIntervalMs } from './schedule-interval.js';
+
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
@@ -544,7 +546,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     schedule_value: z
       .string()
       .describe(
-        'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
+        'cron: "*/5 * * * *" | interval: milliseconds like "300000" or a unit like "30m", "6h", "2d" (minimum 1 minute, maximum 365 days) | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
       ),
     context_mode: z
       .enum(['group', 'isolated'])
@@ -582,13 +584,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         };
       }
     } else if (args.schedule_type === 'interval') {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
+      if (parseIntervalMs(args.schedule_value) === null) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).`,
+              text: `Invalid interval: "${args.schedule_value}". Use milliseconds ("300000") or a unit ("30m", "6h", "2d"). Minimum 1 minute, maximum 365 days.`,
             },
           ],
           isError: true,
@@ -810,7 +811,9 @@ server.tool(
     schedule_value: z
       .string()
       .optional()
-      .describe('New schedule value (see schedule_task for format)'),
+      .describe(
+        'New schedule value. cron: "*/5 * * * *" | interval: milliseconds like "300000" or a unit like "30m", "6h", "2d" (minimum 1 minute, maximum 365 days) | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
+      ),
     script: z
       .string()
       .optional()
@@ -841,13 +844,12 @@ server.tool(
       }
     }
     if (args.schedule_type === 'interval' && args.schedule_value) {
-      const ms = parseInt(args.schedule_value, 10);
-      if (isNaN(ms) || ms <= 0) {
+      if (parseIntervalMs(args.schedule_value) === null) {
         return {
           content: [
             {
               type: 'text' as const,
-              text: `Invalid interval: "${args.schedule_value}".`,
+              text: `Invalid interval: "${args.schedule_value}". Use milliseconds ("300000") or a unit ("30m", "6h", "2d"). Minimum 1 minute, maximum 365 days.`,
             },
           ],
           isError: true,

@@ -60,6 +60,7 @@ import { writeOutboundSnapshot } from './container-runner.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import { classifyDeliverability } from './ipc-delivery.js';
 import { logger } from './logger.js';
+import { parseIntervalMs } from './schedule-interval.js';
 import type { DiscordHistoryMessage } from './channels/discord.js';
 import { RegisteredGroup } from './types.js';
 
@@ -1726,8 +1727,8 @@ export async function processTaskIpc(
             break;
           }
         } else if (scheduleType === 'interval') {
-          const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
+          const ms = parseIntervalMs(data.schedule_value);
+          if (ms === null) {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid interval',
@@ -1891,10 +1892,19 @@ export async function processTaskIpc(
               break;
             }
           } else if (updatedTask.schedule_type === 'interval') {
-            const ms = parseInt(updatedTask.schedule_value, 10);
-            if (!isNaN(ms) && ms > 0) {
-              updates.next_run = new Date(Date.now() + ms).toISOString();
+            const ms = parseIntervalMs(updatedTask.schedule_value);
+            if (ms === null) {
+              // Abort the whole update, exactly like the cron branch above.
+              // Skipping only next_run would still persist the bad value at
+              // line ~1872, and the scheduler would then have to deal with a
+              // task whose period is unknowable on every subsequent run.
+              logger.warn(
+                { taskId: data.taskId, value: updatedTask.schedule_value },
+                'Invalid interval in task update',
+              );
+              break;
             }
+            updates.next_run = new Date(Date.now() + ms).toISOString();
           }
         }
 
