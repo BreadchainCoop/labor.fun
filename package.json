@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@onecli-sh/sdk": "^0.2.0",
+    "@poa-box/cli": "^0.1.0",
     "@safe-global/api-kit": "^5.0.1",
     "@safe-global/protocol-kit": "^8.0.1",
     "@slack/bolt": "^4.3.0",

@@ -18,6 +18,10 @@ const STEPS: Record<
   service: () => import('./service.js'),
   verify: () => import('./verify.js'),
   'whatsapp-auth': () => import('./whatsapp-auth.js'),
+  // Optional: connect this profile to a POP org, or deploy a new one. Not part
+  // of the standard onboarding path — an org that does not use POP never runs
+  // it, and nothing else in setup depends on it.
+  'pop-org': () => import('./pop-org.js'),
 };
 
 async function main(): Promise<void> {
