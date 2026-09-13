@@ -16,6 +16,7 @@ import {
   writeOutput,
 } from '../runtime.js';
 import { buildDynamicMcpServers } from '../mcp-servers.js';
+import { isErrorShapedResult } from '../error-shaped-result.js';
 import { Backend, RunQueryArgs, RunQueryResult } from './types.js';
 
 interface SessionEntry {
@@ -444,11 +445,35 @@ export class ClaudeBackend implements Backend {
         log(
           `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
-        writeOutput({
-          status: 'success',
-          result: textResult || null,
-          newSessionId,
-        });
+        // Classify error-shaped \"successes\" as ERRORS. When the model proxy
+        // dies (502/503) or the API refuses a turn, Claude Code exhausts its
+        // internal retries and then emits a result with subtype=success whose
+        // text is the raw failure (\"API Error: 502 error code: 502\"). That
+        // text is not agent output and must never reach a chat. Same for
+        // explicitly non-success subtypes (error_max_turns, ...). The host
+        // treats status=error with no sent output as retryable: it rolls the
+        // message cursor back and re-runs the turn with backoff.
+        const errorShaped =
+          message.subtype !== 'success' ||
+          (!!textResult && isErrorShapedResult(textResult));
+        if (errorShaped) {
+          log(
+            `Result #${resultCount} classified as ERROR (subtype=${message.subtype}); withholding from output`,
+          );
+          writeOutput({
+            status: 'error',
+            result: null,
+            newSessionId,
+            error:
+              textResult || `Claude Code result subtype=${message.subtype}`,
+          });
+        } else {
+          writeOutput({
+            status: 'success',
+            result: textResult || null,
+            newSessionId,
+          });
+        }
       }
     }
 

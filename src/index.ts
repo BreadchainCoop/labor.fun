@@ -93,6 +93,7 @@ import {
   recordPmDm,
   insertApiUsage,
 } from './db.js';
+import { isErrorShapedResult } from './error-shaped-result.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { startEmailPoller } from './email-poller.js';
@@ -500,11 +501,25 @@ async function processChatFlow(
           typeof result.result === 'string'
             ? result.result
             : JSON.stringify(result.result);
+        const text = stripInternalTags(raw);
+        // Same guard as the main chat path (processGroupMessagesInner): an
+        // error-shaped result (a raw API failure or usage-limit notice) is
+        // never handed to the flow, whose reply would carry it to the external
+        // channel. With nothing sent, the error path below rolls the cursor
+        // back for a retry.
+        if (isErrorShapedResult(text)) {
+          hadError = true;
+          logger.error(
+            { chatJid, flow: flow.name, resultText: text.slice(0, 300) },
+            'Error-shaped agent result suppressed (not sent to chat)',
+          );
+          return;
+        }
         // A broken flow must not take down message processing.
         let reply = '';
         try {
           reply = await flow.onAgentResult(
-            stripInternalTags(raw),
+            text,
             triggerMsg,
             chatJid,
             chatFlowHost,
@@ -775,7 +790,20 @@ async function processGroupMessagesInner(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
+      // Never post error-shaped text (e.g. "API Error: 502 error code: 502")
+      // to the chat, even when the runner mislabels it status=success. The
+      // agent-runner classifies these too, but per-group runner copies are
+      // agent-customizable, so the host is the authoritative last line of
+      // defense. Marking hadError (with nothing sent) routes this run into
+      // the existing error path: cursor rollback + group-queue backoff retry,
+      // so the eaten user message gets reprocessed. (2026-08-06 502 incident.)
+      if (text && isErrorShapedResult(text)) {
+        hadError = true;
+        logger.error(
+          { group: group.name, resultText: text.slice(0, 300) },
+          'Error-shaped agent result suppressed (not sent to chat)',
+        );
+      } else if (text) {
         // Anchor the reply to the message that triggered this run so it lands
         // in the right thread even if another message arrived (in a different
         // thread/conversation) while the agent was working. Without this the
@@ -1670,6 +1698,16 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
+      // This only ever carries a PM run's agent result, so it gets the chat
+      // path's guard: an error-shaped result (e.g. a usage-limit notice) is
+      // logged and dropped instead of posted.
+      if (text && isErrorShapedResult(text)) {
+        logger.error(
+          { jid, resultText: text.slice(0, 300) },
+          'Error-shaped PM result suppressed (not sent to chat)',
+        );
+        return;
+      }
       if (text) await channel.sendMessage(jid, text, { standalone: true });
     },
     loadTasks: () => loadPmTasksFromKb(),
