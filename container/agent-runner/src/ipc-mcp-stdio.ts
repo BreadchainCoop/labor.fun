@@ -1725,18 +1725,26 @@ server.tool(
       ),
   },
   async (args) => {
+    const target = resolveTargetJid(args.target_jid, chatJid);
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data = {
       type: 'add_kb_user',
       username: args.username,
       // Channel-agnostic target. When omitted, the orchestrator falls back to
       // the requesting chat (`chatJid`) so delivery works regardless of channel.
-      target_jid: args.target_jid,
+      // An explicit target is sent resolved; an omitted one stays omitted.
+      target_jid: args.target_jid ? target.jid : undefined,
       chatJid,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(MESSAGES_DIR, data);
-    const dest = args.target_jid ? args.target_jid : 'this chat';
+    const dest = target.jid === chatJid ? 'this chat' : target.jid;
     return {
       content: [
         {
