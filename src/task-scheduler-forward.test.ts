@@ -7,6 +7,9 @@ const run = vi.hoisted(() => ({
   status: 'success' as 'success' | 'error',
   result: null as string | null,
   error: undefined as string | undefined,
+  // The stock runner follows every query, a failed one included, with a
+  // { status: 'success', result: null } session-update marker.
+  sessionMarker: true,
   release: undefined as (() => void) | undefined,
 }));
 
@@ -28,14 +31,18 @@ vi.mock('./container-runner.js', () => ({
         result: run.result,
         error: run.error,
       });
+      if (run.sessionMarker) {
+        await onOutput({ status: 'success', result: null });
+      }
       // Like the real runner, the container stays up waiting for more input
       // until the host closes its stdin, or until the ~30.5 min hard timeout.
       await new Promise<void>((resolve) => {
         run.release = resolve;
         setTimeout(resolve, 1_830_000);
       });
-      // Streaming mode: the real runner always finishes with result: null.
-      return { status: run.status, result: null, error: run.error };
+      // Streaming mode: a clean exit resolves with a bare completion marker;
+      // the run's result or error only ever arrives through onOutput.
+      return { status: 'success', result: null };
     },
   ),
 }));
@@ -108,6 +115,7 @@ describe('scheduled task result forwarding', () => {
     run.status = 'success';
     run.result = null;
     run.error = undefined;
+    run.sessionMarker = true;
     run.release = undefined;
   });
 
@@ -165,10 +173,9 @@ describe('scheduled task result forwarding', () => {
     expect(sendMessage).toHaveBeenCalledWith(JID, run.result);
   });
 
-  it('releases the container promptly when the runner itself reports an error', async () => {
+  it('keeps a runner-reported error recorded past the success-status session marker', async () => {
     // The container-side classifier turns a limit notice into status:error
-    // with no result. Without a close, the task container (and the group's
-    // chat, which can't be piped into it) is held until the hard timeout.
+    // with no result, and the stock runner then emits its session marker.
     run.status = 'error';
     run.error = "You've hit your limit · resets 10pm (America/New_York)";
     createDueTask('t-runner-error');
@@ -179,6 +186,26 @@ describe('scheduled task result forwarding', () => {
     expect(queue.closeStdin).toHaveBeenCalledWith(JID);
     expect(sendMessage).not.toHaveBeenCalled();
     expect(getTaskById('t-runner-error')?.last_result).toBe(
+      "Error: You've hit your limit · resets 10pm (America/New_York)",
+    );
+  });
+
+  it("releases the container on a runner error from an agent-customized runner that doesn't emit the session marker", async () => {
+    // The one case the close-on-error branch exists for: with the stock
+    // runner, the session marker after the error already schedules the close.
+    // Without either, the task container (and the group's chat, which can't
+    // be piped into it) is held until the hard timeout.
+    run.sessionMarker = false;
+    run.status = 'error';
+    run.error = "You've hit your limit · resets 10pm (America/New_York)";
+    createDueTask('t-custom-runner-error');
+    const sendMessage = vi.fn(async () => {});
+
+    const queue = await runDueTasks(sendMessage);
+
+    expect(queue.closeStdin).toHaveBeenCalledWith(JID);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(getTaskById('t-custom-runner-error')?.last_result).toBe(
       "Error: You've hit your limit · resets 10pm (America/New_York)",
     );
   });
