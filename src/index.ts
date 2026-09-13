@@ -1698,16 +1698,6 @@ async function main(): Promise<void> {
         return;
       }
       const text = formatOutbound(rawText);
-      // This only ever carries a PM run's agent result, so it gets the chat
-      // path's guard: an error-shaped result (e.g. a usage-limit notice) is
-      // logged and dropped instead of posted.
-      if (text && isErrorShapedResult(text)) {
-        logger.error(
-          { jid, resultText: text.slice(0, 300) },
-          'Error-shaped PM result suppressed (not sent to chat)',
-        );
-        return;
-      }
       if (text) await channel.sendMessage(jid, text, { standalone: true });
     },
     loadTasks: () => loadPmTasksFromKb(),
