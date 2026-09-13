@@ -343,7 +343,8 @@ export function startCredentialProxy(
           {
             hostname: upstreamUrl.hostname,
             port: upstreamUrl.port || (isHttps ? 443 : 80),
-            path: req.url,
+            // Gateways may live below an origin, e.g. /api/anthropic.
+            path: `${upstreamUrl.pathname.replace(/\/+$/, '')}${req.url || '/'}`,
             method: req.method,
             headers,
           } as RequestOptions,

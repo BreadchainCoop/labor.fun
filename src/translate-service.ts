@@ -23,7 +23,7 @@
 import { detectAll } from 'tinyld';
 
 import {
-  ANTHROPIC_API_BASE,
+  anthropicApiBase,
   AnthropicAuth,
   anthropicMessagesHeaders,
   getAnthropicApiKey,
@@ -494,7 +494,7 @@ export async function translateWith(
     }
 
     const postMessages = (apiKey: string) =>
-      fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+      fetch(`${anthropicApiBase()}/v1/messages`, {
         method: 'POST',
         headers: anthropicMessagesHeaders(apiKey),
         body: JSON.stringify({

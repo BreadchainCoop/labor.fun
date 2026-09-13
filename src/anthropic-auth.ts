@@ -64,8 +64,27 @@ export interface AnthropicApiKey {
   mode: AnthropicAuthMode;
 }
 
-/** Public Anthropic API origin used for direct host-process calls. */
+/** Default API origin, used when `ANTHROPIC_BASE_URL` is unset. */
 export const ANTHROPIC_API_BASE = 'https://api.anthropic.com';
+
+/**
+ * The API origin for direct host-process calls.
+ *
+ * Reads `ANTHROPIC_BASE_URL`, the same variable `startCredentialProxy` resolves
+ * its upstream from (credential-proxy.ts), so host and container traffic can
+ * never target different APIs. Defaults to Anthropic when unset.
+ *
+ * Must not be a bare constant: against an Anthropic-compatible gateway (Z.ai
+ * et al.) a hardcoded origin sends the third-party key to api.anthropic.com and
+ * 401s, so containers keep working while translation silently dies.
+ *
+ * Resolved per call, not cached at import, so tests and credential rotation see
+ * the current environment.
+ */
+export function anthropicApiBase(): string {
+  const configured = readSecrets(['ANTHROPIC_BASE_URL']).ANTHROPIC_BASE_URL;
+  return configured ? configured.replace(/\/+$/, '') : ANTHROPIC_API_BASE;
+}
 
 /** `anthropic-version` sent on direct Messages API calls. */
 export const ANTHROPIC_API_VERSION = '2023-06-01';
@@ -254,7 +273,7 @@ interface CreateApiKeyResponse {
 async function exchangeOAuthToken(token: string): Promise<string | null> {
   try {
     const res = await fetch(
-      `${ANTHROPIC_API_BASE}${OAUTH_CREATE_API_KEY_PATH}`,
+      `${anthropicApiBase()}${OAUTH_CREATE_API_KEY_PATH}`,
       {
         method: 'POST',
         headers: {

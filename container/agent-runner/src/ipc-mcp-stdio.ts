@@ -342,7 +342,7 @@ server.tool(
 
 server.tool(
   'send_message',
-  "Send a message to the current chat, OR to a different channel using target_jid. To send cross-channel (e.g. Slack→Telegram), set target_jid to the recipient's JID like 'tg:1234567890'. Without target_jid, the message goes to the current chat. You can call this multiple times.",
+  "Send an EXTRA message, on top of your normal reply — your plain-text turn output is already delivered to the user automatically when you finish, without calling any tool. Do not call this just to answer the current message; that happens for free. Use this only when you need an ADDITIONAL message: sending to a different channel (set target_jid, e.g. Slack→Telegram with a JID like 'tg:1234567890'), or sending a standalone update to the current chat before your turn ends (e.g. \"still working on this\" during a long task). You can call this multiple times. Without target_jid, the message goes to the current chat.",
   {
     text: z.string().describe('The message text to send'),
     target_jid: z
@@ -377,7 +377,7 @@ server.tool(
     // silently). Same-chat sends are routed to the live current chat.
     const text = args.target_jid
       ? `Message queued for delivery to ${args.target_jid}. If it can't be delivered (e.g. that channel isn't connected here), the failure will be reported back in this chat.`
-      : 'Message sent.';
+      : 'Message sent to the current chat. Remember your normal turn-ending reply is delivered separately and automatically — if you have nothing to add, end your turn with no further text (or minimal internal notes) instead of repeating this message.';
     return { content: [{ type: 'text' as const, text }] };
   },
 );

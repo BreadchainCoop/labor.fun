@@ -53,12 +53,14 @@ describe('credential-proxy', () => {
   let proxyPort: number;
   let upstreamPort: number;
   let lastUpstreamHeaders: http.IncomingHttpHeaders;
+  let lastUpstreamPath: string | undefined;
 
   beforeEach(async () => {
     lastUpstreamHeaders = {};
 
     upstreamServer = http.createServer((req, res) => {
       lastUpstreamHeaders = { ...req.headers };
+      lastUpstreamPath = req.url;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -81,6 +83,39 @@ describe('credential-proxy', () => {
     proxyServer = await startCredentialProxy(0);
     return (proxyServer.address() as AddressInfo).port;
   }
+
+  it.each(['', '/', '/api/anthropic', '/api/anthropic/'])(
+    'preserves the upstream base path %j and request query',
+    async (basePath) => {
+      vi.stubEnv(
+        'ANTHROPIC_BASE_URL',
+        `http://127.0.0.1:${upstreamPort}${basePath}`,
+      );
+      vi.stubEnv('ANTHROPIC_API_KEY', 'test-gateway-key');
+      vi.stubEnv('CREDENTIAL_PROXY_AUTH_TOKEN', '');
+      try {
+        proxyServer = await startCredentialProxy(0);
+        proxyPort = (proxyServer.address() as AddressInfo).port;
+        const response = await makeRequest(
+          proxyPort,
+          {
+            method: 'POST',
+            path: '/v1/messages?beta=true',
+            headers: { 'content-type': 'application/json' },
+          },
+          '{}',
+        );
+
+        expect(response.statusCode).toBe(200);
+        expect(lastUpstreamPath).toBe(
+          `${basePath.replace(/\/+$/, '')}/v1/messages?beta=true`,
+        );
+        expect(lastUpstreamHeaders['x-api-key']).toBe('test-gateway-key');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('API-key mode injects x-api-key and strips placeholder', async () => {
     proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });

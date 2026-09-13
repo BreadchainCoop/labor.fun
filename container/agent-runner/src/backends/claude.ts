@@ -233,6 +233,12 @@ export class ClaudeBackend implements Backend {
     let messageCount = 0;
     let resultCount = 0;
 
+    // A same-chat send_message with no other tool use before the final result
+    // means the model used the ack as its whole answer — suppress the redundant
+    // result so it isn't sent twice (see rules/messaging/README.md).
+    let sameChatAckPending = false;
+    let sawToolUseSinceAck = false;
+
     // Load global CLAUDE.md as additional system context (shared across all groups)
     const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
     let globalClaudeMd: string | undefined;
@@ -418,6 +424,30 @@ export class ClaudeBackend implements Backend {
         lastAssistantUuid = (message as { uuid: string }).uuid;
       }
 
+      if (message.type === 'assistant') {
+        const blocks =
+          (
+            message as {
+              message?: {
+                content?: { type?: string; name?: string; input?: unknown }[];
+              };
+            }
+          ).message?.content ?? [];
+        for (const block of blocks) {
+          if (block?.type !== 'tool_use') continue;
+          const isSameChatSend =
+            block.name === 'mcp__nanoclaw__send_message' &&
+            !(block.input as { target_jid?: string } | undefined)
+              ?.target_jid;
+          if (isSameChatSend) {
+            sameChatAckPending = true;
+            sawToolUseSinceAck = false;
+          } else if (sameChatAckPending) {
+            sawToolUseSinceAck = true;
+          }
+        }
+      }
+
       if (message.type === 'system' && message.subtype === 'init') {
         newSessionId = message.session_id;
         log(`Session initialized: ${newSessionId}`);
@@ -444,11 +474,19 @@ export class ClaudeBackend implements Backend {
         log(
           `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
-        writeOutput({
-          status: 'success',
-          result: textResult || null,
-          newSessionId,
-        });
+        if (sameChatAckPending && !sawToolUseSinceAck) {
+          log(
+            `Suppressing result #${resultCount}: a same-chat send_message went out this turn with no other tool use since — the ack already answered, this would double-send`,
+          );
+        } else {
+          writeOutput({
+            status: 'success',
+            result: textResult || null,
+            newSessionId,
+          });
+        }
+        sameChatAckPending = false;
+        sawToolUseSinceAck = false;
       }
     }
 

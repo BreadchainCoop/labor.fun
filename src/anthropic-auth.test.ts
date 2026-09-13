@@ -7,6 +7,7 @@ import {
   EXCHANGED_KEY_TTL_MS,
   EXCHANGE_FAILURE_COOLDOWN_MS,
   OAUTH_CREATE_API_KEY_PATH,
+  anthropicApiBase,
   anthropicAuthHeaders,
   anthropicMessagesHeaders,
   detectAnthropicAuthMode,
@@ -125,6 +126,35 @@ describe('anthropicMessagesHeaders', () => {
   });
 });
 
+// --- Base URL resolution ---
+//
+// Host-process callers must reach the SAME upstream the credential proxy
+// forwards container traffic to (credential-proxy.ts reads the identical
+// ANTHROPIC_BASE_URL). Before this resolver existed the constant was hardcoded,
+// so an Anthropic-compatible third-party key (Z.ai/GLM et al.) worked inside
+// containers while every host-process call 401'd against api.anthropic.com.
+
+describe('anthropicApiBase', () => {
+  it('defaults to the public Anthropic origin when unset', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
+    expect(anthropicApiBase()).toBe(ANTHROPIC_API_BASE);
+    expect(anthropicApiBase()).toBe('https://api.anthropic.com');
+  });
+
+  it('honours ANTHROPIC_BASE_URL so host calls follow the proxy upstream', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic');
+    expect(anthropicApiBase()).toBe('https://api.z.ai/api/anthropic');
+  });
+
+  it('strips trailing slashes so path concatenation stays well-formed', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic///');
+    expect(anthropicApiBase()).toBe('https://api.z.ai/api/anthropic');
+    expect(`${anthropicApiBase()}/v1/messages`).toBe(
+      'https://api.z.ai/api/anthropic/v1/messages',
+    );
+  });
+});
+
 // --- OAuth token → temporary API key exchange ---
 //
 // The protocol under test is the one the credential proxy has always relayed
@@ -147,6 +177,11 @@ describe('getAnthropicApiKey', () => {
 
   beforeEach(() => {
     resetAnthropicApiKeyCache();
+    // The exchange URL is now environment-derived (anthropicApiBase). Stub the
+    // override to '' for the same reason clearCredentials does: readSecrets
+    // falls back to the .env file, and a developer's real ANTHROPIC_BASE_URL
+    // must not rewrite the api.anthropic.com URL asserted below.
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
   });
 
   afterEach(() => {
