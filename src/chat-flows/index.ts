@@ -5,3 +5,4 @@
  * the PluginApi instead — see docs/PLUGINS.md.
  */
 import './membership-intake.js';
+import './community.js';

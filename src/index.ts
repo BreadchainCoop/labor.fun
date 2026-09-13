@@ -528,6 +528,7 @@ async function processChatFlow(
       forceNonPrivileged: true,
       allowedTools: flow.allowedTools,
       systemPromptAppend: flow.systemPrompt,
+      kbScope: flow.kbScope ?? 'none',
     },
   );
 
@@ -917,6 +918,11 @@ async function runAgent(
     allowedTools?: string[];
     /** Append this to the system prompt (e.g. an intake persona). */
     systemPromptAppend?: string;
+    /**
+     * KB scope for a sandboxed chat-flow run. Unset = full KB (normal/privileged
+     * runs). Flows pass `'none'` (no KB) or `'public'` (public subtree only).
+     */
+    kbScope?: 'none' | 'public';
   },
 ): Promise<'success' | 'error'> {
   // Flat-access (cooperative) mode elevates every group to main-equivalent
@@ -975,6 +981,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         allowedTools: opts?.allowedTools,
         systemPromptAppend: opts?.systemPromptAppend,
+        kbScope: opts?.kbScope,
         mcpServers: MCP_SERVERS,
       },
       (proc, containerName) =>
