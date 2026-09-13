@@ -9,6 +9,21 @@
 const CLI_RATE_LIMIT_NOTICE =
   /^(?:(?:you['’]ve hit your (?:(?:session|weekly|opus|sonnet|usage) )?limit|you['’]re out of extra usage)(?:\s*[·∙•]\s*resets\b|\s*$)|opus is experiencing high load\b|claude ai usage limit reached\|\d+)/i;
 
+// This framework's own quota refusals. When src/usage-budget.ts checkQuota()
+// refuses a request, the host's credential proxy (src/credential-proxy.ts)
+// answers it with a 429 whose message is the refusal reason, and the CLI
+// renders that as "API Error: Request rejected (429) · <reason>". Those
+// reasons are deliberate, human-written billing messages, and they are a
+// hosted tenant's only signal that its budget is spent or its workspace is
+// suspended, canceled or out of sync, so they are posted exactly as before
+// rather than withheld and retried. Each alternative is the fixed opening of
+// one checkQuota() reason; src/error-shaped-result-quota.test.ts fails if a
+// reason is reworded without updating this list. Anthropic's own 429s,
+// including the CLI's fallback ("this may be a temporary capacity issue —
+// check status.anthropic.com"), are transient and stay error-shaped.
+const QUOTA_REFUSAL =
+  /^API Error: Request rejected \(429\) · (?:Monthly token budget exceeded|Monthly cost budget exceeded|This workspace is suspended|This workspace subscription is canceled|Entitlement information is stale)/;
+
 /**
  * Detect "error-shaped" agent results: text a runner emitted as a SUCCESS
  * result whose content is actually a raw API/proxy failure, e.g.
@@ -40,10 +55,13 @@ const CLI_RATE_LIMIT_NOTICE =
  *    hearts" still goes out. Receipt: on 2026-09-11, "You've hit your limit
  *    · resets 10pm (America/New_York)" was posted verbatim into a group chat,
  *    by chat replies and a scheduled task alike.
+ *  - the framework's own budget and entitlement refusals are never
+ *    error-shaped, even though they lead with "API Error" (see QUOTA_REFUSAL).
  */
 export function isErrorShapedResult(text: string): boolean {
   const t = text.trim();
   if (t.length === 0) return false;
+  if (QUOTA_REFUSAL.test(t)) return false;
   if (/^API Error(?:: | \([^)]*\): |$)/.test(t)) return true;
   if (/^Request timed out$/.test(t)) return true;
   if (/^(?:\d{3} )?error code: \d{3}$/i.test(t)) return true;
