@@ -445,10 +445,10 @@ export class ClaudeBackend implements Backend {
         log(
           `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
-        // Classify error-shaped \"successes\" as ERRORS. When the model proxy
+        // Classify error-shaped "successes" as ERRORS. When the model proxy
         // dies (502/503) or the API refuses a turn, Claude Code exhausts its
         // internal retries and then emits a result with subtype=success whose
-        // text is the raw failure (\"API Error: 502 error code: 502\"). That
+        // text is the raw failure ("API Error: 502 error code: 502"). That
         // text is not agent output and must never reach a chat. Same for
         // explicitly non-success subtypes (error_max_turns, ...). The host
         // treats status=error with no sent output as retryable: it rolls the
