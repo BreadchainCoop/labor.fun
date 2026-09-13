@@ -30,8 +30,45 @@ describe('isErrorShapedResult', () => {
     expect(isErrorShapedResult('502 error code: 502')).toBe(true);
   });
 
-  it('is case-insensitive on the API Error prefix', () => {
-    expect(isErrorShapedResult('api error: 502')).toBe(true);
+  it('classifies the "API Error" templates the bundled CLI leads with', () => {
+    expect(isErrorShapedResult('API Error')).toBe(true);
+    expect(
+      isErrorShapedResult(
+        'API Error (claude-opus-4-1): model not found. Run /model to pick a different model.',
+      ),
+    ).toBe(true);
+    expect(isErrorShapedResult('API Error (claude-opus-5): Overloaded')).toBe(
+      true,
+    );
+    expect(
+      isErrorShapedResult(
+        'API Error: Request rejected (429) · this may be a temporary capacity issue — check status.anthropic.com',
+      ),
+    ).toBe(true);
+  });
+
+  it('does NOT flag a lowercase "api error" prefix, which the CLI never emits', () => {
+    expect(isErrorShapedResult('api error: 502')).toBe(false);
+  });
+
+  it("does NOT flag the CLI's auth-failure templates, which stay visible by design", () => {
+    expect(
+      isErrorShapedResult(
+        'Failed to authenticate. API Error: 401 {"type":"error"}',
+      ),
+    ).toBe(false);
+  });
+
+  it('classifies the bare "Request timed out" result the CLI emits as an error', () => {
+    expect(isErrorShapedResult('Request timed out')).toBe(true);
+  });
+
+  it('does NOT flag a reply that only starts like the timeout result', () => {
+    expect(
+      isErrorShapedResult(
+        "Request timed out while fetching the sheet, so i used yesterday's copy",
+      ),
+    ).toBe(false);
   });
 
   it('does NOT flag normal replies', () => {
@@ -40,6 +77,20 @@ describe('isErrorShapedResult', () => {
     );
     expect(isErrorShapedResult('')).toBe(false);
     expect(isErrorShapedResult('   ')).toBe(false);
+  });
+
+  it('does NOT flag short replies that mention an error code or API errors', () => {
+    expect(
+      isErrorShapedResult(
+        'The webhook returned error code 404, so I recreated it.',
+      ),
+    ).toBe(false);
+    expect(isErrorShapedResult('API error rates look normal.')).toBe(false);
+    expect(
+      isErrorShapedResult(
+        'API Error (500) on /checkout is back to normal after the deploy.',
+      ),
+    ).toBe(false);
   });
 
   it('does NOT flag long replies that merely quote an error string', () => {

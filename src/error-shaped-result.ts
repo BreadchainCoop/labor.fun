@@ -20,10 +20,21 @@ const CLI_RATE_LIMIT_NOTICE =
  * production deployment delivered the raw 502 text verbatim to a user's DM.
  *
  * Kept deliberately conservative to avoid swallowing legitimate replies that
- * merely QUOTE an error string:
- *  - "API Error" must lead the text (the SDK emits it as a prefix), or
- *  - "error code: NNN" matches only when the whole text is short enough to
- *    plainly be an error blob rather than prose.
+ * merely QUOTE or discuss an error:
+ *  - "API Error" matches only as the CLI's own prefix: case-sensitive, leading
+ *    the text, and followed by ": " ("API Error: …"), by " (<model>): " (the
+ *    Bedrock model-id template) or by nothing. "API error rates look normal."
+ *    and "API Error (500) on /checkout is back to normal after the deploy."
+ *    still go out. The CLI's auth-failure templates, which put "API Error"
+ *    mid-string ("Failed to authenticate. API Error: …", "Please run /login ·
+ *    API Error: …"), are deliberately left unmatched: they are permanent and
+ *    actionable, so they stay visible.
+ *  - "Request timed out" matches only as the whole text, the CLI's bare
+ *    transient timeout result, so "Request timed out while fetching the
+ *    sheet, …" still goes out.
+ *  - "error code: NNN" matches only as the whole text ("error code: 502",
+ *    "502 error code: 502"), never inside a sentence, so "The webhook
+ *    returned error code 404, so I recreated it." still goes out.
  *  - rate-limit notices match only in the shapes the bundled CLI builds (see
  *    CLI_RATE_LIMIT_NOTICE), so a reply like "you've hit your limit of 10
  *    hearts" still goes out. Receipt: on 2026-09-11, "You've hit your limit
@@ -33,8 +44,9 @@ const CLI_RATE_LIMIT_NOTICE =
 export function isErrorShapedResult(text: string): boolean {
   const t = text.trim();
   if (t.length === 0) return false;
-  if (/^API Error\b/i.test(t)) return true;
-  if (t.length <= 300 && /\berror code:? \d{3}\b/i.test(t)) return true;
+  if (/^API Error(?:: | \([^)]*\): |$)/.test(t)) return true;
+  if (/^Request timed out$/.test(t)) return true;
+  if (/^(?:\d{3} )?error code: \d{3}$/i.test(t)) return true;
   if (t.length <= 300 && CLI_RATE_LIMIT_NOTICE.test(t)) return true;
   return false;
 }
