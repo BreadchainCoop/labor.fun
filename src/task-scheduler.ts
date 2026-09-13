@@ -22,9 +22,11 @@ import {
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
+import { isErrorShapedResult } from './error-shaped-result.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { stripInternalTags } from './router.js';
 import { parseIntervalMs } from './schedule-interval.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
@@ -200,15 +202,31 @@ async function runTask(
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
-          // Always record the result for the run log / audit trail, but only
-          // post it to the channel when the task's delivery mode allows it.
-          // 'silent' tasks (private reminders / DM-only work) suppress the
-          // narration so it can't leak into the bound chat/thread — the real
-          // output goes out via dm_user/send_message during the run. See #46.
-          result = streamedOutput.result;
-          if (shouldNarrateToChannel(task.delivery)) {
-            // Forward result to user (sendMessage handles formatting)
-            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          const visible = stripInternalTags(streamedOutput.result);
+          // Same last line of defense as the chat path (index.ts): never post
+          // error-shaped text such as a usage-limit notice, even when the
+          // runner labelled it success. Per-group runner copies are
+          // agent-customizable, so the container-side classifier alone isn't
+          // enough. Recording it as the run's error keeps last_result honest,
+          // whatever the task's delivery mode. (2026-09-11: a scheduled task
+          // posted "You've hit your limit · resets 10pm" into a group chat.)
+          if (visible && isErrorShapedResult(visible)) {
+            error = visible.slice(0, 300);
+            logger.error(
+              { taskId: task.id, resultText: visible.slice(0, 300) },
+              'Error-shaped task result suppressed (not sent to chat)',
+            );
+          } else {
+            // Always record the result for the run log / audit trail, but only
+            // post it to the channel when the task's delivery mode allows it.
+            // 'silent' tasks (private reminders / DM-only work) suppress the
+            // narration so it can't leak into the bound chat/thread — the real
+            // output goes out via dm_user/send_message during the run. See #46.
+            result = streamedOutput.result;
+            if (shouldNarrateToChannel(task.delivery)) {
+              // Forward result to user (sendMessage handles formatting)
+              await deps.sendMessage(task.chat_jid, streamedOutput.result);
+            }
           }
           scheduleClose();
         }
@@ -218,6 +236,10 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
+          // A task run is single-turn, so nothing follows an error: release
+          // the container now rather than at the ~30 min hard timeout. Until
+          // it exits, the group's chat can't be piped into a task container.
+          scheduleClose();
         }
       },
     );
