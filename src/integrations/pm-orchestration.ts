@@ -29,6 +29,7 @@ import {
 } from '../config.js';
 import { ContainerOutput, runContainerAgent } from '../container-runner.js';
 import { getRecentPmDms, recordPmDm } from '../db.js';
+import { isErrorShapedResult } from '../error-shaped-result.js';
 import { GroupQueue } from '../group-queue.js';
 import { logger } from '../logger.js';
 import {
@@ -39,6 +40,7 @@ import {
   type DmCandidate,
   type PmTask,
 } from '../pm-orchestration.js';
+import { stripInternalTags } from '../router.js';
 import { RegisteredGroup } from '../types.js';
 
 const DAY_MS = 86_400_000;
@@ -170,11 +172,33 @@ export async function runPmOrchestrationTick(
           deps.onProcess(jid, proc, containerName, group.folder),
         async (out: ContainerOutput) => {
           if (out.result) {
-            await deps.sendMessage(jid, out.result);
+            const visible = stripInternalTags(out.result);
+            // Same last line of defense as the chat path (index.ts) and the
+            // scheduler (task-scheduler.ts): never post error-shaped text
+            // such as a usage-limit notice, even when the runner labelled it
+            // success. Per-group runner copies are agent-customizable, so the
+            // container-side classifier alone isn't enough. A PM run has no
+            // message cursor to roll back, so the result is just dropped.
+            if (isErrorShapedResult(visible)) {
+              logger.error(
+                { jid, resultText: visible.slice(0, 300) },
+                'Error-shaped PM result suppressed (not sent to chat)',
+              );
+            } else {
+              await deps.sendMessage(jid, out.result);
+            }
             scheduleClose();
           }
           if (out.status === 'success') {
             deps.queue.notifyIdle(jid);
+            scheduleClose();
+          }
+          if (out.status === 'error') {
+            // Defense in depth for agent-customized runners. The stock runner
+            // follows every query, a failed one included, with a
+            // { status: 'success', result: null } session marker, which
+            // already schedules the close above; a runner that doesn't would
+            // hold the container until its hard timeout.
             scheduleClose();
           }
         },

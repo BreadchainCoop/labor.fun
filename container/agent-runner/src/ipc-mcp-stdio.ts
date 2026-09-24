@@ -12,6 +12,7 @@ import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
 import { parseIntervalMs } from './schedule-interval.js';
+import { resolveTargetJid } from './target-jid.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -349,7 +350,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        'Target channel JID for cross-channel messaging. Examples: "tg:1234567890" (Telegram), "slack:CXXXXXXXXX" (Slack). Omit to send to current chat. Allowlisted senders may send cross-channel from any registered group.',
+        'Target channel JID for cross-channel messaging. Must carry its platform prefix: "tg:-1001234567890" (Telegram group), "tg:1234567890" (Telegram DM), "slack:CXXXXXXXXX" (Slack). A bare id like "-1001234567890" is rejected. Omit to send to the current chat. Allowlisted senders may send cross-channel from any registered group.',
       ),
     sender: z
       .string()
@@ -359,9 +360,16 @@ server.tool(
       ),
   },
   async (args) => {
+    const target = resolveTargetJid(args.target_jid, chatJid);
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data: Record<string, string | undefined> = {
       type: 'message',
-      chatJid: args.target_jid || chatJid,
+      chatJid: target.jid,
       text: args.text,
       sender: args.sender || undefined,
       groupFolder,
@@ -375,9 +383,10 @@ server.tool(
     // don't over-promise: the orchestrator surfaces any delivery failure back
     // into this chat (see issue #95 — undeliverable sends used to vanish
     // silently). Same-chat sends are routed to the live current chat.
-    const text = args.target_jid
-      ? `Message queued for delivery to ${args.target_jid}. If it can't be delivered (e.g. that channel isn't connected here), the failure will be reported back in this chat.`
-      : 'Message sent.';
+    const text =
+      target.jid === chatJid
+        ? 'Message sent.'
+        : `Message queued for delivery to ${target.jid}. If it can't be delivered (e.g. that channel isn't connected here), the failure will be reported back in this chat.`;
     return { content: [{ type: 'text' as const, text }] };
   },
 );
@@ -397,9 +406,16 @@ server.tool(
       ),
   },
   async (args) => {
+    const target = resolveTargetJid(args.target_jid, chatJid);
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data = {
       type: 'delete_message',
-      chatJid: args.target_jid || chatJid,
+      chatJid: target.jid,
       messageId: args.message_id,
       groupFolder,
       timestamp: new Date().toISOString(),
@@ -432,9 +448,16 @@ server.tool(
       ),
   },
   async (args) => {
+    const target = resolveTargetJid(args.target_jid, chatJid);
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data = {
       type: 'edit_message',
-      chatJid: args.target_jid || chatJid,
+      chatJid: target.jid,
       messageId: args.message_id,
       text: args.text,
       groupFolder,
@@ -633,8 +656,21 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     }
 
     // Non-main groups can only schedule for themselves
-    const targetJid =
-      isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+    let targetJid = chatJid;
+    if (isMain && args.target_group_jid) {
+      const target = resolveTargetJid(
+        args.target_group_jid,
+        chatJid,
+        'target_group_jid',
+      );
+      if (!target.ok) {
+        return {
+          content: [{ type: 'text' as const, text: target.error }],
+          isError: true,
+        };
+      }
+      targetJid = target.jid;
+    }
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1689,18 +1725,26 @@ server.tool(
       ),
   },
   async (args) => {
+    const target = resolveTargetJid(args.target_jid, chatJid);
+    if (!target.ok) {
+      return {
+        content: [{ type: 'text' as const, text: target.error }],
+        isError: true,
+      };
+    }
     const data = {
       type: 'add_kb_user',
       username: args.username,
       // Channel-agnostic target. When omitted, the orchestrator falls back to
       // the requesting chat (`chatJid`) so delivery works regardless of channel.
-      target_jid: args.target_jid,
+      // An explicit target is sent resolved; an omitted one stays omitted.
+      target_jid: args.target_jid ? target.jid : undefined,
       chatJid,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
     writeIpcFile(MESSAGES_DIR, data);
-    const dest = args.target_jid ? args.target_jid : 'this chat';
+    const dest = target.jid === chatJid ? 'this chat' : target.jid;
     return {
       content: [
         {
