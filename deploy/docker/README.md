@@ -55,8 +55,19 @@ agent turn from timing out while several GB download.
 
 Create a **Docker Compose** resource pointing at
 `deploy/docker/docker-compose.yaml`, then paste the `.env.example` keys into the
-UI's environment editor. Real environment variables take precedence over the
-mounted `.env`, so the UI stays authoritative.
+UI's environment editor. A UI variable reaches the orchestrator's environment
+only if this compose file references it as `${VAR}`; everything else — the
+Anthropic credential and channel tokens included — is read from the mounted
+`.env`. After the first deploy, confirm it resolved to a file:
+
+```bash
+docker exec <orchestrator-container> grep -c = /app/.env
+```
+
+Coolify rewrites names. Named volumes become `<uuid>_<name>`, so seed the
+profile into the names shown under *Configuration → Persistent Storage* rather
+than `labor_labor-profiles`. If the orchestrator's container name differs from
+`labor-orchestrator`, set `DOCKER_SELF_CONTAINER` to it.
 
 Two things still have to happen on the host over SSH: seeding the profile
 volume (above) and, if you use the KB dashboard, writing
@@ -96,8 +107,9 @@ in this compose backs them up. Checkpoint the DB before copying it, or the
 tarball can catch a torn write:
 
 ```bash
-docker exec labor-orchestrator sh -c \
-  'sqlite3 /app/profiles/$LABOR_PROFILE/store/messages.db "PRAGMA wal_checkpoint(TRUNCATE);"'
+# The orchestrator image ships the better-sqlite3 binding, not the sqlite3 CLI.
+docker run --rm -v labor_labor-store:/s alpine:3.20 \
+  sh -c 'apk add -q sqlite && sqlite3 /s/messages.db "PRAGMA wal_checkpoint(TRUNCATE);"'
 docker run --rm -v labor_labor-profiles:/p -v labor_labor-store:/s -v labor_labor-data:/d \
   -v "$PWD:/out" alpine:3.20 tar czf /out/labor-backup-$(date -u +%Y%m%d).tar.gz /p /s /d
 ```
