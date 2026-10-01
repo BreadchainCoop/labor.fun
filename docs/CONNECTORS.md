@@ -114,6 +114,89 @@ GOOGLE_WORKSPACE_CREDENTIALS_FILE=/home/breadbrich/.config/gws/credentials.json
 GOOGLE_DRIVE_FOLDER_IDS=0AbCdEf…,1GhIjKl…
 ```
 
+### Google Calendar
+
+Mirrors calendar events into the KB as **one doc per occurrence**, so "what are
+we doing Thursday" is answerable with the same per-doc RBAC, search, and
+citations as a wiki page. Auth **reuses the same Google Workspace credentials**
+as the Drive connector — you do not configure Google auth twice.
+
+| Env | Required | Default | Meaning |
+|---|---|---|---|
+| `GOOGLE_WORKSPACE_CREDENTIALS_FILE` | yes | — | Path to the Google Workspace OAuth credentials JSON (the same one the `gws` MCP uses). Needs Calendar **read** scope. The connector stays off unless this resolves to a real file. |
+| `GOOGLE_CALENDAR_IDS` | one of these | — | Comma-separated calendar ids to mirror (`primary`, a `…@group.calendar.google.com` id, or a user's address). Listed order is a **precedence order**: when the same meeting sits on two of them, the first one listed wins. |
+| `GOOGLE_WORKSPACE_CALENDAR_ID` | one of these | — | Already used to point the agent's `gws` Calendar tools at a calendar; reused as the default scope so an install that has named its calendar once doesn't name it again. `GOOGLE_CALENDAR_IDS` overrides it. |
+| `GOOGLE_CALENDAR_WINDOW_PAST_DAYS` | no | `90` | Days of history mirrored, counted back from each run's start. `0` means "no history"; a non-numeric value falls back to the default. |
+| `GOOGLE_CALENDAR_WINDOW_FUTURE_DAYS` | no | `180` | Days of look-ahead mirrored. `0` means "no look-ahead". |
+| `GOOGLE_CALENDAR_DEFAULT_VISIBILITY` | no | `restricted` | Overrides the default `visibility` frontmatter for every doc this connector syncs (see "Visibility defaults" below). One of `open` / `restricted` / `private`; an unrecognized value is ignored and the safe default is kept. An event body names who is meeting whom and when, so the not-world-open default matters more here than for a document connector. |
+
+A calendar is unbounded in both directions, so unlike a Drive folder its scope
+needs an explicit horizon — that's what the two window vars are. The window is
+anchored to each run's start, so it slides forward every tick: events that
+scroll off the back leave the KB through the normal reconcile pass.
+
+The connector lists each calendar via the Calendar REST API with
+`singleEvents=true`, so a recurring series is **expanded into its individual
+occurrences** (without it a weekly meeting would appear in the KB once, as a
+recurrence rule). Each occurrence's own stable id becomes the doc id, so it
+upserts the same file week after week. An occurrence Google reports as
+`status: cancelled` is skipped, which makes it a deletion on the next complete
+run. `source_url` is the event's `htmlLink`. All event text (summary, location,
+description, attendee names) is HTML-escaped so a calendar entry can't inject
+markup into the dashboard. **Full pull every run**: every configured calendar is
+re-listed each tick, paginated to the end.
+
+A `401` mid-run re-reads the credentials file once and retries, rather than
+throwing away the remaining calendars over one token that died before its stated
+expiry. A credential that keeps failing is a **standing condition, not an
+incident**: the run reports an incomplete pull (so nothing is reconciled away)
+and logs at most one warning per hour, not one per calendar per tick.
+
+Each occurrence's doc adds these fields to the standard frontmatter, as the raw
+strings the API sent:
+
+```yaml
+calendar_id: team@group.calendar.google.com
+event_id: abc123_20260604T163000Z   # also the filename stem
+event_start: '2026-06-04'           # or an RFC3339 dateTime for a timed event
+event_end: '2026-06-05'
+all_day: true
+recurring_event_id: abc123          # only on an expanded recurring instance
+```
+
+…and a fixed body layout:
+
+```markdown
+# Quarterly planning
+
+**When:** 2026-06-04 (all day)
+**Where:** Room 2
+**Calendar:** Team calendar
+**Organizer:** Alice (alice@example.com)
+**Attendees:** Alice (alice@example.com), bob@example.com, +5 more
+
+…the event description…
+```
+
+All-day dates are rendered from the bare `start.date` / `end.date` **strings**
+and never routed through a `Date` — doing so prints the previous day in every
+negative-offset timezone. Google's all-day `end.date` is **exclusive**, so the
+rendered span uses the inclusive last day (a one-day event shows one date, not
+two). Timed events are rendered from the wall-clock portion of their RFC3339
+stamp, labelled with the event's own timezone (else the calendar's), so the
+reading is the one the attendees see rather than whatever zone the orchestrator
+runs in. Rooms and equipment are filtered out of the attendee list, and
+attendees past the first 25 are summarized as a count.
+
+Enable example (`.env`):
+
+```
+GOOGLE_WORKSPACE_CREDENTIALS_FILE=/path/to/gws/credentials.json
+GOOGLE_CALENDAR_IDS=primary,team@group.calendar.google.com
+GOOGLE_CALENDAR_WINDOW_PAST_DAYS=30
+GOOGLE_CALENDAR_WINDOW_FUTURE_DAYS=120
+```
+
 ### Confluence
 
 Mirrors Confluence Cloud wiki pages. Auth is **Basic** (`email:api-token`) with
