@@ -7,12 +7,14 @@ import {
   EXCHANGED_KEY_TTL_MS,
   EXCHANGE_FAILURE_COOLDOWN_MS,
   OAUTH_CREATE_API_KEY_PATH,
+  anthropicApiBase,
   anthropicAuthHeaders,
   anthropicMessagesHeaders,
   detectAnthropicAuthMode,
   getAnthropicApiKey,
   invalidateAnthropicApiKey,
   isAnthropicOAuthExchangeDegraded,
+  oauthAllowedFor,
   resetAnthropicApiKeyCache,
   resolveAnthropicAuth,
 } from './anthropic-auth.js';
@@ -125,12 +127,63 @@ describe('anthropicMessagesHeaders', () => {
   });
 });
 
+// --- Base URL resolution ---
+//
+// Host-process callers must reach the SAME upstream the credential proxy
+// forwards container traffic to (credential-proxy.ts reads the identical
+// ANTHROPIC_BASE_URL). Before this resolver existed the constant was hardcoded,
+// so an Anthropic-compatible third-party key (Z.ai/GLM et al.) worked inside
+// containers while every host-process call 401'd against api.anthropic.com.
+
+describe('anthropicApiBase', () => {
+  it('defaults to the public Anthropic origin when unset', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
+    expect(anthropicApiBase()).toBe(ANTHROPIC_API_BASE);
+    expect(anthropicApiBase()).toBe('https://api.anthropic.com');
+  });
+
+  it('honours ANTHROPIC_BASE_URL so host calls follow the proxy upstream', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic');
+    expect(anthropicApiBase()).toBe('https://api.z.ai/api/anthropic');
+  });
+
+  it('strips trailing slashes so path concatenation stays well-formed', () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic///');
+    expect(anthropicApiBase()).toBe('https://api.z.ai/api/anthropic');
+    expect(`${anthropicApiBase()}/v1/messages`).toBe(
+      'https://api.z.ai/api/anthropic/v1/messages',
+    );
+  });
+});
+
 // --- OAuth token → temporary API key exchange ---
 //
 // The protocol under test is the one the credential proxy has always relayed
 // for container traffic (credential-proxy.ts header block + its OAuth test):
 // POST /api/oauth/claude_cli/create_api_key authenticated with the Bearer
 // OAuth token, returning a temp API key used as x-api-key afterwards.
+
+describe('oauthAllowedFor', () => {
+  it.each([
+    'https://api.anthropic.com',
+    'https://api.anthropic.com/',
+    'http://localhost:8080',
+    'http://127.0.0.1:3001',
+    'http://[::1]:3001',
+  ])('allows %s', (base) => {
+    expect(oauthAllowedFor(base)).toBe(true);
+  });
+
+  it.each([
+    'https://api.z.ai/api/anthropic',
+    'https://anthropic.com.evil.example',
+    'https://notanthropic.com',
+    'http://10.0.0.5:3001',
+    'not a url',
+  ])('refuses %s', (base) => {
+    expect(oauthAllowedFor(base)).toBe(false);
+  });
+});
 
 describe('getAnthropicApiKey', () => {
   const OAUTH: { mode: 'oauth'; token: string } = {
@@ -147,6 +200,10 @@ describe('getAnthropicApiKey', () => {
 
   beforeEach(() => {
     resetAnthropicApiKeyCache();
+    // OAuth is refused behind a non-Anthropic ANTHROPIC_BASE_URL. Stub it to ''
+    // for the same reason clearCredentials does: readSecrets falls back to the
+    // .env file, and a developer's real gateway URL must not disable OAuth here.
+    vi.stubEnv('ANTHROPIC_BASE_URL', '');
   });
 
   afterEach(() => {
@@ -189,6 +246,26 @@ describe('getAnthropicApiKey', () => {
     expect(headers['authorization']).toBe('Bearer sk-ant-oat01-secret');
     expect(headers['anthropic-beta']).toBe(ANTHROPIC_OAUTH_BETA);
     expect(headers['x-api-key']).toBeUndefined();
+  });
+
+  it('exchanges with Anthropic even when ANTHROPIC_BASE_URL points elsewhere', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'http://127.0.0.1:9999');
+    const fetchMock = mockExchange();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getAnthropicApiKey(OAUTH);
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe(`${ANTHROPIC_API_BASE}${OAUTH_CREATE_API_KEY_PATH}`);
+  });
+
+  it('refuses OAuth behind a third-party gateway without contacting anything', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic');
+    const fetchMock = mockExchange();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getAnthropicApiKey(OAUTH)).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('caches the exchanged key: a second call does not re-exchange', async () => {

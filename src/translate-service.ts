@@ -23,7 +23,7 @@
 import { detectAll } from 'tinyld';
 
 import {
-  ANTHROPIC_API_BASE,
+  anthropicApiBase,
   AnthropicAuth,
   anthropicMessagesHeaders,
   getAnthropicApiKey,
@@ -36,6 +36,7 @@ import {
   LOCAL_LLM_BASE_URL,
   LOCAL_LLM_MODEL,
   NANOCLAW_BACKEND,
+  TRANSLATE_MODEL,
 } from './config.js';
 import { logger } from './logger.js';
 
@@ -347,7 +348,6 @@ function userPrompt(text: string, target: Language): string {
 }
 
 const TRANSLATE_TIMEOUT_MS = 20_000;
-const ANTHROPIC_TRANSLATE_MODEL = 'claude-haiku-4-5-20251001';
 
 export type TranslateProvider =
   | {
@@ -494,11 +494,11 @@ export async function translateWith(
     }
 
     const postMessages = (apiKey: string) =>
-      fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+      fetch(`${anthropicApiBase()}/v1/messages`, {
         method: 'POST',
         headers: anthropicMessagesHeaders(apiKey),
         body: JSON.stringify({
-          model: ANTHROPIC_TRANSLATE_MODEL,
+          model: TRANSLATE_MODEL,
           max_tokens: 1024,
           temperature: 0.3,
           system: SYSTEM_PROMPT,

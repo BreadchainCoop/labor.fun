@@ -11,6 +11,8 @@ The open-source mode runs agent turns against an **OpenAI-compatible** chat-comp
 
 Hosted Anthropic remains the **default** and is unchanged. You opt into open-source mode explicitly (env below); nothing about the Claude path changes unless you do.
 
+A third option sits outside this table: keeping the `claude` backend and its full skill/MCP surface while pointing it at an **Anthropic-compatible gateway** such as Z.ai's GLM endpoint. That is proxy-upstream config, not a backend switch. See [ANTHROPIC-COMPATIBLE-GATEWAYS.md](ANTHROPIC-COMPATIBLE-GATEWAYS.md).
+
 ## What NEAR AI gives you
 
 NEAR AI Cloud serves open-weight models (Llama, Qwen, DeepSeek, Mixtral, …) inside an **Intel TDX + NVIDIA confidential-GPU enclave**. Data stays encrypted _in use_, not just at rest and in transit, and every response is backed by a verifiable hardware quote binding the exact code and weights that served it. The API is OpenAI-compatible, so labor.fun's existing OpenAI-compatible backend drives it directly.

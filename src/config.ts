@@ -105,6 +105,7 @@ const envConfig = readEnvFile([
   // `default` tier always follows NANOCLAW_MODEL.
   'LABOR_TIER_CHEAP_MODEL',
   'LABOR_TIER_STRONG_MODEL',
+  'TRANSLATE_MODEL',
   // Opt-in message-retention sweeper (src/retention.ts). Both default 0 = OFF
   // (today's keep-everything behavior, byte-identical). See docs/TEE.md
   // "Privacy posture".
@@ -992,6 +993,21 @@ export const LABOR_TIER_CHEAP_MODEL =
   envVal('LABOR_TIER_CHEAP_MODEL') || undefined;
 export const LABOR_TIER_STRONG_MODEL =
   envVal('LABOR_TIER_STRONG_MODEL') || undefined;
+/**
+ * Model for the pre-agent translation service. Falls back to the cheap tier so
+ * a deploy behind an Anthropic-compatible gateway, which must repoint the tiers
+ * anyway, doesn't keep requesting a Claude model the gateway may not serve.
+ */
+export function resolveTranslateModel(
+  explicit: string | undefined,
+  cheapTier: string | undefined,
+): string {
+  return explicit || cheapTier || 'claude-haiku-4-5-20251001';
+}
+export const TRANSLATE_MODEL = resolveTranslateModel(
+  envVal('TRANSLATE_MODEL'),
+  LABOR_TIER_CHEAP_MODEL,
+);
 
 // --- Pre-agent chat-command rate limiting (src/chat-commands.ts) ---
 // Sliding-window throttle keyed on (chatJid, sender, command prefix), applied

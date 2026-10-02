@@ -108,6 +108,43 @@ describe('model-pricing', () => {
       });
     });
 
+    it('falls back to the mounted .env when the variable is not in the environment', async () => {
+      delete process.env.MODEL_PRICING_JSON;
+      vi.doMock('./env.js', () => ({
+        readEnvFile: () => ({
+          MODEL_PRICING_JSON: JSON.stringify({
+            glm: { input: 0.6, output: 2.2, cacheWrite: 0.6, cacheRead: 0.11 },
+          }),
+        }),
+      }));
+      try {
+        const { resolvePricing } = await import('./model-pricing.js');
+        expect(resolvePricing('glm-5.3')).toEqual({
+          input: 0.6,
+          output: 2.2,
+          cacheWrite: 0.6,
+          cacheRead: 0.11,
+        });
+      } finally {
+        vi.doUnmock('./env.js');
+      }
+    });
+
+    it('prefers the environment over the mounted .env', async () => {
+      process.env.MODEL_PRICING_JSON = JSON.stringify({ glm: { input: 9 } });
+      vi.doMock('./env.js', () => ({
+        readEnvFile: () => ({
+          MODEL_PRICING_JSON: JSON.stringify({ glm: { input: 1 } }),
+        }),
+      }));
+      try {
+        const { resolvePricing } = await import('./model-pricing.js');
+        expect(resolvePricing('glm-5.3').input).toBe(9);
+      } finally {
+        vi.doUnmock('./env.js');
+      }
+    });
+
     it('ignores invalid JSON and falls back to built-in pricing', async () => {
       process.env.MODEL_PRICING_JSON = '{not valid json';
       const { resolvePricing } = await import('./model-pricing.js');

@@ -81,6 +81,30 @@ describe('SIGNAL_AUTO_REGISTER_GROUPS', () => {
   });
 });
 
+describe('resolveTranslateModel', () => {
+  let resolveTranslateModel: ConfigModule['resolveTranslateModel'];
+
+  beforeAll(async () => {
+    ({ resolveTranslateModel } = await import('./config.js'));
+  });
+
+  it('defaults to Claude Haiku', () => {
+    expect(resolveTranslateModel(undefined, undefined)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+  });
+
+  it('follows the cheap tier so a gateway deploy needs no extra setting', () => {
+    expect(resolveTranslateModel(undefined, 'glm-5.3-flash')).toBe(
+      'glm-5.3-flash',
+    );
+  });
+
+  it('lets TRANSLATE_MODEL override the cheap tier', () => {
+    expect(resolveTranslateModel('glm-5.3', 'glm-5.3-flash')).toBe('glm-5.3');
+  });
+});
+
 describe('parseIdleTimeoutMs', () => {
   let parseIdleTimeoutMs: ConfigModule['parseIdleTimeoutMs'];
 
