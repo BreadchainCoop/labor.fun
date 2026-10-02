@@ -95,8 +95,10 @@ services:
       # dropped. The command above links /app/.env to the .env beside this file.
       # This mounts the directory, not the file: container UIs generate .env
       # only at deploy time, so a file mount's source doesn't exist yet when
-      # they parse this compose, and they pre-create it as a directory.
-      - .:/app/host-config:ro
+      # they parse this compose, and they pre-create it as a directory. Written
+      # `./`, not `.`: some UIs only treat a source starting with ./ / or ~ as a
+      # host path and turn a bare `.` into an empty named volume.
+      - ./:/app/host-config:ro
       # All durable state, including the profile's store/ (SQLite) and data/
       # (sessions, IPC). One volume because the code derives those paths from
       # the profile, and a per-profile mount target would need a variable in
@@ -133,7 +135,7 @@ services:
       # dashboard directly.
       - '127.0.0.1:${KB_PORT:-8080}:8080'
     volumes:
-      - .:/app/host-config:ro
+      - ./:/app/host-config:ro
       - labor-profiles:/app/profiles
 
 volumes:
