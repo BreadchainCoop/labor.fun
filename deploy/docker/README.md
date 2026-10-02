@@ -104,22 +104,43 @@ docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'
 
 ## State and backups
 
-Everything durable lives in three named volumes — `labor-profiles` (identity, KB,
-per-group memory), `labor-store` (SQLite), `labor-data` (sessions, IPC). Nothing
-in this compose backs them up. Don't tar the live database: the orchestrator can
-write between any checkpoint and the copy. `VACUUM INTO` takes a consistent
-snapshot from a read transaction while it keeps running:
+Everything durable lives in one named volume, `labor-profiles`: identity, KB,
+per-group memory, and the profile's `store/` (SQLite) and `data/` (sessions,
+IPC). Nothing in this compose backs it up. Don't tar the live database: the
+orchestrator can write between any checkpoint and the copy. `VACUUM INTO` takes
+a consistent snapshot from a read transaction while it keeps running:
 
 ```bash
+P=<your-org>   # your LABOR_PROFILE
 STAMP=$(date -u +%Y%m%d-%H%M%S)
 # The orchestrator image ships the better-sqlite3 binding, not the sqlite3 CLI.
-docker run --rm -v labor_labor-store:/s -v "$PWD:/out" alpine:3.20 \
-  sh -c "apk add -q sqlite && sqlite3 /s/messages.db \"VACUUM INTO '/out/messages-$STAMP.db'\""
-docker run --rm -v labor_labor-profiles:/p -v labor_labor-data:/d -v "$PWD:/out" alpine:3.20 \
-  tar czf /out/labor-backup-$STAMP.tar.gz /p /d /out/messages-$STAMP.db
+docker run --rm -v labor_labor-profiles:/p -v "$PWD:/out" alpine:3.20 \
+  sh -c "apk add -q sqlite && sqlite3 /p/$P/store/messages.db \"VACUUM INTO '/out/messages-$STAMP.db'\""
+docker run --rm -v labor_labor-profiles:/p -v "$PWD:/out" alpine:3.20 \
+  tar czf /out/labor-backup-$STAMP.tar.gz -C / p out/messages-$STAMP.db
 ```
 
-To restore, copy the snapshot into the `labor-store` volume as `messages.db`.
+The archive also holds the live `messages.db`, which may be mid-write. Restore
+from the snapshot instead: copy it to `<your-org>/store/messages.db` in the
+volume.
+
+### Upgrading from three volumes
+
+Earlier versions of this compose mounted separate `labor-store` and `labor-data`
+volumes over the profile's `store/` and `data/`. This version doesn't mount
+them, so after upgrading the orchestrator would open the profile volume's own,
+empty `store/`, and start on a fresh database without an error. Copy them in
+first:
+
+```bash
+P=<your-org>   # your LABOR_PROFILE
+docker compose -f deploy/docker/docker-compose.yaml down
+docker run --rm -v labor_labor-profiles:/p -v labor_labor-store:/s \
+  -v labor_labor-data:/d alpine:3.20 sh -c \
+  "mkdir -p /p/$P/store /p/$P/data && cp -a /s/. /p/$P/store/ && cp -a /d/. /p/$P/data/"
+```
+
+Keep the old volumes until the upgraded deploy has run cleanly.
 
 ## Updating
 
