@@ -12,8 +12,15 @@ How Breadbrich Engels schedules and manages recurring/one-time tasks.
 | Type | `schedule_type` | `schedule_value` | Example |
 |------|----------------|-------------------|---------|
 | Cron | `cron` | Cron expression (local time) | `0 9 * * 1` (Mon 9am ET) |
-| Interval | `interval` | Milliseconds | `3600000` (every hour) |
+| Interval | `interval` | Milliseconds or a unit suffix (`ms`/`s`/`m`/`h`/`d`) | `6h`, `30m`, or `3600000` (every hour) |
 | One-time | `once` | ISO timestamp (local, NO Z suffix) | `2026-05-07T14:00:00` |
+
+**Interval values**: bare number = milliseconds (`3600000`); suffixed number
+uses the unit (`500ms`, `45s`, `30m`, `6h`, `2d`, case-insensitive). Minimum
+**1 minute** (a run takes ~50s, so sub-minute intervals are a runaway), maximum
+**365 days**. Anything else — `every 6h`, `6hh`, `30 seconds` — is rejected and
+the task is not created or updated; a task already holding a bad interval gets
+paused instead of rescheduled.
 
 ## ⚠️ CRITICAL GOTCHA: Timezone Handling
 

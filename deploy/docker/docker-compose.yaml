@@ -1,0 +1,136 @@
+# labor.fun — plain-Docker deployment (orchestrator + optional KB dashboard).
+#
+# The orchestrator runs as a container and spawns each agent turn as a SIBLING
+# container on the host's docker daemon — not nested. Everything org-specific
+# comes from the mounted profile and .env; the images are org-agnostic.
+#
+#   cp deploy/docker/.env.example deploy/docker/.env
+#   $EDITOR deploy/docker/.env
+#   docker compose -f deploy/docker/docker-compose.yaml up -d
+#
+# The org profile is NOT baked into the image — seed profiles/<LABOR_PROFILE>/
+# into the labor-profiles volume before first boot, or the orchestrator exits
+# with "LABOR_PROFILE set but ... does not exist". See README.md.
+#
+# Confidential-VM variant: deploy/tee/. Kubernetes: docs/KUBERNETES.md.
+
+name: labor
+
+services:
+  # The orchestrator image ships no docker binary — the Kubernetes backend talks
+  # to the API instead, so the CLI was never bundled. CONTAINER_RUNTIME=docker
+  # needs one, so fetch the static build and verify it before staging it on the
+  # shared volume. Runs once; skips the download if the binary is already there.
+  docker-cli-fetch:
+    image: alpine:3.20
+    container_name: labor-docker-cli-fetch
+    restart: 'no'
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -x /out/docker ]; then
+          cd /tmp
+          wget -q https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz -O d.tgz
+          tar xzf d.tgz docker/docker
+          echo "fce9b87ce16bc531383c9163eac43c78699cedc6ef332d78a67ca3673476b518  docker/docker" > SUM
+          sha256sum -c SUM
+          cp docker/docker /out/docker
+          chmod 0755 /out/docker
+        fi
+        echo "[docker-cli-fetch] static docker CLI 27.3.1 ready at /out/docker"
+    volumes:
+      - docker-cli:/out
+
+  orchestrator:
+    image: ${ORCHESTRATOR_IMAGE:-ghcr.io/breadchaincoop/nanoclaw-orchestrator:latest}
+    container_name: labor-orchestrator
+    restart: unless-stopped
+    # Root: the mounted docker.sock is root:docker 0660 and the image's default
+    # user is uid 1000 `node`. Matching the host's docker gid instead would break
+    # on any host that numbers it differently.
+    user: '0:0'
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        install -m 0755 /dockercli/docker /usr/local/bin/docker
+        exec node dist/index.js
+    environment:
+      - LABOR_PROFILE=${LABOR_PROFILE}
+      - CONTAINER_RUNTIME=docker
+      # Rewrites the orchestrator's own /app/... mount paths to their host
+      # equivalents when building each agent container's -v flags. Without it
+      # the agent gets paths that exist only inside the orchestrator.
+      - DOCKER_SIBLING_MODE=true
+      # Target for the `docker inspect` that reads this container's mount table.
+      # Defaults to os.hostname(); pinning the name survives a custom hostname,
+      # and a failed lookup degrades silently to untranslated mounts. Overridable
+      # because container-management UIs may rename the container.
+      - DOCKER_SELF_CONTAINER=${DOCKER_SELF_CONTAINER:-labor-orchestrator}
+      - CONTAINER_IMAGE=${AGENT_IMAGE:-ghcr.io/breadchaincoop/nanoclaw-agent:latest}
+      - CREDENTIAL_PROXY_PORT=${CREDENTIAL_PROXY_PORT:-3001}
+      # Read from process.env only, never the mounted .env, so they must be
+      # passed here to be tunable. The cap is what bounds RAM on a small host.
+      - MAX_CONCURRENT_CONTAINERS=${MAX_CONCURRENT_CONTAINERS:-5}
+      - IDLE_TIMEOUT=${IDLE_TIMEOUT:-1800000}
+      - TZ=${TZ:-UTC}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      # Agent containers reach the credential proxy at host.docker.internal,
+      # which resolves to the docker bridge gateway. Publishing on that address
+      # rather than 0.0.0.0 keeps the upstream Anthropic credential off any
+      # public interface. Check the gateway with:
+      #   docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'
+      - '${CREDENTIAL_PROXY_BIND_IP:-172.17.0.1}:${CREDENTIAL_PROXY_PORT:-3001}:${CREDENTIAL_PROXY_PORT:-3001}'
+    volumes:
+      # Spawn sibling agent containers. RW because `docker run` needs it.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - docker-cli:/dockercli
+      # Secrets are read from this file rather than the process environment, so
+      # they are not inherited by spawned child processes (src/env.ts). A real
+      # env var wins only for keys passed through `environment:` above; a
+      # credential or channel token set anywhere else must be in this file, or
+      # it is silently dropped. Container UIs need this mount to resolve to the
+      # .env they write, not to a missing path Docker turns into a directory.
+      - ./.env:/app/.env:ro
+      - labor-profiles:/app/profiles
+      - labor-store:/app/profiles/${LABOR_PROFILE}/store
+      - labor-data:/app/profiles/${LABOR_PROFILE}/data
+    depends_on:
+      docker-cli-fetch:
+        condition: service_completed_successfully
+
+  # Opt-in: `docker compose --profile kb up -d`. Same image, different process.
+  kb-ui:
+    image: ${ORCHESTRATOR_IMAGE:-ghcr.io/breadchaincoop/nanoclaw-orchestrator:latest}
+    container_name: labor-kb
+    restart: unless-stopped
+    profiles: ['kb']
+    # Root so it can edit KB files the orchestrator created.
+    user: '0:0'
+    entrypoint: ['node', 'kb-ui/server.mjs']
+    environment:
+      - LABOR_PROFILE=${LABOR_PROFILE}
+      - KB_PORT=8080
+      # Required. Left unset, the dashboard falls back to a path that does not
+      # exist in this image and then accepts admin/changeme.
+      - USERS_FILE=/app/profiles/${LABOR_PROFILE}/kb-users.json
+      - KB_ADMINS=${KB_ADMINS:-}
+      - KB_SUPERADMINS=${KB_SUPERADMINS:-}
+      - TZ=${TZ:-UTC}
+    ports:
+      # Loopback only — front it with a tunnel or TLS proxy, never expose the
+      # dashboard directly.
+      - '127.0.0.1:${KB_PORT:-8080}:8080'
+    volumes:
+      - ./.env:/app/.env:ro
+      - labor-profiles:/app/profiles
+      - labor-store:/app/profiles/${LABOR_PROFILE}/store
+      - labor-data:/app/profiles/${LABOR_PROFILE}/data
+
+volumes:
+  docker-cli:
+  labor-profiles:
+  labor-store:
+  labor-data:

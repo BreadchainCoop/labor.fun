@@ -569,7 +569,7 @@ Breadbrich Engels has a built-in scheduler that runs tasks as full agents in the
 | Type | Value Format | Example |
 |------|--------------|---------|
 | `cron` | Cron expression | `0 9 * * 1` (Mondays at 9am) |
-| `interval` | Milliseconds | `3600000` (every hour) |
+| `interval` | Milliseconds or a unit suffix (`30m`, `6h`, `2d`); min 1 minute, max 365 days | `6h` or `3600000` (every hour) |
 | `once` | ISO timestamp | `2024-12-25T09:00:00Z` |
 
 ### Creating a Task

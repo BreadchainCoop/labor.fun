@@ -83,7 +83,7 @@ Cron, interval, and one-time task definitions.
 | prompt         | TEXT    | Claude prompt to execute             |
 | script         | TEXT    | Alternative: raw script              |
 | schedule_type  | TEXT    | cron, interval, or once              |
-| schedule_value | TEXT    | Cron expr / ms interval / ISO date   |
+| schedule_value | TEXT    | Cron expr / interval (ms or "6h") / ISO date |
 | context_mode   | TEXT    | What context to include              |
 | next_run       | INTEGER | Unix timestamp (indexed with status) |
 | last_run       | INTEGER | Unix timestamp                       |
