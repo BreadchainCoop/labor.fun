@@ -55,6 +55,7 @@ services:
     command:
       - |
         install -m 0755 /dockercli/docker /usr/local/bin/docker
+        ln -sf /app/host-config/.env /app/.env
         exec node dist/index.js
     environment:
       - LABOR_PROFILE=${LABOR_PROFILE}
@@ -87,13 +88,15 @@ services:
       # Spawn sibling agent containers. RW because `docker run` needs it.
       - /var/run/docker.sock:/var/run/docker.sock
       - docker-cli:/dockercli
-      # Secrets are read from this file rather than the process environment, so
-      # they are not inherited by spawned child processes (src/env.ts). A real
-      # env var wins only for keys passed through `environment:` above; a
-      # credential or channel token set anywhere else must be in this file, or
-      # it is silently dropped. Container UIs need this mount to resolve to the
-      # .env they write, not to a missing path Docker turns into a directory.
-      - ./.env:/app/.env:ro
+      # Secrets are read from .env rather than the process environment, so they
+      # are not inherited by spawned child processes (src/env.ts). A real env
+      # var wins only for keys passed through `environment:` above; a credential
+      # or channel token set anywhere else must be in .env, or it is silently
+      # dropped. The command above links /app/.env to the .env beside this file.
+      # This mounts the directory, not the file: container UIs generate .env
+      # only at deploy time, so a file mount's source doesn't exist yet when
+      # they parse this compose, and they pre-create it as a directory.
+      - .:/app/host-config:ro
       # All durable state, including the profile's store/ (SQLite) and data/
       # (sessions, IPC). One volume because the code derives those paths from
       # the profile, and a per-profile mount target would need a variable in
@@ -111,7 +114,11 @@ services:
     profiles: ['kb']
     # Root so it can edit KB files the orchestrator created.
     user: '0:0'
-    entrypoint: ['node', 'kb-ui/server.mjs']
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        ln -sf /app/host-config/.env /app/.env
+        exec node kb-ui/server.mjs
     environment:
       - LABOR_PROFILE=${LABOR_PROFILE}
       - KB_PORT=8080
@@ -126,7 +133,7 @@ services:
       # dashboard directly.
       - '127.0.0.1:${KB_PORT:-8080}:8080'
     volumes:
-      - ./.env:/app/.env:ro
+      - .:/app/host-config:ro
       - labor-profiles:/app/profiles
 
 volumes:
