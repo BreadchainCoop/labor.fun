@@ -32,6 +32,7 @@ import {
   AnthropicAuthMode,
   anthropicAuthHeaders,
   detectAnthropicAuthMode,
+  oauthAllowedFor,
   readSecrets,
 } from './anthropic-auth.js';
 import { logger } from './logger.js';
@@ -225,6 +226,24 @@ export function startCredentialProxy(
   const upstreamUrl = new URL(
     secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
   );
+  // OAuth mode injects the real OAuth token into requests sent upstream. A
+  // gateway can't use it and must not receive it, and this is exactly where a
+  // gateway's own docs lead (key in ANTHROPIC_AUTH_TOKEN), so fail loudly.
+  if (
+    authMode === 'oauth' &&
+    oauthToken &&
+    !oauthAllowedFor(upstreamUrl.href)
+  ) {
+    return Promise.reject(
+      new Error(
+        `ANTHROPIC_BASE_URL points at ${upstreamUrl.host}, which is not Anthropic, ` +
+          'but ANTHROPIC_API_KEY is unset, so the credential proxy would run in ' +
+          'OAuth mode and send the OAuth token there. Put the gateway key in ' +
+          'ANTHROPIC_API_KEY (not ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN), ' +
+          'or unset ANTHROPIC_BASE_URL.',
+      ),
+    );
+  }
   const isHttps = upstreamUrl.protocol === 'https:';
   const makeRequest = isHttps ? httpsRequest : httpRequest;
 

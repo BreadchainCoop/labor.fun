@@ -214,6 +214,37 @@ describe('credential-proxy', () => {
     expect(lastUpstreamHeaders['authorization']).toBeUndefined();
   });
 
+  it.each(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN'])(
+    'refuses to start in OAuth mode (%s) against a third-party gateway',
+    async (tokenVar) => {
+      vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic');
+      vi.stubEnv('ANTHROPIC_API_KEY', '');
+      vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', '');
+      vi.stubEnv('ANTHROPIC_AUTH_TOKEN', '');
+      vi.stubEnv(tokenVar, 'sk-ant-oat01-real');
+      try {
+        await expect(startCredentialProxy(0)).rejects.toThrow(
+          /api\.z\.ai, which is not Anthropic.*ANTHROPIC_API_KEY/s,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it('starts against a third-party gateway in API-key mode', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://api.z.ai/api/anthropic');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'gateway-key');
+    vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', '');
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', '');
+    try {
+      proxyServer = await startCredentialProxy(0);
+      expect(proxyServer.listening).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('strips hop-by-hop headers', async () => {
     proxyPort = await startProxy({ ANTHROPIC_API_KEY: 'sk-ant-real-key' });
 

@@ -33,9 +33,9 @@ NANOCLAW_MODEL=glm-4.6
 
 ### 2. Clear any OAuth token
 
-Unset `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN`. With an OAuth token
-and no API key, the proxy selects OAuth mode and every run fails (see
-"Auth mode" below).
+Unset `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN`. With an OAuth token,
+no API key and a non-Anthropic `ANTHROPIC_BASE_URL`, the credential proxy
+refuses to start (see "Auth mode" below).
 
 ### 3. Override the pricing table
 
@@ -91,6 +91,13 @@ only `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` set, it enters OAuth
 mode, where the container CLI calls Anthropic's
 `POST /api/oauth/claude_cli/create_api_key` (`OAUTH_CREATE_API_KEY_PATH`). No
 third-party gateway implements that endpoint. OAuth mode is Anthropic-only.
+
+It is also enforced. OAuth mode injects the real OAuth token into requests sent
+upstream, so the proxy refuses to start in OAuth mode when `ANTHROPIC_BASE_URL`
+is anything other than `*.anthropic.com` or loopback, and names the variable to
+fix. On the host side, the OAuth exchange is pinned to `api.anthropic.com`.
+`getAnthropicApiKey` returns nothing in that configuration, so translation
+never posts an exchanged Anthropic key to the gateway.
 
 Z.ai's own Claude Code docs suggest `ANTHROPIC_AUTH_TOKEN` because the stock CLI
 sends it as `Authorization: Bearer`. Their gateway also accepts `x-api-key`,

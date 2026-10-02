@@ -86,6 +86,27 @@ export function anthropicApiBase(): string {
   return configured ? configured.replace(/\/+$/, '') : ANTHROPIC_API_BASE;
 }
 
+/**
+ * Whether `base` may receive an OAuth token. OAuth tokens are Anthropic
+ * credentials, so a third-party gateway must never see one. Loopback stays
+ * allowed for local relays and test upstreams the operator controls.
+ */
+export function oauthAllowedFor(base: string): boolean {
+  let host: string;
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    return false;
+  }
+  return (
+    host === 'anthropic.com' ||
+    host.endsWith('.anthropic.com') ||
+    host === 'localhost' ||
+    host === '[::1]' ||
+    /^127\.\d+\.\d+\.\d+$/.test(host)
+  );
+}
+
 /** `anthropic-version` sent on direct Messages API calls. */
 export const ANTHROPIC_API_VERSION = '2023-06-01';
 
@@ -272,8 +293,10 @@ interface CreateApiKeyResponse {
 /** One exchange round-trip. Returns null on any failure; never throws. */
 async function exchangeOAuthToken(token: string): Promise<string | null> {
   try {
+    // Pinned to Anthropic, not anthropicApiBase(): only Anthropic implements
+    // this exchange, and following a gateway URL would hand it the token.
     const res = await fetch(
-      `${anthropicApiBase()}${OAUTH_CREATE_API_KEY_PATH}`,
+      `${ANTHROPIC_API_BASE}${OAUTH_CREATE_API_KEY_PATH}`,
       {
         method: 'POST',
         headers: {
@@ -363,6 +386,10 @@ export async function getAnthropicApiKey(
 ): Promise<AnthropicApiKey | null> {
   if (!auth) return null;
   if (auth.mode === 'api-key') return { key: auth.token, mode: 'api-key' };
+  // The exchanged key is an Anthropic key, and callers post it to
+  // anthropicApiBase(). Behind a gateway that would leak it, so treat OAuth as
+  // unavailable there.
+  if (!oauthAllowedFor(anthropicApiBase())) return null;
   const key = await getExchangedKey(auth.token);
   return key ? { key, mode: 'oauth' } : null;
 }
