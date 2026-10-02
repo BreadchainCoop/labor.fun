@@ -16,6 +16,7 @@ import {
   writeOutput,
 } from '../runtime.js';
 import { buildDynamicMcpServers } from '../mcp-servers.js';
+import { isDuplicateOfSentText, sameChatSendText } from './duplicate-reply.js';
 import { Backend, RunQueryArgs, RunQueryResult } from './types.js';
 
 interface SessionEntry {
@@ -233,11 +234,9 @@ export class ClaudeBackend implements Backend {
     let messageCount = 0;
     let resultCount = 0;
 
-    // A same-chat send_message with no other tool use before the final result
-    // means the model used the ack as its whole answer — suppress the redundant
-    // result so it isn't sent twice (see rules/messaging/README.md).
-    let sameChatAckPending = false;
-    let sawToolUseSinceAck = false;
+    // Same-chat send_message texts since the last result, so a final reply that
+    // only repeats one isn't delivered twice (see ./duplicate-reply.ts).
+    let sameChatSendTexts: string[] = [];
 
     // Load global CLAUDE.md as additional system context (shared across all groups)
     const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -434,17 +433,8 @@ export class ClaudeBackend implements Backend {
             }
           ).message?.content ?? [];
         for (const block of blocks) {
-          if (block?.type !== 'tool_use') continue;
-          const isSameChatSend =
-            block.name === 'mcp__nanoclaw__send_message' &&
-            !(block.input as { target_jid?: string } | undefined)
-              ?.target_jid;
-          if (isSameChatSend) {
-            sameChatAckPending = true;
-            sawToolUseSinceAck = false;
-          } else if (sameChatAckPending) {
-            sawToolUseSinceAck = true;
-          }
+          const sent = sameChatSendText(block);
+          if (sent !== null) sameChatSendTexts.push(sent);
         }
       }
 
@@ -474,19 +464,25 @@ export class ClaudeBackend implements Backend {
         log(
           `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
-        if (sameChatAckPending && !sawToolUseSinceAck) {
+        const duplicate = isDuplicateOfSentText(textResult, sameChatSendTexts);
+        if (duplicate) {
           log(
-            `Suppressing result #${resultCount}: a same-chat send_message went out this turn with no other tool use since — the ack already answered, this would double-send`,
+            `Result #${resultCount} repeats a same-chat send_message from this turn; not delivering it again`,
           );
-        } else {
-          writeOutput({
-            status: 'success',
-            result: textResult || null,
-            newSessionId,
-          });
+        } else if (textResult && sameChatSendTexts.length > 0) {
+          log(
+            `Result #${resultCount} differs from this turn's same-chat send_message; delivering both`,
+          );
         }
-        sameChatAckPending = false;
-        sawToolUseSinceAck = false;
+        // Always report the result, even a suppressed one: a turn with no
+        // output never starts the orchestrator's idle timer, times out as an
+        // error, and is retried, re-sending the reply.
+        writeOutput({
+          status: 'success',
+          result: duplicate ? null : textResult || null,
+          newSessionId,
+        });
+        sameChatSendTexts = [];
       }
     }
 
