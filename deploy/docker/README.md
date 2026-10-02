@@ -58,9 +58,13 @@ a plain `docker compose up`.
 
 **Environment.** A variable set in the UI reaches the orchestrator's environment
 only if this compose file references it as `${VAR}`. Everything else, including
-the Anthropic credential and channel tokens, is read from the mounted `.env`, so
-that mount has to resolve to the file the UI writes. After the first deploy,
-confirm it is a file:
+the model credential and channel tokens, is read from `.env`. The compose
+mounts its own directory read-only at `/app/host-config` and links `/app/.env`
+to the `.env` there, which is where a UI writes the variables you set. It
+mounts the directory rather than the file because the UI only writes `.env` at
+deploy time: a file mount's source wouldn't exist yet when the UI parses the
+compose, and it would pre-create it as a directory. After the first deploy,
+confirm the link resolved:
 
 ```bash
 docker exec <orchestrator-container> grep -c = /app/.env
