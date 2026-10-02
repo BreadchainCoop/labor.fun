@@ -65,10 +65,12 @@ services:
       # the agent gets paths that exist only inside the orchestrator.
       - DOCKER_SIBLING_MODE=true
       # Target for the `docker inspect` that reads this container's mount table.
-      # Defaults to os.hostname(); pinning the name survives a custom hostname,
-      # and a failed lookup degrades silently to untranslated mounts. Overridable
-      # because container-management UIs may rename the container.
-      - DOCKER_SELF_CONTAINER=${DOCKER_SELF_CONTAINER:-labor-orchestrator}
+      # Empty by default, so the code falls back to os.hostname(), which is the
+      # container id and resolves under any name. A fixed default breaks behind
+      # container-management UIs, which rename the container on every deploy,
+      # and a failed lookup degrades silently to untranslated mounts. Set it
+      # only if you give the container a custom hostname.
+      - DOCKER_SELF_CONTAINER=${DOCKER_SELF_CONTAINER:-}
       - CONTAINER_IMAGE=${AGENT_IMAGE:-ghcr.io/breadchaincoop/nanoclaw-agent:latest}
       - CREDENTIAL_PROXY_PORT=${CREDENTIAL_PROXY_PORT:-3001}
       # Read from process.env only, never the mounted .env, so they must be

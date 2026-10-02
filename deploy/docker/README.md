@@ -72,8 +72,10 @@ docker exec <orchestrator-container> grep -c = /app/.env
 
 **Names.** UIs commonly prefix volume names and may rename containers. Seed the
 profile into the volume names the UI actually creates (`docker volume ls`), not
-`labor_labor-profiles`. If the orchestrator's container name differs from
-`labor-orchestrator`, set `DOCKER_SELF_CONTAINER` to it.
+`labor_labor-profiles`. A renamed container needs nothing: the orchestrator
+finds itself by hostname, which is its container id. Leave
+`DOCKER_SELF_CONTAINER` unset, because a UI may change the name on every
+deploy.
 
 **Host access.** Two steps still happen on the host over SSH: seeding the
 profile volume (above) and, if you use the KB dashboard, writing
@@ -97,7 +99,8 @@ docker ps --filter name=nanoclaw-
 A `docker-sibling: self mount table empty` or `failed to inspect self container`
 warning in the logs means agent mounts are **not** being translated — the agent
 will get paths that exist only inside the orchestrator. Check that
-`DOCKER_SELF_CONTAINER` matches the running container's name.
+`DOCKER_SELF_CONTAINER` is unset, or, if you set a custom hostname, that it
+names the running container.
 
 If agent turns fail to reach Anthropic, the credential proxy is not reachable at
 the bridge gateway. Compare `CREDENTIAL_PROXY_BIND_IP` against:
