@@ -103,16 +103,20 @@ docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'
 
 Everything durable lives in three named volumes — `labor-profiles` (identity, KB,
 per-group memory), `labor-store` (SQLite), `labor-data` (sessions, IPC). Nothing
-in this compose backs them up. Checkpoint the DB before copying it, or the
-tarball can catch a torn write:
+in this compose backs them up. Don't tar the live database: the orchestrator can
+write between any checkpoint and the copy. `VACUUM INTO` takes a consistent
+snapshot from a read transaction while it keeps running:
 
 ```bash
+STAMP=$(date -u +%Y%m%d-%H%M%S)
 # The orchestrator image ships the better-sqlite3 binding, not the sqlite3 CLI.
-docker run --rm -v labor_labor-store:/s alpine:3.20 \
-  sh -c 'apk add -q sqlite && sqlite3 /s/messages.db "PRAGMA wal_checkpoint(TRUNCATE);"'
-docker run --rm -v labor_labor-profiles:/p -v labor_labor-store:/s -v labor_labor-data:/d \
-  -v "$PWD:/out" alpine:3.20 tar czf /out/labor-backup-$(date -u +%Y%m%d).tar.gz /p /s /d
+docker run --rm -v labor_labor-store:/s -v "$PWD:/out" alpine:3.20 \
+  sh -c "apk add -q sqlite && sqlite3 /s/messages.db \"VACUUM INTO '/out/messages-$STAMP.db'\""
+docker run --rm -v labor_labor-profiles:/p -v labor_labor-data:/d -v "$PWD:/out" alpine:3.20 \
+  tar czf /out/labor-backup-$STAMP.tar.gz /p /d /out/messages-$STAMP.db
 ```
+
+To restore, copy the snapshot into the `labor-store` volume as `messages.db`.
 
 ## Updating
 

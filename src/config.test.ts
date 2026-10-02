@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from 'vitest';
 
 /**
  * Auto-registration feature flags in src/config.ts.
@@ -71,4 +79,30 @@ describe('SIGNAL_AUTO_REGISTER_GROUPS', () => {
     expect(c.WHATSAPP_AUTO_REGISTER_GROUPS).toBe(false);
     expect(c.TELEGRAM_AUTO_REGISTER_GROUPS).toBe(false);
   });
+});
+
+describe('parseIdleTimeoutMs', () => {
+  let parseIdleTimeoutMs: ConfigModule['parseIdleTimeoutMs'];
+
+  beforeAll(async () => {
+    ({ parseIdleTimeoutMs } = await import('./config.js'));
+  });
+
+  it('defaults to 30 minutes when unset or blank', () => {
+    expect(parseIdleTimeoutMs(undefined)).toBe(1_800_000);
+    expect(parseIdleTimeoutMs('')).toBe(1_800_000);
+    expect(parseIdleTimeoutMs('   ')).toBe(1_800_000);
+  });
+
+  it('accepts plain integer milliseconds', () => {
+    expect(parseIdleTimeoutMs('600000')).toBe(600_000);
+    expect(parseIdleTimeoutMs(' 600000 ')).toBe(600_000);
+  });
+
+  it.each(['thirty', '30m', '1,800,000', '1.5e6', '-5', '0', '600000.5'])(
+    'falls back to the default for %j instead of a near-zero timeout',
+    (raw) => {
+      expect(parseIdleTimeoutMs(raw)).toBe(1_800_000);
+    },
+  );
 });

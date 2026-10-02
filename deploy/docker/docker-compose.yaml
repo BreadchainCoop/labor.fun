@@ -88,8 +88,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - docker-cli:/dockercli
       # Secrets are read from this file rather than the process environment, so
-      # they are not inherited by spawned child processes (src/env.ts). Values
-      # set as real env vars still win — that is how Coolify-style UIs work.
+      # they are not inherited by spawned child processes (src/env.ts). A real
+      # env var wins only for keys passed through `environment:` above; a
+      # credential or channel token set anywhere else must be in this file, or
+      # it is silently dropped. Container UIs need this mount to resolve to the
+      # .env they write, not to a missing path Docker turns into a directory.
       - ./.env:/app/.env:ro
       - labor-profiles:/app/profiles
       - labor-store:/app/profiles/${LABOR_PROFILE}/store
