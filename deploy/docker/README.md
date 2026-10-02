@@ -1,8 +1,8 @@
 # Plain-Docker deployment
 
 Run labor.fun from the published images with a compose file and an `.env` — no
-host build, no systemd units. Suits a single VPS, and works behind a
-container-management UI such as Coolify, Dokploy, or Portainer.
+host build, no systemd units. Suits a single VPS, run by hand or by a
+container-management UI.
 
 Other shapes: [`setup/DEPLOY-INFRA.md`](../../setup/DEPLOY-INFRA.md) for the
 systemd + auto-deploy host (the reference production path),
@@ -51,30 +51,33 @@ Add `--profile kb` to also run the KB dashboard on `127.0.0.1:8080`.
 Pre-pulling the agent image (`docker pull "$AGENT_IMAGE"`) keeps the first
 agent turn from timing out while several GB download.
 
-## Coolify / Dokploy
+## Behind a container-management UI
 
-Create a **Docker Compose** resource pointing at
-`deploy/docker/docker-compose.yaml`, then paste the `.env.example` keys into the
-UI's environment editor. A UI variable reaches the orchestrator's environment
-only if this compose file references it as `${VAR}`; everything else — the
-Anthropic credential and channel tokens included — is read from the mounted
-`.env`. After the first deploy, confirm it resolved to a file:
+A UI that deploys this compose file for you changes a few things compared with
+a plain `docker compose up`.
+
+**Environment.** A variable set in the UI reaches the orchestrator's environment
+only if this compose file references it as `${VAR}`. Everything else, including
+the Anthropic credential and channel tokens, is read from the mounted `.env`, so
+that mount has to resolve to the file the UI writes. After the first deploy,
+confirm it is a file:
 
 ```bash
 docker exec <orchestrator-container> grep -c = /app/.env
 ```
 
-Coolify rewrites names. Named volumes become `<uuid>_<name>`, so seed the
-profile into the names shown under *Configuration → Persistent Storage* rather
-than `labor_labor-profiles`. If the orchestrator's container name differs from
+**Names.** UIs commonly prefix volume names and may rename containers. Seed the
+profile into the volume names the UI actually creates (`docker volume ls`), not
+`labor_labor-profiles`. If the orchestrator's container name differs from
 `labor-orchestrator`, set `DOCKER_SELF_CONTAINER` to it.
 
-Two things still have to happen on the host over SSH: seeding the profile
-volume (above) and, if you use the KB dashboard, writing
+**Host access.** Two steps still happen on the host over SSH: seeding the
+profile volume (above) and, if you use the KB dashboard, writing
 `profiles/<LABOR_PROFILE>/kb-users.json`.
 
-Give Coolify its own server, or at least expect it to manage the docker daemon
-this stack also uses — they share one socket by design.
+**Shared daemon.** A UI that manages this host's Docker daemon also sees, and
+can stop, the agent containers this stack spawns. They share one socket by
+design.
 
 ## Verifying
 
