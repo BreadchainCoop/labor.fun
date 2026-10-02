@@ -94,9 +94,11 @@ services:
       # it is silently dropped. Container UIs need this mount to resolve to the
       # .env they write, not to a missing path Docker turns into a directory.
       - ./.env:/app/.env:ro
+      # All durable state, including the profile's store/ (SQLite) and data/
+      # (sessions, IPC). One volume because the code derives those paths from
+      # the profile, and a per-profile mount target would need a variable in
+      # the path, which container-management UIs reject.
       - labor-profiles:/app/profiles
-      - labor-store:/app/profiles/${LABOR_PROFILE}/store
-      - labor-data:/app/profiles/${LABOR_PROFILE}/data
     depends_on:
       docker-cli-fetch:
         condition: service_completed_successfully
@@ -126,11 +128,7 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - labor-profiles:/app/profiles
-      - labor-store:/app/profiles/${LABOR_PROFILE}/store
-      - labor-data:/app/profiles/${LABOR_PROFILE}/data
 
 volumes:
   docker-cli:
   labor-profiles:
-  labor-store:
-  labor-data:
