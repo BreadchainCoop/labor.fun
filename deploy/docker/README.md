@@ -1,8 +1,8 @@
 # Plain-Docker deployment
 
 Run labor.fun from the published images with a compose file and an `.env` — no
-host build, no systemd units. Suits a single VPS, and works behind a
-container-management UI such as Coolify, Dokploy, or Portainer.
+host build, no systemd units. Suits a single VPS, run by hand or by a
+container-management UI.
 
 Other shapes: [`setup/DEPLOY-INFRA.md`](../../setup/DEPLOY-INFRA.md) for the
 systemd + auto-deploy host (the reference production path),
@@ -51,19 +51,33 @@ Add `--profile kb` to also run the KB dashboard on `127.0.0.1:8080`.
 Pre-pulling the agent image (`docker pull "$AGENT_IMAGE"`) keeps the first
 agent turn from timing out while several GB download.
 
-## Coolify / Dokploy
+## Behind a container-management UI
 
-Create a **Docker Compose** resource pointing at
-`deploy/docker/docker-compose.yaml`, then paste the `.env.example` keys into the
-UI's environment editor. Real environment variables take precedence over the
-mounted `.env`, so the UI stays authoritative.
+A UI that deploys this compose file for you changes a few things compared with
+a plain `docker compose up`.
 
-Two things still have to happen on the host over SSH: seeding the profile
-volume (above) and, if you use the KB dashboard, writing
+**Environment.** A variable set in the UI reaches the orchestrator's environment
+only if this compose file references it as `${VAR}`. Everything else, including
+the Anthropic credential and channel tokens, is read from the mounted `.env`, so
+that mount has to resolve to the file the UI writes. After the first deploy,
+confirm it is a file:
+
+```bash
+docker exec <orchestrator-container> grep -c = /app/.env
+```
+
+**Names.** UIs commonly prefix volume names and may rename containers. Seed the
+profile into the volume names the UI actually creates (`docker volume ls`), not
+`labor_labor-profiles`. If the orchestrator's container name differs from
+`labor-orchestrator`, set `DOCKER_SELF_CONTAINER` to it.
+
+**Host access.** Two steps still happen on the host over SSH: seeding the
+profile volume (above) and, if you use the KB dashboard, writing
 `profiles/<LABOR_PROFILE>/kb-users.json`.
 
-Give Coolify its own server, or at least expect it to manage the docker daemon
-this stack also uses — they share one socket by design.
+**Shared daemon.** A UI that manages this host's Docker daemon also sees, and
+can stop, the agent containers this stack spawns. They share one socket by
+design.
 
 ## Verifying
 
@@ -92,15 +106,20 @@ docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'
 
 Everything durable lives in three named volumes — `labor-profiles` (identity, KB,
 per-group memory), `labor-store` (SQLite), `labor-data` (sessions, IPC). Nothing
-in this compose backs them up. Checkpoint the DB before copying it, or the
-tarball can catch a torn write:
+in this compose backs them up. Don't tar the live database: the orchestrator can
+write between any checkpoint and the copy. `VACUUM INTO` takes a consistent
+snapshot from a read transaction while it keeps running:
 
 ```bash
-docker exec labor-orchestrator sh -c \
-  'sqlite3 /app/profiles/$LABOR_PROFILE/store/messages.db "PRAGMA wal_checkpoint(TRUNCATE);"'
-docker run --rm -v labor_labor-profiles:/p -v labor_labor-store:/s -v labor_labor-data:/d \
-  -v "$PWD:/out" alpine:3.20 tar czf /out/labor-backup-$(date -u +%Y%m%d).tar.gz /p /s /d
+STAMP=$(date -u +%Y%m%d-%H%M%S)
+# The orchestrator image ships the better-sqlite3 binding, not the sqlite3 CLI.
+docker run --rm -v labor_labor-store:/s -v "$PWD:/out" alpine:3.20 \
+  sh -c "apk add -q sqlite && sqlite3 /s/messages.db \"VACUUM INTO '/out/messages-$STAMP.db'\""
+docker run --rm -v labor_labor-profiles:/p -v labor_labor-data:/d -v "$PWD:/out" alpine:3.20 \
+  tar czf /out/labor-backup-$STAMP.tar.gz /p /d /out/messages-$STAMP.db
 ```
+
+To restore, copy the snapshot into the `labor-store` volume as `messages.db`.
 
 ## Updating
 

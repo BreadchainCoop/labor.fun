@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
+import { logger } from './logger.js';
 import {
   type McpServerConfig,
   validateMcpServerConfigs,
@@ -550,7 +551,27 @@ export const FRESH_SESSION_BACKFILL_MESSAGES = Math.max(
   parseInt(process.env.FRESH_SESSION_BACKFILL_MESSAGES || '40', 10) || 40,
 );
 export const IPC_POLL_INTERVAL = 1000;
-export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+const DEFAULT_IDLE_TIMEOUT_MS = 1_800_000;
+
+/**
+ * Plain integer milliseconds only. A bare parseInt reads "30m" as 30 and
+ * "1,800,000" as 1, closing stdin right after every reply, and turns "thirty"
+ * into NaN, which makes the container hard timeout fire within a millisecond.
+ */
+export function parseIdleTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_IDLE_TIMEOUT_MS;
+  const value = raw.trim();
+  const ms = /^\d+$/.test(value) ? Number(value) : NaN;
+  if (Number.isSafeInteger(ms) && ms > 0) return ms;
+  logger.warn(
+    { value: raw, fallbackMs: DEFAULT_IDLE_TIMEOUT_MS },
+    'IDLE_TIMEOUT must be a positive integer of milliseconds; using the default',
+  );
+  return DEFAULT_IDLE_TIMEOUT_MS;
+}
+
+// How long to keep a container alive after its last result.
+export const IDLE_TIMEOUT = parseIdleTimeoutMs(process.env.IDLE_TIMEOUT);
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
