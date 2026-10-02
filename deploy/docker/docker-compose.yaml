@@ -47,18 +47,27 @@ services:
     image: ${ORCHESTRATOR_IMAGE:-ghcr.io/breadchaincoop/nanoclaw-orchestrator:latest}
     container_name: labor-orchestrator
     restart: unless-stopped
-    # Root: the mounted docker.sock is root:docker 0660 and the image's default
-    # user is uid 1000 `node`. Matching the host's docker gid instead would break
-    # on any host that numbers it differently.
+    # Starts as root only to set up, then runs as uid 1000 `node`, the same user
+    # as the agent containers. A root orchestrator creates IPC, session and
+    # group directories the agents can read but not write, which silently breaks
+    # every tool that writes back to the host. The docker socket's group id
+    # differs per host, so it is read at startup rather than hardcoded.
     user: '0:0'
     entrypoint: ['/bin/sh', '-c']
     command:
       - |
+        set -e
         install -m 0755 /dockercli/docker /usr/local/bin/docker
         ln -sf /app/host-config/.env /app/.env
-        exec node dist/index.js
+        chown -R 1000:1000 /app/profiles
+        exec env HOME=/home/node setpriv --reuid=1000 --regid=1000 \
+          --groups="$$(stat -c %g /var/run/docker.sock)" --inh-caps=-all \
+          node dist/index.js
     environment:
       - LABOR_PROFILE=${LABOR_PROFILE}
+      # Where add_kb_user writes dashboard logins; must match kb-ui below, or
+      # new users land in the image and are lost on the next deploy.
+      - USERS_FILE=/app/profiles/${LABOR_PROFILE}/kb-users.json
       - CONTAINER_RUNTIME=docker
       # Rewrites the orchestrator's own /app/... mount paths to their host
       # equivalents when building each agent container's -v flags. Without it
@@ -116,13 +125,16 @@ services:
     container_name: labor-kb
     restart: unless-stopped
     profiles: ['kb']
-    # Root so it can edit KB files the orchestrator created.
+    # Root only to link .env, then the same uid 1000 as the orchestrator and
+    # agents, so files edited here stay writable by them.
     user: '0:0'
     entrypoint: ['/bin/sh', '-c']
     command:
       - |
+        set -e
         ln -sf /app/host-config/.env /app/.env
-        exec node kb-ui/server.mjs
+        exec env HOME=/home/node setpriv --reuid=1000 --regid=1000 \
+          --clear-groups --inh-caps=-all node kb-ui/server.mjs
     environment:
       - LABOR_PROFILE=${LABOR_PROFILE}
       - KB_PORT=8080
