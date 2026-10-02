@@ -22,14 +22,23 @@ OneCLI vault):
 ```bash
 ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
 ANTHROPIC_API_KEY=<your Z.ai key>
-NANOCLAW_MODEL=glm-4.6
+NANOCLAW_MODEL=glm-5.3
+LABOR_TIER_CHEAP_MODEL=glm-5.3-flash
+LABOR_TIER_STRONG_MODEL=glm-5.3
 ```
 
-| Variable             | Effect                                                   |
-| -------------------- | -------------------------------------------------------- |
-| `ANTHROPIC_BASE_URL` | Redirects the proxy upstream and host-process calls.     |
-| `ANTHROPIC_API_KEY`  | Its presence selects api-key mode. Required (see below). |
-| `NANOCLAW_MODEL`     | Model id sent on every run. Use a current Z.ai model.    |
+| Variable                  | Effect                                                   |
+| ------------------------- | -------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL`      | Redirects the proxy upstream and host-process calls.     |
+| `ANTHROPIC_API_KEY`       | Its presence selects api-key mode. Required (see below). |
+| `NANOCLAW_MODEL`          | Model id sent on every run. Use a current Z.ai model.    |
+| `LABOR_TIER_CHEAP_MODEL`  | Cheap-tier runs, and translation unless overridden.      |
+| `LABOR_TIER_STRONG_MODEL` | Strong-tier runs.                                        |
+| `TRANSLATE_MODEL`         | Optional. Translation model; defaults to the cheap tier. |
+
+The tier variables default to Claude ids, so set them too, or the router and
+translation request a model the gateway may not serve. Check the ids against
+the provider's current model list.
 
 ### 2. Clear any OAuth token
 
@@ -40,20 +49,23 @@ refuses to start (see "Auth mode" below).
 ### 3. Override the pricing table
 
 `src/model-pricing.ts` matches model ids by substring and falls back to Sonnet
-rates, so `glm-4.6` would be costed at Claude prices. Set the provider's real
-per-MTok USD rates:
+rates, so a GLM model id would be costed at Claude prices. Set the provider's
+real per-MTok USD rates. The values below are an example; use your provider's
+current prices:
 
 ```bash
 MODEL_PRICING_JSON={"glm":{"input":0.6,"output":2.2,"cacheWrite":0.6,"cacheRead":0.11}}
 ```
 
-One `glm` entry covers every GLM variant. Usage capture is unaffected: the proxy
+One `glm` entry covers every GLM variant. It can live in the process
+environment or in `.env`, so container deploys that mount `.env` can set it. Usage capture is unaffected: the proxy
 parses `usage.*` off `/v1/messages`, which compatible gateways return in the
 Anthropic response shape.
 
 ### 4. Deploy and restart
 
-No container rebuild is needed. The proxy upstream is read at process start.
+Once a release containing this support is deployed, switching needs no
+rebuild: the proxy upstream and model ids are read at process start.
 
 ```bash
 /opt/breadbrich-backups/safe-deploy.sh
@@ -64,7 +76,8 @@ systemctl restart breadbrich
 
 Trigger an agent run, then confirm the `api_usage` rows record a `glm-` model id
 rather than a Claude one. Test translation separately: it exercises the
-host-process path rather than the container path.
+host-process path rather than the container path, and uses `TRANSLATE_MODEL` or
+the cheap tier.
 
 ### Rollback
 
@@ -112,13 +125,13 @@ key against a no-header control:
 # Control: no auth header
 curl -s https://api.z.ai/api/anthropic/v1/messages \
   -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-  -d '{"model":"glm-4.6","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"glm-5.3","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 
 # x-api-key present but invalid
 curl -s https://api.z.ai/api/anthropic/v1/messages \
   -H "x-api-key: sk-bogus" \
   -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
-  -d '{"model":"glm-4.6","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"glm-5.3","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 Observed against Z.ai:
@@ -139,8 +152,8 @@ change in `anthropicAuthHeaders()`.
   `/v1/messages/count_tokens`, `anthropic-beta` features and the server-side web
   search tool behave however the gateway implements them, if at all.
 - **Model tiers name Claude.** `LABOR_TIER_CHEAP_MODEL` and
-  `LABOR_TIER_STRONG_MODEL` default to Claude ids. Repoint them or leave the
-  router unused.
+  `LABOR_TIER_STRONG_MODEL` default to Claude ids, and translation follows the
+  cheap tier. Repoint them as in step 1.
 - **Process-global.** `ANTHROPIC_BASE_URL` applies to the whole process. There is
   no per-request routing (see [SMITHERS-ORCHESTRATION.md](SMITHERS-ORCHESTRATION.md)).
 - **No attestation.** Unlike the NEAR AI path, a commercial gateway offers no

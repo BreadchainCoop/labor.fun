@@ -12,6 +12,7 @@
  * Operators can override/extend the table without a code change via the
  * MODEL_PRICING_JSON env var (see loadPricingOverrides below).
  */
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 export interface ModelPricing {
@@ -60,7 +61,11 @@ const DEFAULT_PRICING: ModelPricing = BASE_PRICING.sonnet;
  * and ignored (falls back to the built-in table).
  */
 function loadPricingOverrides(): Record<string, ModelPricing> {
-  const raw = process.env.MODEL_PRICING_JSON;
+  // The .env fallback lets container deploys set this, which mount .env but
+  // only pass a fixed list of variables into the process environment.
+  const raw =
+    process.env.MODEL_PRICING_JSON ??
+    readEnvFile(['MODEL_PRICING_JSON']).MODEL_PRICING_JSON;
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as Record<string, Partial<ModelPricing>>;

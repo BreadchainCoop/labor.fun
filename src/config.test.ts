@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from 'vitest';
 
 /**
  * Auto-registration feature flags in src/config.ts.
@@ -70,5 +78,29 @@ describe('SIGNAL_AUTO_REGISTER_GROUPS', () => {
     expect(c.SIGNAL_AUTO_REGISTER_GROUPS).toBe(true);
     expect(c.WHATSAPP_AUTO_REGISTER_GROUPS).toBe(false);
     expect(c.TELEGRAM_AUTO_REGISTER_GROUPS).toBe(false);
+  });
+});
+
+describe('resolveTranslateModel', () => {
+  let resolveTranslateModel: ConfigModule['resolveTranslateModel'];
+
+  beforeAll(async () => {
+    ({ resolveTranslateModel } = await import('./config.js'));
+  });
+
+  it('defaults to Claude Haiku', () => {
+    expect(resolveTranslateModel(undefined, undefined)).toBe(
+      'claude-haiku-4-5-20251001',
+    );
+  });
+
+  it('follows the cheap tier so a gateway deploy needs no extra setting', () => {
+    expect(resolveTranslateModel(undefined, 'glm-5.3-flash')).toBe(
+      'glm-5.3-flash',
+    );
+  });
+
+  it('lets TRANSLATE_MODEL override the cheap tier', () => {
+    expect(resolveTranslateModel('glm-5.3', 'glm-5.3-flash')).toBe('glm-5.3');
   });
 });
