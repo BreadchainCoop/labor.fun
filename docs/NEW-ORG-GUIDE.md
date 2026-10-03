@@ -137,6 +137,74 @@ Everything an org owns lives in its profile — no framework edits:
   auto-loaded at startup. See [PLUGINS.md](PLUGINS.md) §0.
 - **Agent skills**: drop a `SKILL.md` folder in
   `profiles/acme/container-skills/`. It overlays the core `container/skills/`.
+- **First-party catalog plugins** (ship with the framework, **off for every org
+  until you ask for them**): opt in by listing their ids in `enabledPlugins`.
+  See [container/catalog-plugins/README.md](../container/catalog-plugins/README.md)
+  for the menu.
+
+> **One gotcha when you opt in.** `enabledPlugins` is absent by default, and
+> absent means _gating off_: every plugin in `profiles/acme/plugins/`
+> auto-registers and the catalog stays dark. The moment you add the key — even
+> as `[]` — gating turns **on**, and only listed ids register, **from either
+> source**. So if you already have profile-dir plugins, list them too:
+>
+> ```jsonc
+> { "enabledPlugins": ["my-existing-plugin", "pop"] }
+> ```
+
+### Example: on-chain tasks (POP) — entirely optional
+
+Nothing in labor.fun requires a blockchain. The `pop` catalog plugin mirrors a
+POP org's on-chain tasks into your KB so the reminder engine, PM orchestrator and
+digests operate on them; an org that does not use POP simply never enables it.
+
+```jsonc
+// profiles/acme/profile.config.json
+{
+  "enabledPlugins": ["pop"],
+  "pluginConfig": {
+    "pop": {
+      "orgs": [{ "name": "Acme", "chainId": 100, "orgId": "0x112d…" }]
+    }
+  }
+}
+```
+
+The mirror is read-only: it hardwires `POP_READONLY=1`, so it cannot sign or
+broadcast even if a key were present, and it needs no wallet and no credentials.
+Omit `pluginConfig.pop` (or leave `orgs` empty) and it stays dormant.
+
+You do not have to hand-write that config — there is a setup step for it:
+
+```bash
+npm run setup -- --step pop-org check    # what is my org id? does it exist yet?
+npm run setup -- --step pop-org link     # org already on chain → wire the profile
+npm run setup -- --step pop-org init     # write a starter deploy config to edit
+npm run setup -- --step pop-org deploy --confirm   # deploy a NEW org (gas!)
+```
+
+`check`, `init` and `link` are all safe — no key, no gas, no chain writes.
+`link` is the common path: it verifies the org exists, derives its id, and writes
+`pluginConfig.pop` for you. It also **preserves your existing `enabledPlugins`**
+and carries your profile-dir plugins across when it has to turn gating on.
+
+The org id is `keccak256` of the lowercased, hyphenated org name, so `check` and
+`link` can resolve it locally without a deploy having happened.
+
+> ### ⚠️ Read this before `deploy`
+>
+> `pop org deploy` broadcasts a ~15,000,000-gas transaction and **pins your org's
+> description and links to public IPFS, permanently**.
+>
+> **`--dry-run` does not avoid the pin.** In the CLI the pin runs *before* the
+> dry-run check, so a "rehearsal" still publishes. There is no private way to
+> practise this. That is why `check` validates locally rather than shelling out
+> to a dry run.
+>
+> `deploy` therefore refuses without an explicit `--confirm`, refuses if the org
+> already exists on chain (an org id is derived from the name, so a second deploy
+> under the same name would revert *after* spending gas), and refuses if this
+> profile is already linked. `POP_PRIVATE_KEY` comes from the env/vault only.
 
 ## 9. (Optional) Your own production infrastructure
 
