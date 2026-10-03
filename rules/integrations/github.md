@@ -109,6 +109,20 @@ their change; you're just the hands.
   credit and it's missing, ask them for their GitHub username.
 - GitHub renders these trailers as co-authors on the resulting commit/PR.
 
+## Approval classes
+
+Before a GitHub write, call `request_approval` with the class that matches the
+action — the org's config decides which classes actually wait for a human (see
+[Approvals](../approvals/README.md)):
+
+| action_class | Covers | Gated by default |
+|---|---|---|
+| `github_write` | Opening or merging a PR, pushing, deleting a branch | Yes |
+| `github_issue` | Opening, editing, labelling, closing or commenting on an issue | No |
+
+Use `github_issue` only for issue work. A PR, even a draft, is `github_write`.
+When one request mixes both, use `github_write`.
+
 ## Applying labels, tags & batch edits — act, verify, report
 
 A confirmation is **not** an action. The failure mode to avoid is confirming in
