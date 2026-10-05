@@ -53,15 +53,16 @@ Declared in config/rules, **never hardcoded** in `src/`:
   | action_class | Meaning |
   |---|---|
   | `outbound_external_message` | A message/DM/email leaving the org |
-  | `github_write` | Opening/merging PRs, pushing, deleting branches, approving PR reviews |
+  | `github_write` | Opening/merging PRs, pushing, deleting branches |
   | `linear_write` | Creating/closing Linear issues/projects |
   | `kb_delete` | Deleting a knowledge-base document |
   | `payout` | Moving money / on-chain value (off-chain flows only — see below) |
 
   `github_issue` (opening, editing, labelling, closing or commenting on
-  issues) is a known class but **not** in the default set: issue triage is
-  routine and easy to undo, unlike a merge or push. An org that wants issues
-  reviewed adds it to `gatedActionClasses`.
+  issues and PRs) and `github_review` (submitting a PR review, including an
+  approval) are known classes but **not** in the default set: triage and review
+  are routine and easy to undo, unlike a merge or push. An org that wants them
+  gated adds them to `gatedActionClasses`.
 
 - An org adds more classes (e.g. `kb_write`, for the [living-FAQ](#living-faq-capture)
   capture skill) by setting `gatedActionClasses` in `profile.config.json` or the

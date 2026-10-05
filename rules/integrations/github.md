@@ -117,14 +117,19 @@ action — the org's config decides which classes actually wait for a human (see
 
 | action_class | Covers | Gated by default |
 |---|---|---|
-| `github_write` | Opening or merging a PR, pushing, deleting a branch, approving a PR review | Yes |
-| `github_issue` | Opening, editing, labelling, closing or commenting on an issue; commenting on or requesting changes to a PR | No |
+| `github_write` | Opening or merging a PR, pushing, deleting a branch | Yes |
+| `github_review` | Submitting a PR review: comment, request changes or approve | No |
+| `github_issue` | Opening, editing, labelling, closing or commenting on an issue; commenting on a PR | No |
 
-Use `github_issue` only for issue work. Opening or merging a PR, even a draft, is
-`github_write`. Commenting on a PR, or a review that only comments or requests
-changes, is `github_issue`. An approving review is `github_write`: under branch
-protection it can satisfy a required review and unlock a merge. When one request
-mixes both, use `github_write`.
+Opening or merging a PR, even a draft, is `github_write`. A PR comment outside a
+review is `github_issue`; a review of any verdict is `github_review`. When one
+request mixes classes, use the most gated one.
+
+An approving review is ungated because the merge is the consequential step and
+stays gated. If a repo requires approvals before merging, the assistant's
+approval counts toward them, since its account has write access. To keep a
+human approval mandatory there, require a code-owner review and leave the
+assistant out of `CODEOWNERS`.
 
 ## Applying labels, tags & batch edits — act, verify, report
 
