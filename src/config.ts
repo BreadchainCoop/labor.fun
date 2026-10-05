@@ -397,7 +397,8 @@ export const MCP_SERVERS: McpServerConfig[] = (() => {
 // reach outside the org). Each token is a stable `action_class` an agent tags
 // its proposal with:
 //   outbound_external_message — a message/DM/email leaving the org
-//   github_write              — opening/merging PRs, pushing, deleting branches
+//   github_write              — opening/merging PRs, pushing, deleting branches,
+//                               approving PR reviews
 //   linear_write              — creating/closing Linear issues/projects
 //   kb_delete                 — deleting a knowledge-base document
 //   payout                    — moving money / on-chain value

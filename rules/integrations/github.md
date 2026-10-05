@@ -117,11 +117,14 @@ action — the org's config decides which classes actually wait for a human (see
 
 | action_class | Covers | Gated by default |
 |---|---|---|
-| `github_write` | Opening or merging a PR, pushing, deleting a branch | Yes |
-| `github_issue` | Opening, editing, labelling, closing or commenting on an issue | No |
+| `github_write` | Opening or merging a PR, pushing, deleting a branch, approving a PR review | Yes |
+| `github_issue` | Opening, editing, labelling, closing or commenting on an issue; commenting on or requesting changes to a PR | No |
 
-Use `github_issue` only for issue work. A PR, even a draft, is `github_write`.
-When one request mixes both, use `github_write`.
+Use `github_issue` only for issue work. Opening or merging a PR, even a draft, is
+`github_write`. Commenting on a PR, or a review that only comments or requests
+changes, is `github_issue`. An approving review is `github_write`: under branch
+protection it can satisfy a required review and unlock a merge. When one request
+mixes both, use `github_write`.
 
 ## Applying labels, tags & batch edits — act, verify, report
 
