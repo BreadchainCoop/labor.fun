@@ -109,6 +109,28 @@ their change; you're just the hands.
   credit and it's missing, ask them for their GitHub username.
 - GitHub renders these trailers as co-authors on the resulting commit/PR.
 
+## Approval classes
+
+Before a GitHub write, call `request_approval` with the class that matches the
+action — the org's config decides which classes actually wait for a human (see
+[Approvals](../approvals/README.md)):
+
+| action_class | Covers | Gated by default |
+|---|---|---|
+| `github_write` | Opening or merging a PR, pushing, deleting a branch | Yes |
+| `github_review` | Submitting a PR review: comment, request changes or approve | No |
+| `github_issue` | Opening, editing, labelling, closing or commenting on an issue; commenting on a PR | No |
+
+Opening or merging a PR, even a draft, is `github_write`. A PR comment outside a
+review is `github_issue`; a review of any verdict is `github_review`. When one
+request mixes classes, use the most gated one.
+
+An approving review is ungated because the merge is the consequential step and
+stays gated. If a repo requires approvals before merging, the assistant's
+approval counts toward them, since its account has write access. To keep a
+human approval mandatory there, require a code-owner review and leave the
+assistant out of `CODEOWNERS`.
+
 ## Applying labels, tags & batch edits — act, verify, report
 
 A confirmation is **not** an action. The failure mode to avoid is confirming in

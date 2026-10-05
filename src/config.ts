@@ -397,10 +397,13 @@ export const MCP_SERVERS: McpServerConfig[] = (() => {
 // reach outside the org). Each token is a stable `action_class` an agent tags
 // its proposal with:
 //   outbound_external_message — a message/DM/email leaving the org
-//   github_write              — opening/merging PRs, pushing, editing issues
+//   github_write              — opening/merging PRs, pushing, deleting branches
 //   linear_write              — creating/closing Linear issues/projects
 //   kb_delete                 — deleting a knowledge-base document
 //   payout                    — moving money / on-chain value
+// Not gated by default: github_issue (opening, editing, labelling, closing or
+// commenting on issues and PRs) and github_review (submitting a PR review,
+// including an approval), which are routine and easy to undo.
 export const DEFAULT_GATED_ACTION_CLASSES: string[] = [
   'outbound_external_message',
   'github_write',

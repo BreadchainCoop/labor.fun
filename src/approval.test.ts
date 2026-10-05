@@ -156,6 +156,11 @@ describe('action-class gating (config-driven)', () => {
     expect(DEFAULT_GATED_ACTION_CLASSES).toContain('payout');
   });
 
+  it('leaves issue and review classes ungated by default so triage and review need no sign-off', () => {
+    expect(DEFAULT_GATED_ACTION_CLASSES).not.toContain('github_issue');
+    expect(DEFAULT_GATED_ACTION_CLASSES).not.toContain('github_review');
+  });
+
   it('an undeclared class is NOT gated', () => {
     expect(isGatedActionClass(NOT_GATED)).toBe(false);
   });
