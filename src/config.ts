@@ -147,6 +147,14 @@ const envConfig = readEnvFile([
   'NOTION_ROOT_PAGE_IDS',
   'NOTION_DATABASE_IDS',
   'GOOGLE_DRIVE_FOLDER_IDS',
+  'GOOGLE_CALENDAR_IDS',
+  'GOOGLE_CALENDAR_WINDOW_PAST_DAYS',
+  'GOOGLE_CALENDAR_WINDOW_FUTURE_DAYS',
+  // Already consumed by container-runner.ts (it injects the id into agent
+  // containers for the `gws` Calendar tools); listed here so the Calendar
+  // connector can reuse the SAME id as its default scope instead of making
+  // an operator name their calendar twice.
+  'GOOGLE_WORKSPACE_CALENDAR_ID',
   // Generic remote-MCP bridge (docs/MCP-SERVERS.md). A JSON array of MCP
   // server configs, additive to the active profile's `mcpServers`. Lets a
   // hosted/multi-tenant install inject servers without editing profile files.
@@ -621,6 +629,19 @@ function splitIds(raw: string | undefined): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+/**
+ * Parse a non-negative day count, falling back to `fallback` when unset,
+ * blank, or not a finite number >= 0. Unlike the `parseInt(x) || default`
+ * idiom used elsewhere in this file, an explicit `0` is honored — "no history"
+ * / "no look-ahead" is a meaningful window bound, not a request for the
+ * default.
+ */
+function nonNegativeDays(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
 export const DISCORD_DM_ALLOWED_ROLE_IDS = splitIds(
   envVal('DISCORD_DM_ALLOWED_ROLE_IDS'),
 );
@@ -1059,6 +1080,30 @@ export const NOTION_DATABASE_IDS = splitIds(envVal('NOTION_DATABASE_IDS'));
 // GOOGLE_WORKSPACE_CREDENTIALS_FILE (the same OAuth creds the `gws` tool uses).
 export const GOOGLE_DRIVE_FOLDER_IDS = splitIds(
   envVal('GOOGLE_DRIVE_FOLDER_IDS'),
+);
+// Google Calendar scope: comma-separated calendar ids whose events are
+// mirrored (one KB doc per event occurrence). Empty → Calendar connector off.
+// Falls back to the single `GOOGLE_WORKSPACE_CALENDAR_ID` already used to
+// point the agent's `gws` Calendar tools at a calendar, so an install that has
+// named its calendar once doesn't have to name it again. Auth reuses the same
+// GOOGLE_WORKSPACE_CREDENTIALS_FILE the Drive connector uses, so the connector
+// still stays off unless those creds also resolve.
+export const GOOGLE_CALENDAR_IDS = splitIds(
+  envVal('GOOGLE_CALENDAR_IDS') || envVal('GOOGLE_WORKSPACE_CALENDAR_ID'),
+);
+// Mirrored time window, in days either side of each sync's start. A calendar
+// is unbounded in both directions, so unlike a Drive folder its scope needs an
+// explicit horizon; these defaults keep roughly one quarter of history (enough
+// for "what did we decide in that meeting") and two quarters of plans. Both
+// are clamped to >= 0; a non-numeric value falls back to the default rather
+// than collapsing the window to nothing.
+export const GOOGLE_CALENDAR_WINDOW_PAST_DAYS = nonNegativeDays(
+  envVal('GOOGLE_CALENDAR_WINDOW_PAST_DAYS'),
+  90,
+);
+export const GOOGLE_CALENDAR_WINDOW_FUTURE_DAYS = nonNegativeDays(
+  envVal('GOOGLE_CALENDAR_WINDOW_FUTURE_DAYS'),
+  180,
 );
 
 // --- Inference backend selection ---
