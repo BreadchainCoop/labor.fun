@@ -483,6 +483,63 @@ describe('credential-proxy usage metering', () => {
     );
   });
 
+  it('reads input and cache tokens from message_delta (Z.ai shape)', async () => {
+    upstreamHandler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(
+        `event: message_start\ndata: ${JSON.stringify({
+          type: 'message_start',
+          message: {
+            model: 'glm-5.3',
+            usage: { input_tokens: 0, output_tokens: 0 },
+          },
+        })}\n\n`,
+      );
+      res.write(
+        `event: message_delta\ndata: ${JSON.stringify({
+          type: 'message_delta',
+          usage: {
+            input_tokens: 5000,
+            output_tokens: 120,
+            cache_read_input_tokens: 40000,
+          },
+        })}\n\n`,
+      );
+      res.end();
+    };
+
+    const onUsage = vi.fn();
+    proxyPort = await startProxy(
+      { ANTHROPIC_API_KEY: 'sk-ant-real-key' },
+      { onUsage },
+    );
+
+    await makeRequest(
+      proxyPort,
+      {
+        method: 'POST',
+        path: '/v1/messages',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': 'placeholder-nanoclaw-worker-789',
+        },
+      },
+      '{}',
+    );
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'glm-5.3',
+        inputTokens: 5000,
+        outputTokens: 120,
+        cacheReadTokens: 40000,
+        cacheWriteTokens: 0,
+      }),
+    );
+  });
+
   it('never breaks the proxied stream when usage parsing throws', async () => {
     upstreamHandler = (_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
