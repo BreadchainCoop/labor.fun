@@ -155,7 +155,7 @@ function parseUsageFromBody(
           model?: string;
           usage?: NonStreamingUsageBody['usage'];
         };
-        usage?: { output_tokens?: number };
+        usage?: NonStreamingUsageBody['usage'];
       };
       try {
         evt = JSON.parse(jsonStr);
@@ -176,6 +176,18 @@ function parseUsageFromBody(
         // output_tokens in message_delta is cumulative for the message —
         // take the latest value rather than summing across delta events.
         outputTokens = evt.usage.output_tokens ?? outputTokens;
+        // Anthropic-compatible gateways (Z.ai) send input/cache counts here
+        // with zeros in message_start; Anthropic repeats the same cumulative
+        // values, so max() is correct for both.
+        inputTokens = Math.max(inputTokens, evt.usage.input_tokens ?? 0);
+        cacheReadTokens = Math.max(
+          cacheReadTokens,
+          evt.usage.cache_read_input_tokens ?? 0,
+        );
+        cacheWriteTokens = Math.max(
+          cacheWriteTokens,
+          evt.usage.cache_creation_input_tokens ?? 0,
+        );
       }
     }
     if (!sawUsage) return null;
