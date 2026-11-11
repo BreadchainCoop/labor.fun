@@ -49,6 +49,7 @@ vi.mock('./config.js', async () => {
     CREDENTIAL_PROXY_PORT: 3001,
     DATA_DIR: '/tmp/nanoclaw-test-data',
     ENABLED_SKILLS: [],
+    GATED_ACTION_CLASSES: ['github_write', 'kb_delete'],
     GITHUB_APP_MODE: false,
     GROUPS_DIR: '/tmp/nanoclaw-test-groups',
     IDLE_TIMEOUT: 1800000, // 30min
