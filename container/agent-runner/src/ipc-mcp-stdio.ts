@@ -11,6 +11,11 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
+import {
+  approvalRequestResult,
+  GATED_ACTION_CLASSES_ENV,
+  parseGatedActionClasses,
+} from './approval-gate.js';
 import { parseIntervalMs } from './schedule-interval.js';
 
 const IPC_DIR = '/workspace/ipc';
@@ -1193,7 +1198,7 @@ server.tool(
 
 server.tool(
   'request_approval',
-  `Propose a CONSEQUENTIAL action for human sign-off before you take it. Use this whenever you are about to do something gated: sending a message/DM/email OUTSIDE the org (action_class "outbound_external_message"), a GitHub code change — opening/merging a PR, pushing, or deleting a branch ("github_write") — a PR review of any verdict, including an approval ("github_review"), or a GitHub issue write — opening, editing, labelling, closing, or commenting on an issue or PR ("github_issue"), a Linear write ("linear_write"), DELETING a knowledge-base document ("kb_delete"), or moving money/on-chain value ("payout"). The orchestrator decides — based on org config — whether that class is gated: if it is, it records the request and posts an approve/reject prompt to the control channel, and you should STOP and wait; a human's reply resolves it and you'll be told the outcome. If the class is NOT gated, the orchestrator replies immediately telling you to proceed. Do NOT perform the action before you see approval.`,
+  `Propose a CONSEQUENTIAL action for human sign-off before you take it. Use this whenever you are about to do something gated: sending a message/DM/email OUTSIDE the org (action_class "outbound_external_message"), a GitHub code change — opening/merging a PR, pushing, or deleting a branch ("github_write") — a PR review of any verdict, including an approval ("github_review"), or a GitHub issue write — opening, editing, labelling, closing, or commenting on an issue or PR ("github_issue"), a Linear write ("linear_write"), DELETING a knowledge-base document ("kb_delete"), or moving money/on-chain value ("payout"). The orchestrator decides — based on org config — whether that class is gated: if it is, it records the request and posts an approve/reject prompt to the control channel, and you should STOP and wait; a human's reply resolves it and you'll be told the outcome. This tool's result tells you which: if it says no approval is needed, proceed right away; if it says the class is gated, do NOT perform the action before you see approval.`,
   {
     action_class: z
       .string()
@@ -1240,7 +1245,10 @@ server.tool(
       content: [
         {
           type: 'text' as const,
-          text: `Approval requested for a ${args.action_class} action. If this class is gated, wait for a human's approve/reject before proceeding; if not, the orchestrator will tell you to proceed.`,
+          text: approvalRequestResult(
+            args.action_class,
+            parseGatedActionClasses(process.env[GATED_ACTION_CLASSES_ENV]),
+          ),
         },
       ],
     };

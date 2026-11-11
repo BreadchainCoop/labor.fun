@@ -26,6 +26,7 @@ vi.mock('./config.js', async () => {
     CONTAINER_TIMEOUT: 1800000, // 30min
     CREDENTIAL_PROXY_PORT: 3001,
     DATA_DIR: '/tmp/nanoclaw-test-data',
+    GATED_ACTION_CLASSES: ['github_write', 'kb_delete'],
     GITHUB_APP_MODE: false,
     GROUPS_DIR: '/tmp/nanoclaw-test-groups',
     IDLE_TIMEOUT: 1800000, // 30min
@@ -518,6 +519,16 @@ describe('container-runner resource limit args', () => {
     expect(args).toContain('--pids-limit');
     expect(args).toContain('256');
   });
+
+  it('passes the gated action classes so request_approval can answer definitively', async () => {
+    await drive(runContainerAgent(testGroup, testInput, () => {}, vi.fn()));
+    const args = lastSpawnArgs();
+    const i = args.indexOf(
+      'NANOCLAW_GATED_ACTION_CLASSES=github_write,kb_delete',
+    );
+    expect(i).toBeGreaterThan(0);
+    expect(args[i - 1]).toBe('-e');
+  });
 });
 
 describe('container-runner Linear API key injection', () => {
@@ -983,6 +994,7 @@ describe('container-runner local-LLM backend wiring', () => {
       CONTAINER_TIMEOUT: 1800000,
       CREDENTIAL_PROXY_PORT: 3001,
       DATA_DIR: '/tmp/nanoclaw-test-data',
+      GATED_ACTION_CLASSES: ['github_write', 'kb_delete'],
       GITHUB_APP_MODE: false,
       GROUPS_DIR: '/tmp/nanoclaw-test-groups',
       IDLE_TIMEOUT: 1800000,
@@ -1170,6 +1182,7 @@ describe('resolveGithubToken — GitHub App token broker (GITHUB_APP_MODE)', () 
       CREDENTIAL_PROXY_PORT: 3001,
       DATA_DIR: '/tmp/nanoclaw-test-data',
       ENABLED_SKILLS: [],
+      GATED_ACTION_CLASSES: ['github_write', 'kb_delete'],
       GITHUB_APP_MODE: true,
       GROUPS_DIR: '/tmp/nanoclaw-test-groups',
       IDLE_TIMEOUT: 1800000,

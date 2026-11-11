@@ -14,6 +14,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+import { gatedActionClassesEnv } from '../approval-gate.js';
 import { log } from '../runtime.js';
 
 export interface OpenAITool {
@@ -68,6 +69,7 @@ export class McpBridge {
           NANOCLAW_CHAT_JID: init.chatJid,
           NANOCLAW_GROUP_FOLDER: init.groupFolder,
           NANOCLAW_IS_MAIN: init.isMain ? '1' : '0',
+          ...gatedActionClassesEnv(),
         },
       },
     ];
