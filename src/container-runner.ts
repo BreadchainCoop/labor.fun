@@ -20,6 +20,7 @@ import {
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   ENABLED_SKILLS,
+  GATED_ACTION_CLASSES,
   GITHUB_APP_MODE,
   GROUPS_DIR,
   IDLE_TIMEOUT,
@@ -1049,6 +1050,17 @@ function buildContainerArgs(
   if (KB_DASHBOARD_URL) {
     args.push('-e', `KB_DASHBOARD_URL=${KB_DASHBOARD_URL}`);
   }
+
+  // Gated action classes (non-secret, from profile/env config). The
+  // request_approval tool reads this so its result can tell the agent right
+  // away whether to proceed or wait. Without it the agent never learns an
+  // ungated class may proceed: the host's "proceed" goes out as a chat message
+  // the agent doesn't receive, so the agent waits for an approval that will
+  // never be requested.
+  args.push(
+    '-e',
+    `NANOCLAW_GATED_ACTION_CLASSES=${GATED_ACTION_CLASSES.join(',')}`,
+  );
 
   // GitHub MCP server: enable the env passthrough WITHOUT putting the
   // secret in argv. `-e NAME` (no value) makes the runtime read the value
